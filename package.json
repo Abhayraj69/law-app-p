@@ -9,8 +9,11 @@
   },
   "dependencies": {
     "@openrouter/sdk": "^1.2.84",
+    "bcryptjs": "^3.0.3",
     "cors": "^2.8.5",
     "express": "^4.19.2",
+    "jsonwebtoken": "^9.0.3",
+    "multer": "^2.3.0",
     "zod": "^3.22.4"
   }
 }

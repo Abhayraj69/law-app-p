@@ -7,6 +7,15 @@
 
 // ══════════════════════════════════════
 // DATA LAYER
+//
+// STATUS: STATIC MOCK DATA, NOT WIRED TO THE BACKEND.
+// CASES, HEARINGS, MESSAGES, ACTIVITIES, NOTIFICATIONS, SEARCH_DATA below,
+// and CONVERSATIONS further down, are hardcoded fixtures that drive the
+// Dashboard, Cases, and Communications pages. Unlike the Document Vault
+// page and the AI Copilot drawer (which call the real /api/v1/... backend
+// in server/), these pages never touch the server or the database — they
+// only ever render this in-file data. See README.md for the full
+// real-vs-mock breakdown before building on top of any of these pages.
 // ══════════════════════════════════════
 
 const CASES = [
@@ -335,6 +344,163 @@ const SEARCH_DATA = [
 
 const $ = (id) => document.getElementById(id);
 const $$ = (sel, ctx = document) => ctx.querySelectorAll(sel);
+
+// ══════════════════════════════════════
+// AUTHENTICATION
+// The app previously had no login of any kind — the backend defaulted
+// every request to a hardcoded user. It now issues a signed JWT on login
+// and requires it (as an Authorization: Bearer header) on every API call.
+// This module owns the token lifecycle on the client: storing it,
+// attaching it to requests, and locking the UI behind the login overlay
+// whenever there is no valid session.
+// ══════════════════════════════════════
+
+const Auth = {
+  TOKEN_KEY: 'slf_auth_token',
+  USER_KEY: 'slf_auth_user',
+
+  getToken() {
+    try { return localStorage.getItem(this.TOKEN_KEY); } catch { return null; }
+  },
+  getUser() {
+    try { return JSON.parse(localStorage.getItem(this.USER_KEY) || 'null'); } catch { return null; }
+  },
+  setSession(token, user) {
+    try {
+      localStorage.setItem(this.TOKEN_KEY, token);
+      localStorage.setItem(this.USER_KEY, JSON.stringify(user));
+    } catch { /* localStorage unavailable (private mode, etc.) — session just won't persist */ }
+  },
+  clearSession() {
+    try {
+      localStorage.removeItem(this.TOKEN_KEY);
+      localStorage.removeItem(this.USER_KEY);
+    } catch { /* ignore */ }
+  },
+  authHeader() {
+    const token = this.getToken();
+    return token ? { Authorization: `Bearer ${token}` } : {};
+  }
+};
+
+function showAuthOverlay(message) {
+  document.body.classList.add('auth-locked');
+  const errBox = $('authError');
+  if (errBox) {
+    if (message) {
+      errBox.textContent = message;
+      errBox.classList.remove('hidden');
+    } else {
+      errBox.classList.add('hidden');
+    }
+  }
+}
+
+function hideAuthOverlay() {
+  document.body.classList.remove('auth-locked');
+}
+
+// Reflect the signed-in user's identity into the sidebar/topbar chrome,
+// which previously always showed the hardcoded "Sarah Jennings" demo user
+// regardless of who was actually using the app.
+function applyUserToChrome(user) {
+  if (!user) return;
+  const roleLabels = {
+    CLIENT: 'Client', PARALEGAL: 'Paralegal', ASSOCIATE: 'Associate',
+    PARTNER: 'Partner, Esq.', SENIOR_PARTNER: 'Senior Partner, Esq.', ADMIN: 'Administrator'
+  };
+  const initials = user.initials || user.full_name.split(' ').map(p => p[0]).join('').slice(0, 2).toUpperCase();
+  const roleLabel = roleLabels[user.role] || user.role;
+
+  if ($('sidebarUserAvatar')) $('sidebarUserAvatar').textContent = initials;
+  if ($('sidebarUserName')) $('sidebarUserName').textContent = user.full_name;
+  if ($('sidebarUserRole')) $('sidebarUserRole').textContent = roleLabel;
+  if ($('topbarUserAvatar')) $('topbarUserAvatar').textContent = initials;
+  if ($('dropdownUserAvatar')) $('dropdownUserAvatar').textContent = initials;
+  if ($('dropdownUserName')) $('dropdownUserName').textContent = `${user.full_name}, Esq.`;
+  if ($('dropdownUserEmail')) $('dropdownUserEmail').textContent = user.email;
+}
+
+// Called once at startup: trust a stored token only after the server
+// confirms it's still valid (not expired, user still exists).
+async function initAuth() {
+  const token = Auth.getToken();
+  if (!token) {
+    showAuthOverlay();
+    return;
+  }
+  try {
+    const res = await fetch('/api/v1/auth/me', { headers: Auth.authHeader() });
+    const json = await res.json();
+    if (!res.ok || !json.success) throw new Error(json.error || 'Session expired.');
+    Auth.setSession(token, json.data);
+    applyUserToChrome(json.data);
+    hideAuthOverlay();
+  } catch (err) {
+    Auth.clearSession();
+    showAuthOverlay();
+  }
+}
+
+// Any 401 from the API (expired token, server restarted, etc.) drops the
+// user back to the login screen instead of leaving the app silently broken.
+function handleUnauthenticated() {
+  Auth.clearSession();
+  showAuthOverlay('Your session has expired. Please sign in again.');
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  initAuth();
+
+  const loginForm = $('loginForm');
+  if (loginForm) {
+    loginForm.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const email = $('loginEmail').value.trim();
+      const password = $('loginPassword').value;
+      const btn = $('loginSubmitBtn');
+      const errBox = $('authError');
+      errBox.classList.add('hidden');
+      btn.disabled = true;
+      btn.textContent = 'Signing in…';
+
+      try {
+        const res = await fetch('/api/v1/auth/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email, password })
+        });
+        const json = await res.json();
+        if (!res.ok || !json.success) throw new Error(json.error || 'Sign in failed.');
+
+        Auth.setSession(json.data.token, json.data.user);
+        applyUserToChrome(json.data.user);
+        hideAuthOverlay();
+        loginForm.reset();
+        if (typeof showToast === 'function') {
+          showToast(`Welcome back, ${json.data.user.full_name.split(' ')[0]}!`, 'info');
+        }
+      } catch (err) {
+        errBox.textContent = err.message;
+        errBox.classList.remove('hidden');
+      } finally {
+        btn.disabled = false;
+        btn.textContent = 'Sign In';
+      }
+    });
+  }
+
+  const signOutBtn = $('signOutBtn');
+  if (signOutBtn) {
+    signOutBtn.addEventListener('click', (e) => {
+      e.preventDefault();
+      Auth.clearSession();
+      const dd = $('profileDropdown');
+      if (dd) dd.classList.remove('open');
+      showAuthOverlay();
+    });
+  }
+});
 
 function formatCurrency(n) {
   if (n >= 1000) return '$' + (n / 1000).toFixed(0) + 'k';
@@ -1402,6 +1568,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
 /* ════════════════════════════════════════════
    CLIENT COMMUNICATIONS DATA LAYER
+   STATUS: static mock data, not wired to the backend (see the DATA LAYER
+   note near the top of this file and README.md for the full picture).
    ════════════════════════════════════════════ */
 
 const CONVERSATIONS = [
@@ -1740,9 +1908,14 @@ async function initDocumentVault() {
 }
 
 // API Wrapper
+// Every call attaches the signed-in user's bearer token (see the Auth
+// module above). A 401 means the token is missing/expired/invalid — the
+// user is dropped back to the login screen rather than the app silently
+// operating as no one / the wrong tenant.
 const ApiClient = {
   async get(url) {
-    const res = await fetch(url);
+    const res = await fetch(url, { headers: { ...Auth.authHeader() } });
+    if (res.status === 401) { handleUnauthenticated(); throw new Error('Not signed in.'); }
     const json = await res.json();
     if (!json.success) throw new Error(json.error || 'API Error');
     return json.data;
@@ -1750,9 +1923,10 @@ const ApiClient = {
   async post(url, data) {
     const res = await fetch(url, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...Auth.authHeader() },
       body: JSON.stringify(data)
     });
+    if (res.status === 401) { handleUnauthenticated(); throw new Error('Not signed in.'); }
     const json = await res.json();
     if (!json.success && res.status !== 413) throw new Error(json.error || 'API Error');
     return { ok: res.ok, status: res.status, json };
@@ -1760,15 +1934,31 @@ const ApiClient = {
   async patch(url, data) {
     const res = await fetch(url, {
       method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...Auth.authHeader() },
       body: JSON.stringify(data)
     });
+    if (res.status === 401) { handleUnauthenticated(); throw new Error('Not signed in.'); }
     const json = await res.json();
     if (!json.success) throw new Error(json.error || 'API Error');
     return json;
   },
+  // Multipart upload — deliberately does NOT set a Content-Type header so
+  // the browser can add the multipart boundary itself; only the auth
+  // header is attached.
+  async postForm(url, formData) {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { ...Auth.authHeader() },
+      body: formData
+    });
+    if (res.status === 401) { handleUnauthenticated(); throw new Error('Not signed in.'); }
+    const json = await res.json();
+    if (!json.success && res.status !== 413) throw new Error(json.error || 'API Error');
+    return { ok: res.ok, status: res.status, json };
+  },
   async del(url) {
-    const res = await fetch(url, { method: 'DELETE' });
+    const res = await fetch(url, { method: 'DELETE', headers: { ...Auth.authHeader() } });
+    if (res.status === 401) { handleUnauthenticated(); throw new Error('Not signed in.'); }
     const json = await res.json();
     if (!json.success) throw new Error(json.error || 'API Error');
     return json;
@@ -1878,7 +2068,8 @@ async function loadVaultFiles() {
     if (VaultState.selectedFolderId) params.append('folder_id', VaultState.selectedFolderId);
     if (VaultState.searchQuery) params.append('q', VaultState.searchQuery);
     
-    const res = await fetch(`/api/v1/vault/files?${params}`);
+    const res = await fetch(`/api/v1/vault/files?${params}`, { headers: { ...Auth.authHeader() } });
+    if (res.status === 401) { handleUnauthenticated(); return; }
     const json = await res.json();
     if (json.success) {
       VaultState.docs = json.data;
@@ -2104,8 +2295,38 @@ function openContextMenu(e, docId) {
   $('ctxFlagLabel').textContent = doc.is_flagged ? 'Unflag File' : 'Flag for Review';
 }
 
+// Downloads require the Authorization header, which a plain navigation or
+// window.open() cannot attach — the file is fetched as a blob (with auth)
+// and then handed to the browser's normal save flow via a temporary link.
+async function downloadDocument(docId) {
+  try {
+    const res = await fetch(`/api/v1/files/${docId}/download`, { headers: { ...Auth.authHeader() } });
+    if (res.status === 401) { handleUnauthenticated(); return; }
+    if (!res.ok) {
+      const json = await res.json().catch(() => ({}));
+      showToast(json.error || 'Download failed.', 'error');
+      return;
+    }
+    const blob = await res.blob();
+    const disposition = res.headers.get('Content-Disposition') || '';
+    const match = /filename="?([^"]+)"?/.exec(disposition);
+    const filename = match ? decodeURIComponent(match[1]) : 'download';
+
+    const objectUrl = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = objectUrl;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(objectUrl);
+  } catch (e) {
+    showToast('Download failed.', 'error');
+  }
+}
+
 $('ctxPreview').addEventListener('click', () => { $('vaultContextMenu').classList.add('hidden'); handlePreview(currentCtxDocId); });
-$('ctxDownload').addEventListener('click', () => { $('vaultContextMenu').classList.add('hidden'); window.open(`/api/v1/files/${currentCtxDocId}/download`, '_blank'); });
+$('ctxDownload').addEventListener('click', () => { $('vaultContextMenu').classList.add('hidden'); downloadDocument(currentCtxDocId); });
 $('ctxShare').addEventListener('click', () => { $('vaultContextMenu').classList.add('hidden'); openShareDrawer(currentCtxDocId); });
 $('ctxFlag').addEventListener('click', async () => {
   $('vaultContextMenu').classList.add('hidden');
@@ -2186,9 +2407,10 @@ $('generateShareBtn').addEventListener('click', async () => {
   try {
     const res = await fetch(`/api/v1/files/${shareDocId}/share`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...Auth.authHeader() },
       body: JSON.stringify({ recipient_email: email, permission: document.querySelector('.perm-btn.active').dataset.perm })
     });
+    if (res.status === 401) { handleUnauthenticated(); return; }
     const json = await res.json();
     if(json.success) {
       $('shareLinkBox').classList.remove('hidden');
@@ -2207,7 +2429,8 @@ $('copyLinkBtn').addEventListener('click', () => {
 // Preview Modal
 async function handlePreview(docId) {
   try {
-    const res = await fetch(`/api/v1/files/${docId}/preview`);
+    const res = await fetch(`/api/v1/files/${docId}/preview`, { headers: { ...Auth.authHeader() } });
+    if (res.status === 401) { handleUnauthenticated(); return; }
     const json = await res.json();
     if (json.success) {
       const data = json.data;
@@ -2302,32 +2525,37 @@ $('uploadSubmitBtn').addEventListener('click', async () => {
   for(let i=0; i<filesToUpload.length; i++) {
     const f = filesToUpload[i];
     if(f.status === 'success') continue;
-    
+
     f.status = 'uploading';
     f.progress = 30;
     renderUploadList();
-    
+
     try {
-      const res = await ApiClient.post('/api/v1/vault/upload', {
-        file_name: f.file.name,
-        file_size_bytes: f.file.size,
-        file_type: f.file.type || 'application/octet-stream',
-        folder_id: VaultState.selectedFolderId,
-        tags: []
-      });
+      // Real multipart upload — the actual file bytes are sent (and
+      // validated + signature-checked + written to disk server-side), not
+      // just its name/size/type as before.
+      const formData = new FormData();
+      formData.append('file', f.file);
+      if (VaultState.selectedFolderId) formData.append('folder_id', VaultState.selectedFolderId);
+      formData.append('tags', JSON.stringify([]));
+
+      const res = await ApiClient.postForm('/api/v1/vault/upload', formData);
       if (res.ok) {
         f.status = 'success';
         f.progress = 100;
       } else if (res.status === 413) {
         f.status = 'error';
         showToast(`Quota exceeded for ${f.file.name}`, 'error');
+      } else {
+        f.status = 'error';
+        showToast(res.json?.error || `Upload failed for ${f.file.name}`, 'error');
       }
     } catch(e) {
       f.status = 'error';
     }
     renderUploadList();
   }
-  
+
   showToast('Uploads completed', 'info');
   loadVaultStats();
   loadVaultFiles();
@@ -2858,9 +3086,10 @@ async function handleApprovalConfirm() {
 
     const res = await fetch(endpoint, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...Auth.authHeader() },
       body: JSON.stringify(body)
     });
+    if (res.status === 401) { handleUnauthenticated(); return; }
     const json = await res.json();
 
     if (json.success) {
@@ -3006,7 +3235,7 @@ async function handleManageFilesSubmit() {
   try {
     const res = await fetch('/api/v1/copilot/manage-files', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...Auth.authHeader() },
       body: JSON.stringify({
         action: currentManageAction,
         target_id: targetId,
@@ -3016,6 +3245,7 @@ async function handleManageFilesSubmit() {
         executable_payload: payload
       })
     });
+    if (res.status === 401) { handleUnauthenticated(); return; }
     const json = await res.json();
 
     if (json.success && json.requires_approval) {
@@ -3068,7 +3298,7 @@ async function handleCasesSubmit() {
   try {
     const res = await fetch('/api/v1/copilot/cases', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...Auth.authHeader() },
       body: JSON.stringify({
         case_id: caseId,
         payload: payload,
@@ -3076,6 +3306,7 @@ async function handleCasesSubmit() {
         executable_payload: payload
       })
     });
+    if (res.status === 401) { handleUnauthenticated(); return; }
     const json = await res.json();
 
     if (json.success && json.requires_approval) {

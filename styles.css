@@ -4190,3 +4190,74 @@ svg { display: block; flex-shrink: 0; }
 .sort-icon { width:12px; height:12px; margin-left:4px; opacity:0.3; transition: all 0.2s; }
 .sortable.asc .sort-icon { opacity:1; transform: rotate(180deg); }
 .sortable.desc .sort-icon { opacity:1; transform: rotate(0deg); }
+
+/* ══════════════════════════════════════════
+   LOGIN / AUTH OVERLAY
+   The app shell (sidebar + main-wrapper) is hidden via body.auth-locked
+   until a valid session token is confirmed with the server.
+══════════════════════════════════════════ */
+body.auth-locked .sidebar,
+body.auth-locked .main-wrapper {
+  display: none;
+}
+.auth-overlay {
+  display: none;
+  position: fixed;
+  inset: 0;
+  z-index: 2000;
+  align-items: center;
+  justify-content: center;
+  background:
+    radial-gradient(circle at 20% 20%, rgba(201,168,76,0.08), transparent 45%),
+    var(--bg-deep);
+  padding: 24px;
+}
+body.auth-locked .auth-overlay {
+  display: flex;
+}
+.auth-card {
+  width: 100%;
+  max-width: 380px;
+  background: var(--bg-surface);
+  border: 1px solid var(--slate-700);
+  border-radius: 16px;
+  padding: 32px 28px;
+  box-shadow: 0 24px 64px rgba(0,0,0,0.45);
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.auth-logo {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 4px;
+}
+.auth-logo .logo-icon { width: 32px; height: 32px; }
+.auth-logo .logo-name { font-size: 18px; font-weight: 700; color: var(--white); letter-spacing: 0.5px; }
+.auth-title {
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--white);
+  margin: 4px 0 0;
+}
+.auth-subtitle {
+  font-size: 12.5px;
+  color: var(--slate-400);
+  margin: 0 0 6px;
+  line-height: 1.5;
+}
+.auth-error {
+  font-size: 12.5px;
+  color: var(--danger, #E74C3C);
+  background: rgba(231,76,60,0.1);
+  border: 1px solid rgba(231,76,60,0.3);
+  border-radius: 8px;
+  padding: 8px 12px;
+}
+.auth-hint {
+  font-size: 11.5px;
+  color: var(--slate-500);
+  text-align: center;
+  margin: 4px 0 0;
+}

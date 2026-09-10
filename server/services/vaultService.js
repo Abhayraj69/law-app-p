@@ -1,4 +1,5 @@
 const { inMemoryDb } = require('../db');
+const FileService = require('./fileService');
 
 /**
  * Vault Service
@@ -176,40 +177,60 @@ class VaultService {
 
   /**
    * POST /api/v1/vault/upload
-   * Handle secure multi-file upload or pre-signed storage URL generation
+   * Handle a real multipart file upload: validated + scanned upstream
+   * (see server/middleware/securityScanner.js), the actual bytes are
+   * written to disk here rather than only recording metadata as if a
+   * file existed.
+   *
+   * @param {object} file - multer file object: { originalname, mimetype, size, buffer }
+   * @param {object} fields - the rest of the multipart form fields (folder_id, case_id, tags)
    */
-  static async initiateUpload(tenantId, userId, uploadPayload) {
-    const { file_name, file_size_bytes, file_type, folder_id, case_id, tags = [] } = uploadPayload;
-
-    if (!file_name || !file_size_bytes) {
-      throw new Error('Missing file_name or file_size_bytes.');
+  static async initiateUpload(tenantId, userId, file, fields = {}) {
+    if (!file || !file.buffer) {
+      throw new Error('No file content received.');
     }
 
-    const ext = file_name.split('.').pop().toLowerCase();
-    const docId = `doc-${Date.now()}`;
-    const storageKey = `/storage/vault/${tenantId}/${docId}_${file_name}`;
+    const { folder_id, case_id, tags } = fields;
+    // multipart form fields arrive as strings; tags may be sent as either
+    // a JSON-encoded array string or repeated form fields (already an array).
+    let parsedTags = [];
+    if (Array.isArray(tags)) {
+      parsedTags = tags;
+    } else if (typeof tags === 'string' && tags.trim()) {
+      try { parsedTags = JSON.parse(tags); } catch { parsedTags = [tags]; }
+    }
+
+    const fileName = file.originalname;
+    const ext = (fileName.split('.').pop() || '').toLowerCase();
+    const docId = `doc-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+
+    const { storage_path_url, sha256 } = await FileService.saveUploadedFile(tenantId, docId, fileName, file.buffer);
+
+    const author = inMemoryDb.users.find(u => u.id === userId);
 
     const newDoc = {
       id: docId,
       firm_id: tenantId,
-      file_name,
-      original_name: file_name,
-      file_type: file_type || 'application/pdf',
+      file_name: fileName,
+      original_name: fileName,
+      file_type: file.mimetype || 'application/octet-stream',
       extension: ext,
-      file_size_bytes: parseInt(file_size_bytes, 10),
-      storage_path_url: storageKey,
+      file_size_bytes: file.size,
+      sha256,
+      storage_path_url,
       preview_path_url: `/api/v1/files/${docId}/preview`,
-      case_id: case_id || 'LC-2026-001',
-      folder_id: folder_id || 'fld-sub-1',
+      case_id: case_id || null,
+      folder_id: folder_id || null,
       author_id: userId,
-      author_name: 'Sarah Jennings',
-      author_initials: 'SJ',
-      case_name: 'Anderson v. Meridian Corp.',
+      author_name: author ? author.full_name : 'Unknown',
+      author_initials: author ? author.initials : '--',
+      case_name: null,
       category: 'Case Files',
       is_archived: false,
       is_flagged: false,
       is_deleted: false,
-      tags: tags.length ? tags : ['CONFIDENTIAL'],
+      is_real_upload: true, // distinguishes genuinely uploaded files from the seed/demo records in db.js
+      tags: parsedTags.length ? parsedTags : [],
       created_at: new Date().toISOString(),
       updated_at: new Date().toISOString()
     };
@@ -221,11 +242,7 @@ class VaultService {
       inMemoryDb.storage_quotas[tenantId].storage_used_bytes += newDoc.file_size_bytes;
     }
 
-    return {
-      document: newDoc,
-      upload_url: `https://s3.us-east-1.amazonaws.com/slf-vault-bucket${storageKey}?presigned=true&exp=3600`,
-      upload_method: 'PUT'
-    };
+    return { document: newDoc };
   }
 }
 

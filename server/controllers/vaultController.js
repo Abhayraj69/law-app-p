@@ -47,8 +47,11 @@ async function createFolder(req, res, next) {
 
 async function uploadFile(req, res, next) {
   try {
-    const result = await VaultService.initiateUpload(req.tenantId, req.user.id, req.body);
-    res.status(201).json({ success: true, data: result });
+    const result = await VaultService.initiateUpload(req.tenantId, req.user.id, req.file, req.body);
+    res.status(201).json({
+      success: true,
+      data: { ...result, upload_validation: req.uploadValidation || null }
+    });
   } catch (err) {
     next(err);
   }
@@ -70,7 +73,8 @@ async function downloadFile(req, res, next) {
     res.setHeader('Content-Type', download.headers['Content-Type']);
     res.setHeader('Content-Disposition', download.headers['Content-Disposition']);
     res.setHeader('Content-Length', download.headers['Content-Length']);
-    res.json({ success: true, message: 'File download stream initiated', document: download.document });
+    download.stream.on('error', next);
+    download.stream.pipe(res);
   } catch (err) {
     next(err);
   }

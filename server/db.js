@@ -1,10 +1,18 @@
 const path = require('path');
 const fs = require('fs');
+const bcrypt = require('bcryptjs');
 
 /**
  * Database Abstraction Layer
- * Supports PostgreSQL connection via 'pg' module if PGHOST or DATABASE_URL is configured,
- * otherwise provides high-performance in-memory dataset matching schema.sql.
+ *
+ * STATUS: the Postgres pool below is created if PGHOST/DATABASE_URL is set,
+ * but NOTHING in this codebase queries it yet — every controller/service
+ * reads and writes `inMemoryDb` directly. Setting those env vars today
+ * only opens an unused connection; it does not persist any data. Wiring
+ * real persistence means rewriting VaultService/FileService/
+ * IntegrationService to query `pool` against db/schema.sql (which already
+ * matches this shape) instead of the arrays below. Until that happens,
+ * every restart resets all data to the fixtures seeded here.
  */
 
 let pool = null;
@@ -30,6 +38,13 @@ if (process.env.PGHOST || process.env.DATABASE_URL) {
 const DEFAULT_FIRM_ID = 'f47ac10b-58cc-4372-a567-0e02b2c3d479';
 const DEFAULT_USER_ID = 'u101ac10b-58cc-4372-a567-0e02b2c3d479';
 
+// Demo login credentials for this in-memory dataset. Every seed user shares
+// this password ONLY because this is a local prototype with no real user
+// management yet. Override via DEMO_USER_PASSWORD for local testing; never
+// rely on this default outside a throwaway dev environment.
+const DEMO_USER_PASSWORD = process.env.DEMO_USER_PASSWORD || 'ChangeMe123!';
+const DEMO_PASSWORD_HASH = bcrypt.hashSync(DEMO_USER_PASSWORD, 10);
+
 const inMemoryDb = {
   firms: [
     { id: DEFAULT_FIRM_ID, name: 'Sterling Jennings & Partners LLP', domain: 'slf.law' }
@@ -41,7 +56,8 @@ const inMemoryDb = {
       email: 's.jennings@slf.law',
       full_name: 'Sarah Jennings',
       role: 'SENIOR_PARTNER',
-      initials: 'SJ'
+      initials: 'SJ',
+      password_hash: DEMO_PASSWORD_HASH
     },
     {
       id: 'u102ac10b-58cc-4372-a567-0e02b2c3d479',
@@ -49,7 +65,8 @@ const inMemoryDb = {
       email: 'm.ross@slf.law',
       full_name: 'Marcus Ross',
       role: 'ASSOCIATE',
-      initials: 'MR'
+      initials: 'MR',
+      password_hash: DEMO_PASSWORD_HASH
     },
     {
       id: 'u103ac10b-58cc-4372-a567-0e02b2c3d479',
@@ -57,7 +74,8 @@ const inMemoryDb = {
       email: 'p.nair@slf.law',
       full_name: 'Priya Nair',
       role: 'ASSOCIATE',
-      initials: 'PN'
+      initials: 'PN',
+      password_hash: DEMO_PASSWORD_HASH
     }
   ],
   storage_quotas: {
@@ -266,5 +284,6 @@ module.exports = {
   pool,
   DEFAULT_FIRM_ID,
   DEFAULT_USER_ID,
+  DEMO_USER_PASSWORD,
   inMemoryDb
 };

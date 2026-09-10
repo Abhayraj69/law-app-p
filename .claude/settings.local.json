@@ -12,7 +12,11 @@
       "PowerShell(Stop-Process *)",
       "PowerShell(\\(Get-Item \"C:\\\\Users\\\\abhay\\\\Desktop\\\\law\\\\index.html\"\\).Length; \\(Get-Item \"C:\\\\Users\\\\abhay\\\\Desktop\\\\law\\\\app.js\"\\).Length; \\(Get-Item \"C:\\\\Users\\\\abhay\\\\Desktop\\\\law\\\\styles.css\"\\).Length)",
       "PowerShell(Start-Sleep -Seconds 3; Invoke-RestMethod -Uri 'http://localhost:3000/api/v1/vault/stats' -Method Get | ConvertTo-Json -Depth 5)",
-      "Bash(grep -i \"^pg$\")"
+      "Bash(grep -i \"^pg$\")",
+      "Bash(npm audit *)",
+      "Bash(npm ls *)",
+      "Bash(node scratch_dedupe.js)",
+      "Bash(rm scratch_dedupe.js)"
     ]
   }
 }

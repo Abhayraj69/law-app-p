@@ -1,9 +1,14 @@
-const { DEFAULT_FIRM_ID, DEFAULT_USER_ID, inMemoryDb } = require('../db');
+const authService = require('../services/authService');
 
 /**
- * Multi-Tenancy & RBAC Middleware
- * Extracts headers (x-tenant-id, x-user-id, authorization) or assigns default active legal partner context.
- * Enforces firm-level tenant isolation and role restrictions.
+ * Authentication & RBAC Middleware
+ *
+ * SECURITY NOTE: this used to trust the client-supplied `x-tenant-id` /
+ * `x-user-id` headers, which let any caller impersonate any user or firm
+ * (including SENIOR_PARTNER/ADMIN) just by setting a header — a critical
+ * broken-access-control bug in an app that handles privileged legal
+ * documents. Identity is now derived ONLY from a signed JWT verified
+ * server-side; request headers are never trusted for identity or tenancy.
  */
 
 const ROLE_HIERARCHY = {
@@ -15,25 +20,23 @@ const ROLE_HIERARCHY = {
   ADMIN: 6
 };
 
+function extractBearerToken(req) {
+  const header = req.headers['authorization'] || '';
+  const match = /^Bearer\s+(.+)$/i.exec(header.trim());
+  return match ? match[1] : null;
+}
+
 function authMiddleware(req, res, next) {
-  // Tenant Isolation
-  const tenantId = req.headers['x-tenant-id'] || DEFAULT_FIRM_ID;
-  const userId = req.headers['x-user-id'] || DEFAULT_USER_ID;
+  try {
+    const token = extractBearerToken(req);
+    const user = authService.resolveUserFromToken(token);
 
-  // Resolve user
-  const user = inMemoryDb.users.find(u => u.id === userId) || {
-    id: userId,
-    firm_id: tenantId,
-    email: 's.jennings@slf.law',
-    full_name: 'Sarah Jennings',
-    role: 'SENIOR_PARTNER',
-    initials: 'SJ'
-  };
-
-  req.tenantId = tenantId;
-  req.user = user;
-
-  next();
+    req.user = user;
+    req.tenantId = user.firm_id;
+    next();
+  } catch (err) {
+    res.status(err.status || 401).json({ error: err.message, code: 'UNAUTHENTICATED' });
+  }
 }
 
 /**

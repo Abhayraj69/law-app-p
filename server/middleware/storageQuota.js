@@ -13,9 +13,12 @@ function enforceStorageQuota(req, res, next) {
     storage_used_bytes: 34359738368   // 32GB
   };
 
-  // Check content length header if present
-  const incomingContentLength = parseInt(req.headers['content-length'] || '0', 10);
-  const potentialNewTotal = quota.storage_used_bytes + incomingContentLength;
+  // Prefer the actual parsed upload size (set by multer on req.file) over
+  // the Content-Length header, which measures the whole multipart body
+  // (including form-field overhead and boundaries) rather than the file
+  // itself and is trivially spoofable/omittable by a raw client anyway.
+  const incomingSize = req.file ? req.file.size : parseInt(req.headers['content-length'] || '0', 10);
+  const potentialNewTotal = quota.storage_used_bytes + incomingSize;
 
   if (quota.storage_used_bytes >= quota.storage_limit_bytes) {
     return res.status(402).json({

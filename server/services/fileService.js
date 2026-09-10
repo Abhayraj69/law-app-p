@@ -1,10 +1,67 @@
 const crypto = require('crypto');
+const fs = require('fs');
+const path = require('path');
 const { inMemoryDb } = require('../db');
 
 /**
  * File Operations Service (Row Actions)
  * Handles previews, downloads, share links, metadata patch, and soft-delete/archive.
+ *
+ * Real files uploaded through the vault are written under STORAGE_ROOT,
+ * one subdirectory per tenant, keyed by document id. The seed/demo
+ * documents in server/db.js have no backing file on disk (they only ever
+ * existed as metadata for the mock UI) — downloading one of those returns
+ * a clear "not available" error rather than a broken stream.
  */
+
+const STORAGE_ROOT = path.join(__dirname, '..', '..', 'storage', 'uploads');
+
+function safeFileName(originalName) {
+  // Strip path separators and anything else that isn't a normal filename
+  // character, so a crafted "original" name can't escape STORAGE_ROOT or
+  // collide with OS-reserved names.
+  return String(originalName || 'file')
+    .replace(/[/\\]/g, '_')
+    .replace(/[^A-Za-z0-9._-]/g, '_')
+    .slice(-180); // keep it reasonable; the doc id prefix guarantees uniqueness
+}
+
+function tenantDir(tenantId) {
+  return path.join(STORAGE_ROOT, tenantId);
+}
+
+/**
+ * Persist an uploaded file buffer to disk for a given (already-created)
+ * document id. Returns the path stored on the document record.
+ */
+async function saveUploadedFile(tenantId, docId, originalName, buffer) {
+  const dir = tenantDir(tenantId);
+  await fs.promises.mkdir(dir, { recursive: true });
+
+  const storedName = `${docId}_${safeFileName(originalName)}`;
+  const absolutePath = path.join(dir, storedName);
+  await fs.promises.writeFile(absolutePath, buffer);
+
+  const sha256 = crypto.createHash('sha256').update(buffer).digest('hex');
+
+  return {
+    // Stored on the document record; resolved back to an absolute path by
+    // resolveStoragePath() below. Relative + tenant-scoped so it can't be
+    // used to reach outside STORAGE_ROOT.
+    storage_path_url: path.posix.join(tenantId, storedName),
+    sha256
+  };
+}
+
+function resolveStoragePath(relativeStoragePath) {
+  const resolved = path.join(STORAGE_ROOT, relativeStoragePath);
+  // Defense in depth: refuse to resolve outside STORAGE_ROOT even if a
+  // stored path were somehow malformed.
+  if (!resolved.startsWith(STORAGE_ROOT)) {
+    throw new Error('Invalid storage path.');
+  }
+  return resolved;
+}
 
 class FileService {
   /**
@@ -36,7 +93,9 @@ class FileService {
 
   /**
    * GET /api/v1/files/:id/download
-   * Generates secure download headers and stream metadata
+   * Streams the real file from disk if one was actually uploaded through
+   * this app; returns a clear error for the seed/demo documents that only
+   * ever existed as metadata.
    */
   static async getDownloadStream(tenantId, docId) {
     const doc = inMemoryDb.documents.find(d => d.id === docId && d.firm_id === tenantId && !d.is_deleted);
@@ -46,14 +105,32 @@ class FileService {
       throw err;
     }
 
+    if (!doc.is_real_upload) {
+      const err = new Error(
+        `'${doc.file_name}' is a seed/demo record with no real file content — ` +
+        `it was never actually uploaded. Upload a real file to download its content.`
+      );
+      err.status = 404;
+      err.code = 'NO_FILE_CONTENT';
+      throw err;
+    }
+
+    const absolutePath = resolveStoragePath(doc.storage_path_url);
+    if (!fs.existsSync(absolutePath)) {
+      const err = new Error(`Stored file for '${doc.file_name}' is missing on disk.`);
+      err.status = 404;
+      err.code = 'FILE_MISSING';
+      throw err;
+    }
+
     return {
       document: doc,
       headers: {
-        'Content-Type': doc.file_type,
+        'Content-Type': doc.file_type || 'application/octet-stream',
         'Content-Length': doc.file_size_bytes,
         'Content-Disposition': `attachment; filename="${encodeURIComponent(doc.original_name)}"`
       },
-      file_path: doc.storage_path_url
+      stream: fs.createReadStream(absolutePath)
     };
   }
 
@@ -144,3 +221,5 @@ class FileService {
 }
 
 module.exports = FileService;
+module.exports.saveUploadedFile = saveUploadedFile;
+module.exports.resolveStoragePath = resolveStoragePath;

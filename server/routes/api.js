@@ -1,10 +1,19 @@
 const express = require('express');
+const multer = require('multer');
 const router = express.Router();
 
 const { authMiddleware, requireRole } = require('../middleware/auth');
 const enforceStorageQuota = require('../middleware/storageQuota');
 const { validateAndScanUpload } = require('../middleware/securityScanner');
 const logAuditAction = require('../middleware/auditLogger');
+
+// Uploads are held in memory only long enough to validate + write them to
+// disk (see FileService.saveUploadedFile) — never written to a temp file
+// unvalidated. 50MB matches the limit advertised in the upload modal UI.
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 50 * 1024 * 1024 }
+});
 
 const vaultController = require('../controllers/vaultController');
 const copilotController = require('../controllers/copilotController');
@@ -31,6 +40,7 @@ router.post(
 
 router.post(
   '/vault/upload',
+  upload.single('file'),
   enforceStorageQuota,
   validateAndScanUpload,
   logAuditAction('UPLOAD'),
