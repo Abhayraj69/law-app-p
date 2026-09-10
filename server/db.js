@@ -17,9 +17,8 @@ const { pool } = require('./db/pool');
  * their data source.
  */
 
-// Stable seed identifiers, reused by the seed script and by tests.
+// Stable seed identifier, reused by the seed script and by tests.
 const DEFAULT_FIRM_ID = 'f47ac10b-58cc-4372-a567-0e02b2c3d479';
-const DEFAULT_USER_ID = 'u101ac10b-58cc-4372-a567-0e02b2c3d479';
 
 // ── Firms ────────────────────────────────────────────────────────────────
 async function getFirmById(firmId) {
@@ -343,7 +342,6 @@ async function listCaseDeadlines(firmId) {
 module.exports = {
   pool,
   DEFAULT_FIRM_ID,
-  DEFAULT_USER_ID,
   getFirmById,
   getUserByEmail,
   getUserById,

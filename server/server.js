@@ -1,37 +1,12 @@
+// Must come first: populates process.env from .env.local before any module
+// that reads configuration at import time (notably ./db/pool) is loaded.
+require('./env');
+
 const express = require('express');
 const path = require('path');
-const fs = require('fs');
 const cors = require('cors');
 const apiRoutes = require('./routes/api');
 const authRoutes = require('./routes/auth');
-
-// ── Environment Loading ───────────────────────────────────────────────────────
-// Reads .env.local (falling back to .env) and populates process.env for any key
-// not already set. This is how AI_PROVIDER_API_KEY and other secrets reach the
-// app. We do NOT generate, request, or validate key values here — the user
-// supplies them manually in .env.local.
-(function loadEnvFile() {
-  const candidates = [path.join(__dirname, '..', '.env.local'), path.join(__dirname, '..', '.env')];
-  const file = candidates.find(p => fs.existsSync(p));
-  if (!file) return;
-
-  const content = fs.readFileSync(file, 'utf8');
-  for (const rawLine of content.split('\n')) {
-    const line = rawLine.trim();
-    if (!line || line.startsWith('#')) continue;
-    const eq = line.indexOf('=');
-    if (eq === -1) continue;
-    const key = line.slice(0, eq).trim();
-    let val = line.slice(eq + 1).trim();
-    if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
-      val = val.slice(1, -1);
-    }
-    if (key && process.env[key] === undefined) {
-      process.env[key] = val;
-    }
-  }
-  console.log(`[ENV] Loaded environment from ${path.basename(file)}`);
-})();
 
 const { checkConnection } = require('./db/pool');
 const { runMigrations } = require('./db/migrate');

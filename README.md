@@ -81,6 +81,27 @@ Each account gets its **own** password, generated and printed once by
 shared demo credential. If you lose a printed password, re-run
 `npm run seed` with that user's env var set to a new value.
 
+### Getting a Postgres without Docker or admin rights
+
+If you can't run Docker and the official installer isn't an option, you can
+get a real Postgres server from npm — the `@embedded-postgres/windows-x64`
+package (also `linux-x64` / `darwin-arm64`) ships genuine Postgres binaries
+that need no installer, no Windows service, and no administrator rights:
+
+```bash
+mkdir pgsql-local && cd pgsql-local && npm init -y
+npm install @embedded-postgres/windows-x64@17.10.0-beta.17
+BIN=node_modules/@embedded-postgres/windows-x64/native/bin
+"$BIN/initdb" -D data -U postgres --auth=scram-sha-256 --pwfile=<(echo "yourpassword") -E UTF8
+"$BIN/pg_ctl" -D data -l logfile.txt -o "-p 5432 -c listen_addresses=127.0.0.1" start
+```
+
+Then create the two databases (`slf_vault` and `slf_vault_test`) and point
+`DATABASE_URL` at the first one. Note this package ships only the server
+binaries — `initdb`, `pg_ctl`, `postgres` — with no `psql`/`createdb`, so
+create databases through any Postgres client (the app's own `pg` dependency
+works fine).
+
 ### Running the test suite
 
 ```bash
@@ -89,7 +110,10 @@ TEST_DATABASE_URL=postgresql://user:pass@localhost:5432/slf_vault_test npm test
 
 The integration tests in `server/test/` need a real (throwaway) Postgres
 database to run against — without `TEST_DATABASE_URL` set, they report as
-skipped rather than failing.
+skipped rather than failing. They generate fresh ids per run and delete
+their own fixtures afterwards, so they're safe to run repeatedly against the
+same database. Point `TEST_DATABASE_URL` at a **separate** database from
+`DATABASE_URL`; the suite does not touch the app's own data.
 
 ## File uploads
 

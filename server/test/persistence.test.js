@@ -21,6 +21,7 @@ if (TEST_DB_URL) {
 }
 
 test('Postgres persistence', { skip: !TEST_DB_URL && 'set TEST_DATABASE_URL to run these integration tests against a real Postgres instance' }, async (t) => {
+  const crypto = require('node:crypto');
   const { Pool } = require('pg');
   const { pool } = require('../db/pool');
   const { runMigrations } = require('../db/migrate');
@@ -28,18 +29,20 @@ test('Postgres persistence', { skip: !TEST_DB_URL && 'set TEST_DATABASE_URL to r
 
   await runMigrations();
 
-  const TEST_FIRM_ID = '11111111-1111-1111-1111-111111111111';
-  const TEST_USER_ID = '22222222-2222-2222-2222-222222222222';
+  // Fresh ids per run so repeated runs (and parallel ones) never collide;
+  // everything is torn down at the end via the firm's ON DELETE CASCADE.
+  const TEST_FIRM_ID = crypto.randomUUID();
+  const TEST_USER_ID = crypto.randomUUID();
 
   await pool.query(
-    `INSERT INTO firms (id, name, domain) VALUES ($1, $2, $3) ON CONFLICT (id) DO NOTHING`,
-    [TEST_FIRM_ID, 'Persistence Test Firm', `persistence-test-${Date.now()}.example`]
+    `INSERT INTO firms (id, name, domain) VALUES ($1, $2, $3)`,
+    [TEST_FIRM_ID, 'Persistence Test Firm', `persistence-${TEST_FIRM_ID}.example`]
   );
   await db.ensureStorageQuota(TEST_FIRM_ID);
   await db.createUser({
     id: TEST_USER_ID,
     firmId: TEST_FIRM_ID,
-    email: `persistence-test-${Date.now()}@example.com`,
+    email: `persistence-${TEST_USER_ID}@example.com`,
     fullName: 'Test User',
     role: 'ASSOCIATE',
     initials: 'TU',
@@ -98,6 +101,10 @@ test('Postgres persistence', { skip: !TEST_DB_URL && 'set TEST_DATABASE_URL to r
 
       const folderRows = await freshPool.query('SELECT * FROM folders WHERE id = $1', [folder.id]);
       assert.equal(folderRows.rows.length, 1, 'folder must still exist after the pool was closed and reopened');
+
+      // Tear down this run's fixtures; every other table references the firm
+      // with ON DELETE CASCADE, so removing it removes the rest.
+      await freshPool.query('DELETE FROM firms WHERE id = $1', [TEST_FIRM_ID]);
     } finally {
       await freshPool.end();
     }

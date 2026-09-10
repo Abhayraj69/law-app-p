@@ -1,3 +1,5 @@
+require('../env');
+
 const bcrypt = require('bcryptjs');
 const crypto = require('crypto');
 const { pool } = require('./pool');
@@ -19,19 +21,32 @@ const { runMigrations } = require('./migrate');
 
 const DEFAULT_FIRM_ID = 'f47ac10b-58cc-4372-a567-0e02b2c3d479';
 
+// These ids are hardcoded so re-running the seed updates the same rows
+// instead of creating duplicates. They must be syntactically valid UUIDs —
+// users.id and folders.id are UUID columns, so an arbitrary label like
+// "fld-root-1" is rejected by Postgres outright.
 const SEED_USERS = [
-  { id: 'u101ac10b-58cc-4372-a567-0e02b2c3d479', email: 's.jennings@slf.law', fullName: 'Sarah Jennings', role: 'SENIOR_PARTNER', initials: 'SJ', envVar: 'SEED_JENNINGS_PASSWORD' },
-  { id: 'u102ac10b-58cc-4372-a567-0e02b2c3d479', email: 'm.ross@slf.law', fullName: 'Marcus Ross', role: 'ASSOCIATE', initials: 'MR', envVar: 'SEED_ROSS_PASSWORD' },
-  { id: 'u103ac10b-58cc-4372-a567-0e02b2c3d479', email: 'p.nair@slf.law', fullName: 'Priya Nair', role: 'ASSOCIATE', initials: 'PN', envVar: 'SEED_NAIR_PASSWORD' }
+  { id: 'a1101ac1-58cc-4372-a567-0e02b2c3d479', email: 's.jennings@slf.law', fullName: 'Sarah Jennings', role: 'SENIOR_PARTNER', initials: 'SJ', envVar: 'SEED_JENNINGS_PASSWORD' },
+  { id: 'a1102ac1-58cc-4372-a567-0e02b2c3d479', email: 'm.ross@slf.law', fullName: 'Marcus Ross', role: 'ASSOCIATE', initials: 'MR', envVar: 'SEED_ROSS_PASSWORD' },
+  { id: 'a1103ac1-58cc-4372-a567-0e02b2c3d479', email: 'p.nair@slf.law', fullName: 'Priya Nair', role: 'ASSOCIATE', initials: 'PN', envVar: 'SEED_NAIR_PASSWORD' }
 ];
 
+const FOLDER_IDS = {
+  caseFiles: 'fd000001-0000-4000-8000-000000000001',
+  templates: 'fd000002-0000-4000-8000-000000000002',
+  secureShared: 'fd000003-0000-4000-8000-000000000003',
+  archived: 'fd000004-0000-4000-8000-000000000004',
+  activeCases: 'fd000005-0000-4000-8000-000000000005',
+  closedCases: 'fd000006-0000-4000-8000-000000000006'
+};
+
 const SEED_FOLDERS = [
-  { id: 'fld-root-1', parentId: null, folderName: 'Case Files', category: 'Case Files' },
-  { id: 'fld-root-2', parentId: null, folderName: 'Practice Templates', category: 'Practice Templates' },
-  { id: 'fld-root-3', parentId: null, folderName: 'Secure Shared', category: 'Secure Shared' },
-  { id: 'fld-root-4', parentId: null, folderName: 'Archived', category: 'Archived' },
-  { id: 'fld-sub-1', parentId: 'fld-root-1', folderName: 'Active Cases', category: 'Case Files' },
-  { id: 'fld-sub-2', parentId: 'fld-root-1', folderName: 'Closed Cases', category: 'Case Files' }
+  { id: FOLDER_IDS.caseFiles, parentId: null, folderName: 'Case Files', category: 'Case Files' },
+  { id: FOLDER_IDS.templates, parentId: null, folderName: 'Practice Templates', category: 'Practice Templates' },
+  { id: FOLDER_IDS.secureShared, parentId: null, folderName: 'Secure Shared', category: 'Secure Shared' },
+  { id: FOLDER_IDS.archived, parentId: null, folderName: 'Archived', category: 'Archived' },
+  { id: FOLDER_IDS.activeCases, parentId: FOLDER_IDS.caseFiles, folderName: 'Active Cases', category: 'Case Files' },
+  { id: FOLDER_IDS.closedCases, parentId: FOLDER_IDS.caseFiles, folderName: 'Closed Cases', category: 'Case Files' }
 ];
 
 const SEED_CASES = [

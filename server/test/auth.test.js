@@ -15,6 +15,7 @@ if (TEST_DB_URL) {
 }
 
 test('auth against Postgres', { skip: !TEST_DB_URL && 'set TEST_DATABASE_URL to run these integration tests against a real Postgres instance' }, async (t) => {
+  const crypto = require('node:crypto');
   const bcrypt = require('bcryptjs');
   const { pool } = require('../db/pool');
   const { runMigrations } = require('../db/migrate');
@@ -23,14 +24,15 @@ test('auth against Postgres', { skip: !TEST_DB_URL && 'set TEST_DATABASE_URL to 
 
   await runMigrations();
 
-  const FIRM_ID = '33333333-3333-3333-3333-333333333333';
-  const USER_ID = '44444444-4444-4444-4444-444444444444';
-  const EMAIL = `auth-test-${Date.now()}@example.com`;
+  // Fresh ids per run so repeated runs never collide on the primary key.
+  const FIRM_ID = crypto.randomUUID();
+  const USER_ID = crypto.randomUUID();
+  const EMAIL = `auth-${USER_ID}@example.com`;
   const PASSWORD = 'correct-horse-battery-staple';
 
   await pool.query(
-    `INSERT INTO firms (id, name, domain) VALUES ($1, $2, $3) ON CONFLICT (id) DO NOTHING`,
-    [FIRM_ID, 'Auth Test Firm', `auth-test-${Date.now()}.example`]
+    `INSERT INTO firms (id, name, domain) VALUES ($1, $2, $3)`,
+    [FIRM_ID, 'Auth Test Firm', `auth-${FIRM_ID}.example`]
   );
   await db.createUser({
     id: USER_ID,
@@ -77,6 +79,9 @@ test('auth against Postgres', { skip: !TEST_DB_URL && 'set TEST_DATABASE_URL to 
       const { rows } = await freshPool.query('SELECT * FROM users WHERE id = $1', [USER_ID]);
       assert.equal(rows.length, 1);
       assert.ok(bcrypt.compareSync(PASSWORD, rows[0].password_hash));
+
+      // Tear down this run's fixtures (users cascade from the firm).
+      await freshPool.query('DELETE FROM firms WHERE id = $1', [FIRM_ID]);
     } finally {
       await freshPool.end();
     }
