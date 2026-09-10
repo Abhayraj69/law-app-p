@@ -1,0 +1,18 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell(node server/server.js)",
+      "PowerShell(Start-Process 'http://localhost:3000')",
+      "PowerShell(Invoke-RestMethod -Uri 'http://localhost:3000/api/v1/vault/stats' -Method Get | ConvertTo-Json -Depth 5)",
+      "PowerShell(Invoke-RestMethod -Uri 'http://localhost:3000/api/v1/vault/sidebar-widgets' -Method Get | ConvertTo-Json -Depth 5)",
+      "PowerShell(Invoke-RestMethod -Uri 'http://localhost:3000/api/v1/vault/files?tab_category=Case Files&page=1&limit=5' -Method Get | ConvertTo-Json -Depth 5)",
+      "PowerShell(Invoke-RestMethod -Uri 'http://localhost:3000/api/v1/vault/quick-access' -Method Get | ConvertTo-Json -Depth 5)",
+      "PowerShell(Invoke-RestMethod -Uri 'http://localhost:3000/api/v1/vault/deadlines' -Method Get | ConvertTo-Json -Depth 5)",
+      "PowerShell(\\(Get-Item \"C:\\\\Users\\\\abhay\\\\Desktop\\\\law\\\\styles.css\"\\).Length; \\(Get-Item \"C:\\\\Users\\\\abhay\\\\Desktop\\\\law\\\\index.html\"\\).Length; \\(Get-Item \"C:\\\\Users\\\\abhay\\\\Desktop\\\\law\\\\app.js\"\\).Length)",
+      "PowerShell(Stop-Process *)",
+      "PowerShell(\\(Get-Item \"C:\\\\Users\\\\abhay\\\\Desktop\\\\law\\\\index.html\"\\).Length; \\(Get-Item \"C:\\\\Users\\\\abhay\\\\Desktop\\\\law\\\\app.js\"\\).Length; \\(Get-Item \"C:\\\\Users\\\\abhay\\\\Desktop\\\\law\\\\styles.css\"\\).Length)",
+      "PowerShell(Start-Sleep -Seconds 3; Invoke-RestMethod -Uri 'http://localhost:3000/api/v1/vault/stats' -Method Get | ConvertTo-Json -Depth 5)",
+      "Bash(grep -i \"^pg$\")"
+    ]
+  }
+}

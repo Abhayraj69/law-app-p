@@ -1,0 +1,16 @@
+{
+  "name": "slf-document-vault",
+  "version": "1.0.0",
+  "description": "Enterprise Legal Practice Management Document Vault Systems & API",
+  "main": "server/server.js",
+  "scripts": {
+    "start": "node server/server.js",
+    "dev": "node server/server.js"
+  },
+  "dependencies": {
+    "@openrouter/sdk": "^1.2.84",
+    "cors": "^2.8.5",
+    "express": "^4.19.2",
+    "zod": "^3.22.4"
+  }
+}
