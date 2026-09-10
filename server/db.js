@@ -1,289 +1,372 @@
-const path = require('path');
-const fs = require('fs');
-const bcrypt = require('bcryptjs');
+const { pool } = require('./db/pool');
 
 /**
- * Database Abstraction Layer
+ * Database Access Layer
  *
- * STATUS: the Postgres pool below is created if PGHOST/DATABASE_URL is set,
- * but NOTHING in this codebase queries it yet — every controller/service
- * reads and writes `inMemoryDb` directly. Setting those env vars today
- * only opens an unused connection; it does not persist any data. Wiring
- * real persistence means rewriting VaultService/FileService/
- * IntegrationService to query `pool` against db/schema.sql (which already
- * matches this shape) instead of the arrays below. Until that happens,
- * every restart resets all data to the fixtures seeded here.
+ * Every function here issues a parameterized SQL query against Postgres
+ * (see db/schema.sql for the table definitions). This replaces the old
+ * `inMemoryDb` object that every service used to read/write directly —
+ * that object reset to its seed fixtures on every process restart, which
+ * meant nothing uploaded or edited through the app actually persisted.
+ *
+ * Callers (VaultService, FileService, AuthService, IntegrationService,
+ * and the storageQuota/auditLogger middleware) call these functions
+ * instead of touching a shared object; the shape of the data they get
+ * back (field names, nesting) is kept the same as the old inMemoryDb
+ * records so those callers didn't need to change their own logic, only
+ * their data source.
  */
 
-let pool = null;
-if (process.env.PGHOST || process.env.DATABASE_URL) {
-  try {
-    const { Pool } = require('pg');
-    pool = new Pool({
-      connectionString: process.env.DATABASE_URL,
-      host: process.env.PGHOST,
-      user: process.env.PGUSER,
-      password: process.env.PGPASSWORD,
-      database: process.env.PGDATABASE,
-      port: process.env.PGPORT || 5432,
-      ssl: process.env.PGSSL === 'true' ? { rejectUnauthorized: false } : false
-    });
-    console.log('[DB] PostgreSQL pool initialized');
-  } catch (err) {
-    console.warn('[DB] Failed to initialize PostgreSQL pool, using in-memory provider:', err.message);
-  }
-}
-
-// In-Memory Data Store (Used when PostgreSQL is offline or running standalone)
+// Stable seed identifiers, reused by the seed script and by tests.
 const DEFAULT_FIRM_ID = 'f47ac10b-58cc-4372-a567-0e02b2c3d479';
 const DEFAULT_USER_ID = 'u101ac10b-58cc-4372-a567-0e02b2c3d479';
 
-// Demo login credentials for this in-memory dataset. Every seed user shares
-// this password ONLY because this is a local prototype with no real user
-// management yet. Override via DEMO_USER_PASSWORD for local testing; never
-// rely on this default outside a throwaway dev environment.
-const DEMO_USER_PASSWORD = process.env.DEMO_USER_PASSWORD || 'ChangeMe123!';
-const DEMO_PASSWORD_HASH = bcrypt.hashSync(DEMO_USER_PASSWORD, 10);
+// ── Firms ────────────────────────────────────────────────────────────────
+async function getFirmById(firmId) {
+  const { rows } = await pool.query('SELECT * FROM firms WHERE id = $1', [firmId]);
+  return rows[0] || null;
+}
 
-const inMemoryDb = {
-  firms: [
-    { id: DEFAULT_FIRM_ID, name: 'Sterling Jennings & Partners LLP', domain: 'slf.law' }
-  ],
-  users: [
-    {
-      id: DEFAULT_USER_ID,
-      firm_id: DEFAULT_FIRM_ID,
-      email: 's.jennings@slf.law',
-      full_name: 'Sarah Jennings',
-      role: 'SENIOR_PARTNER',
-      initials: 'SJ',
-      password_hash: DEMO_PASSWORD_HASH
-    },
-    {
-      id: 'u102ac10b-58cc-4372-a567-0e02b2c3d479',
-      firm_id: DEFAULT_FIRM_ID,
-      email: 'm.ross@slf.law',
-      full_name: 'Marcus Ross',
-      role: 'ASSOCIATE',
-      initials: 'MR',
-      password_hash: DEMO_PASSWORD_HASH
-    },
-    {
-      id: 'u103ac10b-58cc-4372-a567-0e02b2c3d479',
-      firm_id: DEFAULT_FIRM_ID,
-      email: 'p.nair@slf.law',
-      full_name: 'Priya Nair',
-      role: 'ASSOCIATE',
-      initials: 'PN',
-      password_hash: DEMO_PASSWORD_HASH
+// ── Users ────────────────────────────────────────────────────────────────
+async function getUserByEmail(email) {
+  const { rows } = await pool.query(
+    'SELECT * FROM users WHERE LOWER(email) = LOWER($1)',
+    [email]
+  );
+  return rows[0] || null;
+}
+
+async function getUserById(userId) {
+  const { rows } = await pool.query('SELECT * FROM users WHERE id = $1', [userId]);
+  return rows[0] || null;
+}
+
+async function getUserByIdAndFirm(userId, firmId) {
+  const { rows } = await pool.query(
+    'SELECT * FROM users WHERE id = $1 AND firm_id = $2',
+    [userId, firmId]
+  );
+  return rows[0] || null;
+}
+
+async function listUsersByFirm(firmId) {
+  const { rows } = await pool.query('SELECT * FROM users WHERE firm_id = $1', [firmId]);
+  return rows;
+}
+
+async function createUser({ id, firmId, email, fullName, role, initials, passwordHash }) {
+  const { rows } = await pool.query(
+    `INSERT INTO users (id, firm_id, email, full_name, role, initials, password_hash)
+     VALUES (COALESCE($1, uuid_generate_v4()), $2, $3, $4, $5, $6, $7)
+     ON CONFLICT (email) DO UPDATE SET
+       full_name = EXCLUDED.full_name,
+       role = EXCLUDED.role,
+       initials = EXCLUDED.initials,
+       password_hash = EXCLUDED.password_hash,
+       updated_at = CURRENT_TIMESTAMP
+     RETURNING *`,
+    [id || null, firmId, email, fullName, role, initials, passwordHash]
+  );
+  return rows[0];
+}
+
+// ── Storage quotas ───────────────────────────────────────────────────────
+async function getStorageQuota(firmId) {
+  const { rows } = await pool.query('SELECT * FROM storage_quotas WHERE firm_id = $1', [firmId]);
+  if (rows[0]) return rows[0];
+  // No row yet for this firm — report the same defaults the old in-memory
+  // fallback used, without creating a row (ensureStorageQuota is explicit).
+  return { firm_id: firmId, storage_limit_bytes: 107374182400, storage_used_bytes: 34359738368 };
+}
+
+async function ensureStorageQuota(firmId, limitBytes = 107374182400) {
+  await pool.query(
+    `INSERT INTO storage_quotas (firm_id, storage_limit_bytes, storage_used_bytes)
+     VALUES ($1, $2, 0)
+     ON CONFLICT (firm_id) DO NOTHING`,
+    [firmId, limitBytes]
+  );
+}
+
+// ── Folders ──────────────────────────────────────────────────────────────
+async function listFolders(firmId) {
+  const { rows } = await pool.query('SELECT * FROM folders WHERE firm_id = $1', [firmId]);
+  return rows;
+}
+
+async function insertFolder({ firmId, parentId, folderName, category, createdBy }) {
+  const { rows } = await pool.query(
+    `INSERT INTO folders (firm_id, parent_id, folder_name, category, created_by)
+     VALUES ($1, $2, $3, $4, $5)
+     RETURNING *`,
+    [firmId, parentId, folderName, category, createdBy]
+  );
+  return rows[0];
+}
+
+async function getFolderById(firmId, folderId) {
+  const { rows } = await pool.query(
+    'SELECT * FROM folders WHERE firm_id = $1 AND id = $2',
+    [firmId, folderId]
+  );
+  return rows[0] || null;
+}
+
+async function updateFolder(firmId, folderId, updates) {
+  const setClauses = [];
+  const values = [];
+  let i = 1;
+
+  if (updates.folder_name !== undefined) {
+    setClauses.push(`folder_name = $${i}`);
+    values.push(updates.folder_name);
+    i += 1;
+  }
+  if (!setClauses.length) return getFolderById(firmId, folderId);
+
+  setClauses.push('updated_at = CURRENT_TIMESTAMP');
+  values.push(firmId, folderId);
+  await pool.query(
+    `UPDATE folders SET ${setClauses.join(', ')} WHERE firm_id = $${i} AND id = $${i + 1}`,
+    values
+  );
+  return getFolderById(firmId, folderId);
+}
+
+async function deleteFolder(firmId, folderId) {
+  await pool.query('DELETE FROM folders WHERE firm_id = $1 AND id = $2', [firmId, folderId]);
+}
+
+// ── Cases (only what's needed to satisfy the documents.case_id FK and
+//    display a case_name alongside a document; full case management is a
+//    separate piece of work) ────────────────────────────────────────────
+async function ensureCase(firmId, caseId, caseName, clientName) {
+  if (!caseId) return null;
+  const { rows } = await pool.query(
+    `INSERT INTO cases (id, firm_id, case_name, client_name)
+     VALUES ($1, $2, $3, $4)
+     ON CONFLICT (id) DO NOTHING
+     RETURNING *`,
+    [caseId, firmId, caseName || caseId, clientName || 'Unknown']
+  );
+  return rows[0] || null;
+}
+
+// ── Tags ─────────────────────────────────────────────────────────────────
+async function getOrCreateTagId(firmId, name) {
+  const { rows } = await pool.query(
+    `INSERT INTO tags (firm_id, name) VALUES ($1, $2)
+     ON CONFLICT (firm_id, name) DO UPDATE SET name = EXCLUDED.name
+     RETURNING id`,
+    [firmId, name]
+  );
+  return rows[0].id;
+}
+
+async function setDocumentTags(documentId, firmId, tagNames = []) {
+  await pool.query('DELETE FROM document_tags WHERE document_id = $1', [documentId]);
+  for (const name of tagNames) {
+    const tagId = await getOrCreateTagId(firmId, name);
+    await pool.query(
+      `INSERT INTO document_tags (document_id, tag_id) VALUES ($1, $2)
+       ON CONFLICT DO NOTHING`,
+      [documentId, tagId]
+    );
+  }
+}
+
+// ── Documents ────────────────────────────────────────────────────────────
+const DOCUMENT_SELECT = `
+  SELECT
+    d.*,
+    u.full_name AS author_name,
+    u.initials AS author_initials,
+    c.case_name,
+    fo.category AS category,
+    COALESCE(array_remove(array_agg(t.name), NULL), ARRAY[]::text[]) AS tags
+  FROM documents d
+  LEFT JOIN users u ON u.id = d.author_id
+  LEFT JOIN cases c ON c.id = d.case_id
+  LEFT JOIN folders fo ON fo.id = d.folder_id
+  LEFT JOIN document_tags dt ON dt.document_id = d.id
+  LEFT JOIN tags t ON t.id = dt.tag_id
+`;
+
+// pg returns BIGINT columns (file_size_bytes) as strings, since not every
+// such value fits safely in a JS number — these are always small enough in
+// practice, so normalize back to a number for callers/JSON responses.
+function normalizeDocumentRow(row) {
+  if (!row) return row;
+  return { ...row, file_size_bytes: Number(row.file_size_bytes) };
+}
+
+async function listActiveDocuments(firmId) {
+  const { rows } = await pool.query(
+    `${DOCUMENT_SELECT}
+     WHERE d.firm_id = $1 AND d.is_deleted = FALSE
+     GROUP BY d.id, u.full_name, u.initials, c.case_name, fo.category`,
+    [firmId]
+  );
+  return rows.map(normalizeDocumentRow);
+}
+
+async function getDocumentById(firmId, docId) {
+  const { rows } = await pool.query(
+    `${DOCUMENT_SELECT}
+     WHERE d.firm_id = $1 AND d.id = $2 AND d.is_deleted = FALSE
+     GROUP BY d.id, u.full_name, u.initials, c.case_name, fo.category`,
+    [firmId, docId]
+  );
+  return normalizeDocumentRow(rows[0]) || null;
+}
+
+async function insertDocument(doc) {
+  const { rows } = await pool.query(
+    `INSERT INTO documents (
+        id, firm_id, file_name, original_name, file_type, extension,
+        file_size_bytes, storage_path_url, preview_path_url, case_id,
+        folder_id, author_id, is_archived, is_flagged, is_deleted
+     ) VALUES (
+        COALESCE($1, uuid_generate_v4()), $2, $3, $4, $5, $6,
+        $7, $8, $9, $10,
+        $11, $12, $13, $14, $15
+     ) RETURNING *`,
+    [
+      doc.id || null, doc.firm_id, doc.file_name, doc.original_name, doc.file_type, doc.extension,
+      doc.file_size_bytes, doc.storage_path_url, doc.preview_path_url || null, doc.case_id || null,
+      doc.folder_id || null, doc.author_id || null, doc.is_archived || false, doc.is_flagged || false, doc.is_deleted || false
+    ]
+  );
+  const inserted = rows[0];
+  if (doc.tags && doc.tags.length) {
+    await setDocumentTags(inserted.id, doc.firm_id, doc.tags);
+  }
+  return getDocumentById(doc.firm_id, inserted.id);
+}
+
+async function updateDocument(firmId, docId, updates) {
+  const setClauses = [];
+  const values = [];
+  let i = 1;
+
+  // `category` is intentionally not settable directly — it's derived from
+  // the document's folder (see DOCUMENT_SELECT's join to `folders`), so
+  // moving a document via `folder_id` is what changes its category.
+  const fieldMap = {
+    file_name: 'file_name',
+    folder_id: 'folder_id',
+    is_flagged: 'is_flagged',
+    is_archived: 'is_archived'
+  };
+
+  for (const [key, column] of Object.entries(fieldMap)) {
+    if (updates[key] !== undefined) {
+      setClauses.push(`${column} = $${i}`);
+      values.push(updates[key]);
+      i += 1;
     }
-  ],
-  storage_quotas: {
-    [DEFAULT_FIRM_ID]: {
-      storage_limit_bytes: 107374182400, // 100 GB
-      storage_used_bytes: 34359738368,  // 32 GB
-    }
-  },
-  folders: [
-    { id: 'fld-root-1', firm_id: DEFAULT_FIRM_ID, parent_id: null, folder_name: 'Case Files', category: 'Case Files' },
-    { id: 'fld-root-2', firm_id: DEFAULT_FIRM_ID, parent_id: null, folder_name: 'Practice Templates', category: 'Practice Templates' },
-    { id: 'fld-root-3', firm_id: DEFAULT_FIRM_ID, parent_id: null, folder_name: 'Secure Shared', category: 'Secure Shared' },
-    { id: 'fld-root-4', firm_id: DEFAULT_FIRM_ID, parent_id: null, folder_name: 'Archived', category: 'Archived' },
-    { id: 'fld-sub-1', firm_id: DEFAULT_FIRM_ID, parent_id: 'fld-root-1', folder_name: 'Active Cases', category: 'Case Files' },
-    { id: 'fld-sub-2', firm_id: DEFAULT_FIRM_ID, parent_id: 'fld-root-1', folder_name: 'Closed Cases', category: 'Case Files' }
-  ],
-  tags: [
-    { id: 'tag-1', firm_id: DEFAULT_FIRM_ID, name: 'CONFIDENTIAL', color_code: '#E74C3C' },
-    { id: 'tag-2', firm_id: DEFAULT_FIRM_ID, name: 'COURT FILING', color_code: '#C9A84C' },
-    { id: 'tag-3', firm_id: DEFAULT_FIRM_ID, name: 'EVIDENCE', color_code: '#3B82F6' },
-    { id: 'tag-4', firm_id: DEFAULT_FIRM_ID, name: 'RETAINER', color_code: '#2DC8B0' },
-    { id: 'tag-5', firm_id: DEFAULT_FIRM_ID, name: 'DISCOVERY', color_code: '#9B59B6' }
-  ],
-  documents: [
-    {
-      id: 'doc-101',
-      firm_id: DEFAULT_FIRM_ID,
-      file_name: 'Anderson_Complaint_v1.pdf',
-      original_name: 'Anderson_Complaint_v1.pdf',
-      file_type: 'application/pdf',
-      extension: 'pdf',
-      file_size_bytes: 4718592, // 4.5 MB
-      storage_path_url: '/storage/docs/Anderson_Complaint_v1.pdf',
-      case_id: 'LC-2026-001',
-      folder_id: 'fld-sub-1',
-      author_id: DEFAULT_USER_ID,
-      author_name: 'Sarah Jennings',
-      author_initials: 'SJ',
-      case_name: 'Anderson v. Meridian Corp.',
-      category: 'Case Files',
-      is_archived: false,
-      is_flagged: true,
-      is_deleted: false,
-      tags: ['CONFIDENTIAL', 'COURT FILING'],
-      updated_at: new Date('2026-07-22T14:30:00Z').toISOString(),
-      created_at: new Date('2026-07-20T10:15:00Z').toISOString()
-    },
-    {
-      id: 'doc-102',
-      firm_id: DEFAULT_FIRM_ID,
-      file_name: 'Davies_Defense_Affidavit.docx',
-      original_name: 'Davies_Defense_Affidavit.docx',
-      file_type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-      extension: 'docx',
-      file_size_bytes: 2936012, // 2.8 MB
-      storage_path_url: '/storage/docs/Davies_Defense_Affidavit.docx',
-      case_id: 'LC-2026-002',
-      folder_id: 'fld-sub-1',
-      author_id: 'u102ac10b-58cc-4372-a567-0e02b2c3d479',
-      author_name: 'Marcus Ross',
-      author_initials: 'MR',
-      case_name: 'Davies v. State',
-      category: 'Case Files',
-      is_archived: false,
-      is_flagged: false,
-      is_deleted: false,
-      tags: ['EVIDENCE'],
-      updated_at: new Date('2026-07-21T09:12:00Z').toISOString(),
-      created_at: new Date('2026-07-19T11:00:00Z').toISOString()
-    },
-    {
-      id: 'doc-103',
-      firm_id: DEFAULT_FIRM_ID,
-      file_name: 'Garrison_Trust_Agreement.pdf',
-      original_name: 'Garrison_Trust_Agreement.pdf',
-      file_type: 'application/pdf',
-      extension: 'pdf',
-      file_size_bytes: 12582912, // 12 MB
-      storage_path_url: '/storage/docs/Garrison_Trust_Agreement.pdf',
-      case_id: 'LC-2026-004',
-      folder_id: 'fld-sub-1',
-      author_id: 'u103ac10b-58cc-4372-a567-0e02b2c3d479',
-      author_name: 'Priya Nair',
-      author_initials: 'PN',
-      case_name: 'Garrison Estate Management',
-      category: 'Case Files',
-      is_archived: false,
-      is_flagged: true,
-      is_deleted: false,
-      tags: ['CONFIDENTIAL', 'RETAINER'],
-      updated_at: new Date('2026-07-23T11:45:00Z').toISOString(),
-      created_at: new Date('2026-07-23T08:30:00Z').toISOString()
-    },
-    {
-      id: 'doc-104',
-      firm_id: DEFAULT_FIRM_ID,
-      file_name: 'Standard_Retainer_Agreement_2026.docx',
-      original_name: 'Standard_Retainer_Agreement_2026.docx',
-      file_type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-      extension: 'docx',
-      file_size_bytes: 1572864, // 1.5 MB
-      storage_path_url: '/storage/docs/Standard_Retainer_Agreement_2026.docx',
-      case_id: null,
-      folder_id: 'fld-root-2',
-      author_id: DEFAULT_USER_ID,
-      author_name: 'Sarah Jennings',
-      author_initials: 'SJ',
-      case_name: 'Firm Practice Template',
-      category: 'Practice Templates',
-      is_archived: false,
-      is_flagged: false,
-      is_deleted: false,
-      tags: ['RETAINER'],
-      updated_at: new Date('2026-06-15T16:00:00Z').toISOString(),
-      created_at: new Date('2026-01-10T09:00:00Z').toISOString()
-    },
-    {
-      id: 'doc-105',
-      firm_id: DEFAULT_FIRM_ID,
-      file_name: 'Blake_IP_Prior_Art_Audit.xlsx',
-      original_name: 'Blake_IP_Prior_Art_Audit.xlsx',
-      file_type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-      extension: 'xlsx',
-      file_size_bytes: 8388608, // 8 MB
-      storage_path_url: '/storage/docs/Blake_IP_Prior_Art_Audit.xlsx',
-      case_id: 'LC-2026-005',
-      folder_id: 'fld-sub-1',
-      author_id: 'u102ac10b-58cc-4372-a567-0e02b2c3d479',
-      author_name: 'Marcus Ross',
-      author_initials: 'MR',
-      case_name: 'Blake IP Dispute',
-      category: 'Case Files',
-      is_archived: false,
-      is_flagged: false,
-      is_deleted: false,
-      tags: ['DISCOVERY'],
-      updated_at: new Date('2026-07-22T17:20:00Z').toISOString(),
-      created_at: new Date('2026-07-21T13:00:00Z').toISOString()
-    }
-  ],
-  shares: [],
-  audit_logs: [],
-  client_messages: [
-    {
-      id: 'msg-1',
-      client_name: 'James Anderson',
-      client_avatar: 'JA',
-      subject: 'Updated Financial Audit Evidence Attachment',
-      preview: 'Attached is the revised corporate audit statement requested for the preliminary hearing. Please review ASAP.',
-      timestamp_text: '10:42 AM Today',
-      is_unread: true,
-      is_urgent: true,
-      attachment_name: 'Meridian_Financial_Audit_2025.pdf',
-      attachment_size: '4.2 MB',
-      attachment_doc_id: 'doc-101'
-    },
-    {
-      id: 'msg-2',
-      client_name: 'Chloe Garrison',
-      client_avatar: 'CG',
-      subject: 'Garrison Estate Deed Documentation',
-      preview: 'Found the original property deeds from 1994. I have scanned and uploaded them into the vault.',
-      timestamp_text: 'Yesterday, 4:15 PM',
-      is_unread: true,
-      is_urgent: false,
-      attachment_name: 'Property_Deeds_1994_Scanned.pdf',
-      attachment_size: '12.8 MB',
-      attachment_doc_id: 'doc-103'
-    }
-  ],
-  case_deadlines: [
-    {
-      id: 'dl-1',
-      case_id: 'LC-2026-001',
-      title: 'Anderson v. Meridian Motion Hearing',
-      location: 'Courtroom 4B, Superior District Court',
-      deadline_date: '2026-07-31',
-      time_text: '09:30 AM',
-      badge_type: 'Hearing',
-      badge_color: '#C9A84C'
-    },
-    {
-      id: 'dl-2',
-      case_id: 'LC-2026-002',
-      title: 'Davies Pre-trial Evidence Filing Deadline',
-      location: 'County Clerk Portal',
-      deadline_date: '2026-07-25',
-      time_text: '05:00 PM',
-      badge_type: 'Filing',
-      badge_color: '#E74C3C'
-    },
-    {
-      id: 'dl-3',
-      case_id: 'LC-2026-005',
-      title: 'Blake IP Discovery Conference',
-      location: 'Virtual Conference Rm 2',
-      deadline_date: '2026-07-28',
-      time_text: '02:00 PM',
-      badge_type: 'Discovery',
-      badge_color: '#3B82F6'
-    }
-  ]
-};
+  }
+
+  if (setClauses.length) {
+    setClauses.push(`updated_at = CURRENT_TIMESTAMP`);
+    values.push(firmId, docId);
+    await pool.query(
+      `UPDATE documents SET ${setClauses.join(', ')} WHERE firm_id = $${i} AND id = $${i + 1}`,
+      values
+    );
+  }
+
+  if (updates.tags && Array.isArray(updates.tags)) {
+    await setDocumentTags(docId, firmId, updates.tags);
+  }
+
+  return getDocumentById(firmId, docId);
+}
+
+async function softDeleteDocument(firmId, docId) {
+  await pool.query(
+    `UPDATE documents SET is_deleted = TRUE, deleted_at = CURRENT_TIMESTAMP
+     WHERE firm_id = $1 AND id = $2`,
+    [firmId, docId]
+  );
+}
+
+// ── Document shares ──────────────────────────────────────────────────────
+async function insertShare({ documentId, sharedBy, recipientEmail, shareToken, permission, expiresAt }) {
+  const { rows } = await pool.query(
+    `INSERT INTO document_shares (document_id, shared_by, recipient_email, share_token, permission, expires_at)
+     VALUES ($1, $2, $3, $4, $5, $6)
+     RETURNING *`,
+    [documentId, sharedBy, recipientEmail, shareToken, permission, expiresAt]
+  );
+  return rows[0];
+}
+
+// ── Audit logs ───────────────────────────────────────────────────────────
+async function insertAuditLog({ firmId, userId, documentId, folderId, action, ipAddress, userAgent, details }) {
+  await pool.query(
+    `INSERT INTO audit_logs (firm_id, user_id, document_id, folder_id, action, ip_address, user_agent, details)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+    [firmId, userId || null, documentId || null, folderId || null, action, ipAddress || null, userAgent || null, details || {}]
+  );
+}
+
+// ── Client messages / case deadlines (widget data) ──────────────────────
+async function listClientMessages(firmId) {
+  const { rows } = await pool.query(
+    'SELECT * FROM client_messages WHERE firm_id = $1 ORDER BY created_at DESC',
+    [firmId]
+  );
+  return rows;
+}
+
+async function insertClientMessage({ firmId, clientName, clientAvatar, subject, preview, timestampText, isUnread, isUrgent, attachmentName, attachmentSize, attachmentDocId }) {
+  const { rows } = await pool.query(
+    `INSERT INTO client_messages (
+        firm_id, client_name, client_avatar, subject, preview, timestamp_text,
+        is_unread, is_urgent, attachment_name, attachment_size, attachment_doc_id
+     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+     RETURNING *`,
+    [firmId, clientName, clientAvatar, subject, preview, timestampText, isUnread, isUrgent, attachmentName || null, attachmentSize || null, attachmentDocId || null]
+  );
+  return rows[0];
+}
+
+async function listCaseDeadlines(firmId) {
+  const { rows } = await pool.query(
+    'SELECT * FROM case_deadlines WHERE firm_id = $1 ORDER BY deadline_date ASC',
+    [firmId]
+  );
+  return rows;
+}
 
 module.exports = {
   pool,
   DEFAULT_FIRM_ID,
   DEFAULT_USER_ID,
-  DEMO_USER_PASSWORD,
-  inMemoryDb
+  getFirmById,
+  getUserByEmail,
+  getUserById,
+  getUserByIdAndFirm,
+  listUsersByFirm,
+  createUser,
+  getStorageQuota,
+  ensureStorageQuota,
+  listFolders,
+  insertFolder,
+  getFolderById,
+  updateFolder,
+  deleteFolder,
+  ensureCase,
+  setDocumentTags,
+  listActiveDocuments,
+  getDocumentById,
+  insertDocument,
+  updateDocument,
+  softDeleteDocument,
+  insertShare,
+  insertAuditLog,
+  listClientMessages,
+  insertClientMessage,
+  listCaseDeadlines
 };

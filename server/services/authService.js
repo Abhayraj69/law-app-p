@@ -1,6 +1,6 @@
 const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
-const { inMemoryDb } = require('../db');
+const db = require('../db');
 
 /**
  * Authentication Service
@@ -10,12 +10,17 @@ const { inMemoryDb } = require('../db');
  * user or firm — those headers are no longer trusted anywhere in the app.
  *
  * The token is the ONLY source of identity. It carries just the user id;
- * the live user record (role, firm, name) is re-read from the store on
+ * the live user record (role, firm, name) is re-read from Postgres on
  * every request so a role change or deactivation takes effect immediately
  * instead of being frozen inside an old token.
  */
 
 const TOKEN_TTL = '12h';
+
+// A fixed dummy hash to compare against when no user matches, so that
+// "unknown email" and "wrong password" take the same amount of time and
+// an attacker cannot use response timing to enumerate accounts.
+const DUMMY_HASH = '$2a$10$CwTycUXWue0Thq9StjUM0uJ8u.EWMBB5vTZzHFN.wJm9DNv7tQGGa';
 
 function getJwtSecret() {
   const secret = process.env.JWT_SECRET;
@@ -29,17 +34,14 @@ function getJwtSecret() {
 }
 
 /**
- * Verify email + password against the in-memory user store.
- * @returns {object} the matching user record (never includes password_hash)
+ * Verify email + password against Postgres.
+ * @returns {Promise<object>} the matching user record (never includes password_hash)
  * @throws Error with .status = 401 on any mismatch
  */
-function verifyCredentials(email, password) {
-  const user = inMemoryDb.users.find(u => u.email.toLowerCase() === String(email || '').toLowerCase());
+async function verifyCredentials(email, password) {
+  const user = await db.getUserByEmail(email);
 
-  // Always run bcrypt.compare, even on a missing user, against a fixed dummy
-  // hash so that "unknown email" and "wrong password" take the same amount
-  // of time and an attacker cannot use response timing to enumerate accounts.
-  const hashToCheck = user ? user.password_hash : '$2a$10$CwTycUXWue0Thq9StjUM0uJ8u.EWMBB5vTZzHFN.wJm9DNv7tQGGa';
+  const hashToCheck = user ? user.password_hash : DUMMY_HASH;
   const matches = bcrypt.compareSync(String(password || ''), hashToCheck);
 
   if (!user || !matches) {
@@ -64,7 +66,7 @@ function issueToken(user) {
  * @throws Error with .status = 401 if the token is missing/invalid/expired
  *         or no longer matches a real user.
  */
-function resolveUserFromToken(token) {
+async function resolveUserFromToken(token) {
   if (!token) {
     const err = new Error('Authentication required.');
     err.status = 401;
@@ -80,7 +82,7 @@ function resolveUserFromToken(token) {
     throw err;
   }
 
-  const user = inMemoryDb.users.find(u => u.id === payload.sub && u.firm_id === payload.firm_id);
+  const user = await db.getUserByIdAndFirm(payload.sub, payload.firm_id);
   if (!user) {
     const err = new Error('Account no longer exists.');
     err.status = 401;

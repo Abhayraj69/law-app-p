@@ -33,6 +33,9 @@ const authRoutes = require('./routes/auth');
   console.log(`[ENV] Loaded environment from ${path.basename(file)}`);
 })();
 
+const { checkConnection } = require('./db/pool');
+const { runMigrations } = require('./db/migrate');
+
 const app = express();
 const PORT = process.env.PORT || 3000;
 
@@ -95,12 +98,40 @@ app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, '..', 'index.html'));
 });
 
-app.listen(PORT, () => {
-  console.log(`=======================================================`);
-  console.log(` SLF Practice Management Document Vault API Running`);
-  console.log(` Listening on: http://localhost:${PORT}`);
-  console.log(` API Endpoint: http://localhost:${PORT}/api/v1/vault/stats`);
-  console.log(`=======================================================`);
-});
+// ── Database boot check ──────────────────────────────────────────────────
+// Fail fast and loud if Postgres isn't reachable or the schema can't be
+// applied, rather than starting an API that will error on the first
+// request that touches the database.
+async function start() {
+  try {
+    await checkConnection();
+    console.log('[DB] Connected to PostgreSQL.');
+  } catch (err) {
+    console.error('[DB] FATAL: could not connect to PostgreSQL.');
+    console.error(`[DB] ${err.message}`);
+    console.error('[DB] Set DATABASE_URL, or PGHOST/PGUSER/PGPASSWORD/PGDATABASE, in .env.local.');
+    process.exit(1);
+  }
+
+  try {
+    await runMigrations();
+  } catch (err) {
+    console.error('[DB] FATAL: migration failed.');
+    console.error(`[DB] ${err.message}`);
+    process.exit(1);
+  }
+
+  app.listen(PORT, () => {
+    console.log(`=======================================================`);
+    console.log(` SLF Practice Management Document Vault API Running`);
+    console.log(` Listening on: http://localhost:${PORT}`);
+    console.log(` API Endpoint: http://localhost:${PORT}/api/v1/vault/stats`);
+    console.log(`=======================================================`);
+  });
+}
+
+if (require.main === module) {
+  start();
+}
 
 module.exports = app;

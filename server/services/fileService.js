@@ -1,7 +1,7 @@
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
-const { inMemoryDb } = require('../db');
+const db = require('../db');
 
 /**
  * File Operations Service (Row Actions)
@@ -69,7 +69,7 @@ class FileService {
    * Generates secure short-lived preview token & metadata for rendering PDF/docx/xlsx in UI
    */
   static async getPreview(tenantId, docId) {
-    const doc = inMemoryDb.documents.find(d => d.id === docId && d.firm_id === tenantId && !d.is_deleted);
+    const doc = await db.getDocumentById(tenantId, docId);
     if (!doc) {
       const err = new Error(`Document '${docId}' not found.`);
       err.status = 404;
@@ -98,28 +98,31 @@ class FileService {
    * ever existed as metadata.
    */
   static async getDownloadStream(tenantId, docId) {
-    const doc = inMemoryDb.documents.find(d => d.id === docId && d.firm_id === tenantId && !d.is_deleted);
+    const doc = await db.getDocumentById(tenantId, docId);
     if (!doc) {
       const err = new Error(`Document '${docId}' not found.`);
       err.status = 404;
       throw err;
     }
 
-    if (!doc.is_real_upload) {
+    // Seed/demo records (and any document whose file was never actually
+    // written to disk) don't have a real file to stream. We detect that by
+    // checking disk directly rather than trusting a flag on the record,
+    // since the record's metadata alone can't prove the bytes exist.
+    let absolutePath;
+    try {
+      absolutePath = resolveStoragePath(doc.storage_path_url);
+    } catch {
+      absolutePath = null;
+    }
+
+    if (!absolutePath || !fs.existsSync(absolutePath)) {
       const err = new Error(
-        `'${doc.file_name}' is a seed/demo record with no real file content — ` +
-        `it was never actually uploaded. Upload a real file to download its content.`
+        `'${doc.file_name}' has no real file content on disk — it may be a seed/demo ` +
+        `record that was never actually uploaded, or its stored file is missing.`
       );
       err.status = 404;
       err.code = 'NO_FILE_CONTENT';
-      throw err;
-    }
-
-    const absolutePath = resolveStoragePath(doc.storage_path_url);
-    if (!fs.existsSync(absolutePath)) {
-      const err = new Error(`Stored file for '${doc.file_name}' is missing on disk.`);
-      err.status = 404;
-      err.code = 'FILE_MISSING';
       throw err;
     }
 
@@ -139,7 +142,7 @@ class FileService {
    * Generates secure expirable tokenized share link with permissions
    */
   static async createShareLink(tenantId, userId, docId, shareData = {}) {
-    const doc = inMemoryDb.documents.find(d => d.id === docId && d.firm_id === tenantId && !d.is_deleted);
+    const doc = await db.getDocumentById(tenantId, docId);
     if (!doc) {
       const err = new Error(`Document '${docId}' not found.`);
       err.status = 404;
@@ -148,23 +151,22 @@ class FileService {
 
     const { recipient_email = 'external.client@example.com', permission = 'VIEW', expiration_hours = 48 } = shareData;
     const token = crypto.randomBytes(24).toString('hex');
-    const expiresAt = new Date(Date.now() + expiration_hours * 60 * 60 * 1000).toISOString();
+    const expiresAt = new Date(Date.now() + expiration_hours * 60 * 60 * 1000);
 
-    const shareRecord = {
-      id: `share-${Date.now()}`,
-      document_id: doc.id,
-      file_name: doc.file_name,
-      shared_by: userId,
-      recipient_email,
+    const shareRecord = await db.insertShare({
+      documentId: doc.id,
+      sharedBy: userId,
+      recipientEmail: recipient_email,
+      shareToken: token,
       permission,
-      share_token: token,
-      share_url: `https://slf.law/vault/share/${token}`,
-      expires_at: expiresAt,
-      created_at: new Date().toISOString()
-    };
+      expiresAt
+    });
 
-    inMemoryDb.shares.push(shareRecord);
-    return shareRecord;
+    return {
+      ...shareRecord,
+      file_name: doc.file_name,
+      share_url: `https://slf.law/vault/share/${token}`
+    };
   }
 
   /**
@@ -172,46 +174,38 @@ class FileService {
    * Updates metadata, renames, re-tags, flags/unflags, or moves folder
    */
   static async patchDocument(tenantId, docId, updates = {}) {
-    const doc = inMemoryDb.documents.find(d => d.id === docId && d.firm_id === tenantId && !d.is_deleted);
+    const doc = await db.getDocumentById(tenantId, docId);
     if (!doc) {
       const err = new Error(`Document '${docId}' not found.`);
       err.status = 404;
       throw err;
     }
 
-    if (updates.file_name) doc.file_name = updates.file_name.trim();
-    if (updates.folder_id !== undefined) doc.folder_id = updates.folder_id;
-    if (updates.category) doc.category = updates.category;
-    if (updates.is_flagged !== undefined) doc.is_flagged = Boolean(updates.is_flagged);
-    if (updates.is_archived !== undefined) doc.is_archived = Boolean(updates.is_archived);
-    if (updates.tags && Array.isArray(updates.tags)) doc.tags = updates.tags;
+    const patch = {};
+    if (updates.file_name) patch.file_name = updates.file_name.trim();
+    if (updates.folder_id !== undefined) patch.folder_id = updates.folder_id;
+    if (updates.is_flagged !== undefined) patch.is_flagged = Boolean(updates.is_flagged);
+    if (updates.is_archived !== undefined) patch.is_archived = Boolean(updates.is_archived);
+    if (updates.tags && Array.isArray(updates.tags)) patch.tags = updates.tags;
 
-    doc.updated_at = new Date().toISOString();
-    return doc;
+    return db.updateDocument(tenantId, docId, patch);
   }
 
   /**
    * DELETE /api/v1/files/:id
-   * Soft-deletes document and adjusts storage quota
+   * Soft-deletes document. Storage quota is decremented automatically by
+   * the `trigger_document_storage_quota` trigger (db/schema.sql) when
+   * is_deleted flips to TRUE, not by application code.
    */
   static async deleteDocument(tenantId, docId) {
-    const doc = inMemoryDb.documents.find(d => d.id === docId && d.firm_id === tenantId && !d.is_deleted);
+    const doc = await db.getDocumentById(tenantId, docId);
     if (!doc) {
       const err = new Error(`Document '${docId}' not found.`);
       err.status = 404;
       throw err;
     }
 
-    doc.is_deleted = true;
-    doc.deleted_at = new Date().toISOString();
-
-    // Adjust storage quota
-    if (inMemoryDb.storage_quotas[tenantId]) {
-      inMemoryDb.storage_quotas[tenantId].storage_used_bytes = Math.max(
-        0,
-        inMemoryDb.storage_quotas[tenantId].storage_used_bytes - doc.file_size_bytes
-      );
-    }
+    await db.softDeleteDocument(tenantId, docId);
 
     return {
       message: `Document '${doc.file_name}' soft-deleted successfully.`,

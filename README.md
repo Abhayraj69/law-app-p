@@ -21,10 +21,16 @@ wired up.
   Mutative tools (`manageFiles`, `createOrUpdateCase`) use a human-in-the-loop
   approval step before committing any change.
 - **Authentication** — `/api/v1/auth/login` issues a signed JWT after
-  verifying a password against the in-memory user store; every other API
-  route requires that token via `Authorization: Bearer <token>`
+  verifying a password against the `users` table in Postgres; every other
+  API route requires that token via `Authorization: Bearer <token>`
   (`server/middleware/auth.js`, `server/services/authService.js`). There are
   three demo accounts, documented below.
+- **Persistence** — every table in `db/schema.sql` (firms, users, cases,
+  folders, documents, tags, shares, audit logs, client messages, case
+  deadlines) is backed by a real Postgres database via `server/db.js`
+  (see `server/db/pool.js` for the connection pool and
+  `server/db/migrate.js` for the migration runner). Nothing resets on
+  restart; the server refuses to boot at all if it can't reach Postgres.
 
 ## What's mock/static (not wired to the backend)
 
@@ -34,11 +40,6 @@ wired up.
   `SEARCH_DATA`, and further down `CONVERSATIONS`). Interacting with them
   updates only in-memory JS state in the browser tab; nothing is persisted
   or sent to the server. Treat these as UI mockups, not features.
-- **The Postgres schema (`db/schema.sql`) is unused.** `server/db.js` will
-  open a Postgres connection pool if `PGHOST`/`DATABASE_URL` is set, but no
-  service or controller queries it. All data — firms, users, documents,
-  folders, messages, deadlines — lives in the `inMemoryDb` object in
-  `server/db.js` and resets on every server restart.
 
 If you want any of the mock pages to become real, the pattern to copy is the
 Document Vault page: add a service in `server/services/`, a controller in
@@ -48,13 +49,22 @@ corresponding hardcoded array/render function in `app.js` with an
 
 ## Running it locally
 
+You need a Postgres database (12+) reachable from the app — there is no
+in-memory fallback.
+
 ```bash
 npm install
-cp .env.example .env.local   # then fill in JWT_SECRET (a generated one is
-                              # already present if you keep the repo's own
-                              # .env.local) and, optionally, an AI provider key
+cp .env.example .env.local   # fill in DATABASE_URL (or PGHOST/PGDATABASE/...),
+                              # JWT_SECRET, and optionally an AI provider key
+npm run migrate               # applies db/schema.sql and any db/migrations/*.sql
+npm run seed                  # creates the firm + three demo users
 npm start
 ```
+
+`npm start` also runs the migration check itself at boot (so a forgotten
+`npm run migrate` won't silently leave the schema out of date), and refuses
+to start entirely if Postgres isn't reachable — see the terminal output for
+the exact connection error if that happens.
 
 Open `http://localhost:3000`. You'll land on a login screen — sign in with
 one of the seed accounts:
@@ -65,9 +75,21 @@ one of the seed accounts:
 | `m.ross@slf.law` | Associate |
 | `p.nair@slf.law` | Associate |
 
-All three share the password set in `DEMO_USER_PASSWORD` in `.env.local`
-(defaults to `ChangeMe123!`). This is a single shared demo credential, not a
-real per-user password system — see "Known limitations" below.
+Each account gets its **own** password, generated and printed once by
+`npm run seed` (or set in advance via `SEED_JENNINGS_PASSWORD` /
+`SEED_ROSS_PASSWORD` / `SEED_NAIR_PASSWORD` in `.env.local`) — there is no
+shared demo credential. If you lose a printed password, re-run
+`npm run seed` with that user's env var set to a new value.
+
+### Running the test suite
+
+```bash
+TEST_DATABASE_URL=postgresql://user:pass@localhost:5432/slf_vault_test npm test
+```
+
+The integration tests in `server/test/` need a real (throwaway) Postgres
+database to run against — without `TEST_DATABASE_URL` set, they report as
+skipped rather than failing.
 
 ## File uploads
 
@@ -86,21 +108,22 @@ the server validates them, and the accepted file is written to disk under
    explicitly (`antivirus_engine: "none"`) rather than implying a malware
    scan ran when it didn't.
 
-Downloading a genuinely uploaded document streams the real bytes back and
-matches byte-for-byte. Downloading one of the seed/demo documents in
-`server/db.js` (which never had real file content) returns a clear 404
-rather than a broken or fake stream.
+Document metadata (filename, size, uploader, case/folder association,
+storage path, tags) is written to the `documents` table in Postgres, so it
+survives a restart. The file bytes themselves stay on disk under
+`storage/uploads/<firm_id>/`, unchanged from before. Downloading a document
+whose file is missing from disk (including any seed/demo document, which
+never had one) returns a clear 404 (`NO_FILE_CONTENT`) rather than a broken
+or fake stream.
 
 ## Known limitations
 
 - **No antivirus engine configured by default.** Point `CLAMAV_HOST` at a
   running ClamAV daemon to get a real malware scan on top of the signature
   check; without it, only the content-signature validation runs (see above).
-- **Single shared demo password**, no signup flow, no password reset, no
-  per-firm user provisioning. Fine for a prototype; not production auth.
-- **In-memory data only** — see "What's mock/static" above. Nothing survives
-  a server restart except what happens to already be seeded in `server/db.js`,
-  including any files uploaded in a previous run (their metadata is gone
-  even though the file remains on disk under `storage/`).
+- **No signup flow or admin "invite a user" UI yet** — new users are
+  currently provisioned by running `npm run seed` with new entries, not
+  through the app itself. Each seed user does get a distinct, non-shared
+  password (see "Running it locally" above).
 - **Dashboard/Cases/Communications pages are static mockups**, not live
   features, as described above.

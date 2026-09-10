@@ -26,10 +26,10 @@ function extractBearerToken(req) {
   return match ? match[1] : null;
 }
 
-function authMiddleware(req, res, next) {
+async function authMiddleware(req, res, next) {
   try {
     const token = extractBearerToken(req);
-    const user = authService.resolveUserFromToken(token);
+    const user = await authService.resolveUserFromToken(token);
 
     req.user = user;
     req.tenantId = user.firm_id;

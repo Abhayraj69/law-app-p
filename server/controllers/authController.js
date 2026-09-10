@@ -13,7 +13,7 @@ async function login(req, res, next) {
       return res.status(400).json({ success: false, error: 'Email and password are required.' });
     }
 
-    const user = authService.verifyCredentials(email, password);
+    const user = await authService.verifyCredentials(email, password);
     const token = authService.issueToken(user);
 
     res.json({

@@ -1,4 +1,4 @@
-const { inMemoryDb } = require('../db');
+const db = require('../db');
 
 /**
  * Integration & Widget Service
@@ -11,7 +11,8 @@ class IntegrationService {
    * Returns recently accessed documents and frequently used folders
    */
   static async getQuickAccess(tenantId) {
-    const allDocs = inMemoryDb.documents.filter(d => d.firm_id === tenantId && !d.is_deleted);
+    const allDocs = await db.listActiveDocuments(tenantId);
+    const allFolders = await db.listFolders(tenantId);
 
     // Sort by most recent activity (updated_at)
     const recentDocs = [...allDocs]
@@ -23,7 +24,7 @@ class IntegrationService {
         extension: d.extension,
         case_name: d.case_name,
         case_id: d.case_id,
-        file_size_bytes: d.file_size_bytes,
+        file_size_bytes: Number(d.file_size_bytes),
         author_name: d.author_name,
         updated_at: d.updated_at
       }));
@@ -36,8 +37,7 @@ class IntegrationService {
       }
     });
 
-    const frequentFolders = inMemoryDb.folders
-      .filter(f => f.firm_id === tenantId)
+    const frequentFolders = allFolders
       .map(f => ({
         id: f.id,
         folder_name: f.folder_name,
@@ -58,10 +58,7 @@ class IntegrationService {
    * Returns client messages with unread count and preview
    */
   static async getFlaggedMessages(tenantId) {
-    const messages = inMemoryDb.client_messages || [];
-
-    // Calculate unread count
-    const unreadCount = messages.filter(m => m.is_unread).length;
+    const messages = await db.listClientMessages(tenantId);
 
     return messages.map(m => ({
       id: m.id,
@@ -83,12 +80,8 @@ class IntegrationService {
    * Returns upcoming hearings and deadlines (top 5)
    */
   static async getDeadlines(tenantId) {
-    const deadlines = inMemoryDb.case_deadlines || [];
-
-    // Sort by deadline date (ascending - nearest first)
-    const sorted = [...deadlines]
-      .sort((a, b) => new Date(a.deadline_date) - new Date(b.deadline_date))
-      .slice(0, 5);
+    const deadlines = await db.listCaseDeadlines(tenantId);
+    const sorted = deadlines.slice(0, 5);
 
     // Group by month for calendar display
     const calendarEvents = {};

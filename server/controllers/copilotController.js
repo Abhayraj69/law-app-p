@@ -10,45 +10,42 @@
  *    committed when the client re-calls with { approved: true }.
  */
 
-const { inMemoryDb, DEFAULT_FIRM_ID } = require('../db');
+const db = require('../db');
 const aiProvider = require('../services/aiProvider');
 const {
   ToolInputs,
   SearchVaultOutput,
-  SearchVaultError,
   SummarizeDocumentOutput,
   SummarizeDocumentError,
   ManageFilesOutput,
   ManageFilesError,
   CreateOrUpdateCaseOutput,
-  CreateOrUpdateCaseError,
-  ManageFilesApprovalData,
-  CreateOrUpdateCaseApprovalData,
 } = require('../tools/copilotSchemas');
 
-// ── In-memory "cases" derivation ────────────────────────────────────────────
-// The dataset has no cases table; cases are inferred from documents + deadlines.
-function getCases(firmId) {
+// ── "Cases" derivation ──────────────────────────────────────────────────
+// There's no dedicated case-management UI yet; cases are inferred from the
+// documents that reference a case_id (the `cases` table itself only carries
+// enough to satisfy the documents.case_id foreign key today).
+async function getCases(firmId) {
+  const docs = await db.listActiveDocuments(firmId);
   const cases = {};
-  inMemoryDb.documents
-    .filter(d => d.firm_id === firmId && !d.is_deleted)
-    .forEach(d => {
-      if (!d.case_id) return;
-      if (!cases[d.case_id]) {
-        cases[d.case_id] = {
-          case_id: d.case_id,
-          case_name: d.case_name,
-          status: 'ACTIVE',
-          lead_attorney: d.author_name,
-          document_count: 0,
-          updated_at: d.updated_at
-        };
-      }
-      cases[d.case_id].document_count++;
-      if (new Date(d.updated_at) > new Date(cases[d.case_id].updated_at)) {
-        cases[d.case_id].updated_at = d.updated_at;
-      }
-    });
+  docs.forEach(d => {
+    if (!d.case_id) return;
+    if (!cases[d.case_id]) {
+      cases[d.case_id] = {
+        case_id: d.case_id,
+        case_name: d.case_name,
+        status: 'ACTIVE',
+        lead_attorney: d.author_name,
+        document_count: 0,
+        updated_at: d.updated_at
+      };
+    }
+    cases[d.case_id].document_count++;
+    if (new Date(d.updated_at) > new Date(cases[d.case_id].updated_at)) {
+      cases[d.case_id].updated_at = d.updated_at;
+    }
+  });
   return Object.values(cases);
 }
 
@@ -99,37 +96,36 @@ async function searchVault(req, res, next) {
     const results = [];
 
     if (scope === 'all' || scope === 'documents') {
-      inMemoryDb.documents
-        .filter(d => d.firm_id === firmId && !d.is_deleted)
-        .forEach(d => {
-          const text = `${d.file_name} ${d.case_name} ${d.author_name} ${(d.tags || []).join(' ')}`;
-          const score = scoreMatch(text, terms);
-          if (score > 0) results.push({ type: 'document', score, id: d.id, title: d.file_name, meta: d.case_name, snippet: text.slice(0, 120) });
-        });
+      const docs = await db.listActiveDocuments(firmId);
+      docs.forEach(d => {
+        const text = `${d.file_name} ${d.case_name} ${d.author_name} ${(d.tags || []).join(' ')}`;
+        const score = scoreMatch(text, terms);
+        if (score > 0) results.push({ type: 'document', score, id: d.id, title: d.file_name, meta: d.case_name, snippet: text.slice(0, 120) });
+      });
     }
 
     if (scope === 'all' || scope === 'folders') {
-      inMemoryDb.folders
-        .filter(f => f.firm_id === firmId)
-        .forEach(f => {
-          const score = scoreMatch(f.folder_name, terms);
-          if (score > 0) results.push({ type: 'folder', score, id: f.id, title: f.folder_name, meta: f.category, snippet: f.folder_name });
-        });
+      const folders = await db.listFolders(firmId);
+      folders.forEach(f => {
+        const score = scoreMatch(f.folder_name, terms);
+        if (score > 0) results.push({ type: 'folder', score, id: f.id, title: f.folder_name, meta: f.category, snippet: f.folder_name });
+      });
     }
 
     if (scope === 'all' || scope === 'cases') {
-      getCases(firmId).forEach(c => {
+      const cases = await getCases(firmId);
+      cases.forEach(c => {
         const score = scoreMatch(`${c.case_name} ${c.case_id} ${c.lead_attorney}`, terms);
         if (score > 0) results.push({ type: 'case', score, id: c.case_id, title: c.case_name, meta: c.case_id, snippet: `${c.case_name} — ${c.status}` });
       });
     }
 
     if (scope === 'all' || scope === 'messages') {
-      (inMemoryDb.client_messages || [])
-        .forEach(m => {
-          const score = scoreMatch(`${m.client_name} ${m.subject} ${m.preview}`, terms);
-          if (score > 0) results.push({ type: 'message', score, id: m.id, title: m.subject, meta: m.client_name, snippet: m.preview });
-        });
+      const messages = await db.listClientMessages(firmId);
+      messages.forEach(m => {
+        const score = scoreMatch(`${m.client_name} ${m.subject} ${m.preview}`, terms);
+        if (score > 0) results.push({ type: 'message', score, id: m.id, title: m.subject, meta: m.client_name, snippet: m.preview });
+      });
     }
 
     results.sort((a, b) => b.score - a.score);
@@ -151,7 +147,7 @@ async function summarizeDocument(req, res, next) {
   try {
     const { document_id } = req.body;
     const firmId = req.tenantId;
-    const doc = inMemoryDb.documents.find(d => d.id === document_id && d.firm_id === firmId);
+    const doc = await db.getDocumentById(firmId, document_id);
 
     if (!doc) {
       return res.status(404).json(SummarizeDocumentError.parse({
@@ -181,6 +177,7 @@ async function summarizeDocument(req, res, next) {
 
 function buildMetadataSummary(doc) {
   const date = new Date(doc.updated_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+  const sizeMb = (Number(doc.file_size_bytes) / (1024 * 1024)).toFixed(1);
   return {
     document_id: doc.id,
     file_name: doc.file_name,
@@ -188,12 +185,12 @@ function buildMetadataSummary(doc) {
     case_name: doc.case_name || null,
     author_name: doc.author_name,
     tags: doc.tags || [],
-    size_mb: (doc.file_size_bytes / (1024 * 1024)).toFixed(1),
+    size_mb: sizeMb,
     updated_at: doc.updated_at,
     executive_summary: `${doc.file_name} is a ${doc.extension.toUpperCase()} document authored by ${doc.author_name} ` +
       `on the ${doc.case_name || 'firm'} matter, last updated ${date}. ` +
       `It carries ${doc.tags && doc.tags.length ? doc.tags.join(', ') + ' flags' : 'no special classifications'} ` +
-      `and spans ${(doc.file_size_bytes / (1024 * 1024)).toFixed(1)} MB of content. ` +
+      `and spans ${sizeMb} MB of content. ` +
       `Recommended action: ${doc.is_flagged ? 'route for partner review before distribution.' : 'available for standard circulation.'}`,
     key_points: [
       `Owned by ${doc.author_name} (${doc.author_initials || '—'})`,
@@ -206,13 +203,14 @@ function buildMetadataSummary(doc) {
 
 async function generateAiSummary(doc) {
   try {
+    const sizeMb = (Number(doc.file_size_bytes) / (1024 * 1024)).toFixed(1);
     const prompt = `You are a legal AI assistant. Summarize this document based on its metadata.
 
 Document: ${doc.file_name}
 Type: ${doc.extension.toUpperCase()}
 Case: ${doc.case_name || 'N/A'}
 Author: ${doc.author_name}
-Size: ${(doc.file_size_bytes / (1024 * 1024)).toFixed(1)} MB
+Size: ${sizeMb} MB
 Tags: ${(doc.tags || []).join(', ') || 'None'}
 Flagged: ${doc.is_flagged ? 'Yes' : 'No'}
 Last Updated: ${new Date(doc.updated_at).toLocaleDateString()}
@@ -237,17 +235,11 @@ Return ONLY a JSON object with keys: executive_summary, key_points (array of str
       return buildMetadataSummary(doc);
     }
 
+    const fallback = buildMetadataSummary(doc);
     return {
-      document_id: doc.id,
-      file_name: doc.file_name,
-      file_type: doc.extension,
-      case_name: doc.case_name || null,
-      author_name: doc.author_name,
-      tags: doc.tags || [],
-      size_mb: (doc.file_size_bytes / (1024 * 1024)).toFixed(1),
-      updated_at: doc.updated_at,
-      executive_summary: aiData.executive_summary || buildMetadataSummary(doc).executive_summary,
-      key_points: Array.isArray(aiData.key_points) ? aiData.key_points : buildMetadataSummary(doc).key_points
+      ...fallback,
+      executive_summary: aiData.executive_summary || fallback.executive_summary,
+      key_points: Array.isArray(aiData.key_points) ? aiData.key_points : fallback.key_points
     };
   } catch (err) {
     console.error('[Copilot] AI summarization failed, using fallback:', err.message);
@@ -273,8 +265,8 @@ async function manageFiles(req, res, next) {
     }
 
     const target = target_type === 'folder'
-      ? inMemoryDb.folders.find(f => f.id === target_id && f.firm_id === firmId)
-      : inMemoryDb.documents.find(d => d.id === target_id && d.firm_id === firmId);
+      ? await db.getFolderById(firmId, target_id)
+      : await db.getDocumentById(firmId, target_id);
 
     if (!target) {
       return res.status(404).json(ManageFilesError.parse({
@@ -286,7 +278,7 @@ async function manageFiles(req, res, next) {
     const label = target.file_name || target.folder_name;
 
     // Build the proposed payload for the Approval Card
-    const proposed = buildFileProposal(action, target, payload);
+    const proposed = await buildFileProposal(firmId, action, target, payload);
 
     // HITL: if not yet approved, return the pending approval — do NOT mutate.
     if (!approved) {
@@ -309,10 +301,10 @@ async function manageFiles(req, res, next) {
     // Approved — commit the mutation
     // Use executable_payload if provided (from approval confirm), else use payload
     const commitPayload = executable_payload || payload;
-    const result = commitFileAction(action, target, commitPayload);
+    const result = await commitFileAction(firmId, action, target_type, target, commitPayload);
 
     // Log audit trail
-    logAuditTrail(req, action, target_id, target_type, commitPayload);
+    await logAuditTrail(req, action, target_id, target_type, commitPayload);
 
     res.json(ManageFilesOutput.parse({
       success: true,
@@ -324,10 +316,10 @@ async function manageFiles(req, res, next) {
   }
 }
 
-function buildFileProposal(action, target, payload) {
+async function buildFileProposal(firmId, action, target, payload) {
   switch (action) {
     case 'move': {
-      const dest = inMemoryDb.folders.find(f => f.id === payload.folder_id);
+      const dest = await db.getFolderById(firmId, payload.folder_id);
       return { from: target.folder_id || 'root', to: payload.folder_id, destination_name: dest ? dest.folder_name : payload.folder_id };
     }
     case 'rename':
@@ -341,32 +333,35 @@ function buildFileProposal(action, target, payload) {
   }
 }
 
-function commitFileAction(action, target, payload) {
+async function commitFileAction(firmId, action, targetType, target, payload) {
+  const isFolder = targetType === 'folder';
   switch (action) {
     case 'move':
-      target.folder_id = payload.folder_id;
-      target.updated_at = new Date().toISOString();
+      await db.updateDocument(firmId, target.id, { folder_id: payload.folder_id });
       return { moved_to: payload.folder_id };
     case 'rename':
-      if (target.file_name !== undefined) target.file_name = payload.new_name;
-      if (target.folder_name !== undefined) target.folder_name = payload.new_name;
-      target.updated_at = new Date().toISOString();
+      if (isFolder) {
+        await db.updateFolder(firmId, target.id, { folder_name: payload.new_name });
+      } else {
+        await db.updateDocument(firmId, target.id, { file_name: payload.new_name });
+      }
       return { renamed_to: payload.new_name };
     case 'tag': {
+      if (isFolder) {
+        return { tags: [] }; // folders don't carry tags in the current schema
+      }
       const tags = new Set(target.tags || []);
       (payload.add_tags || []).forEach(t => tags.add(t));
       (payload.remove_tags || []).forEach(t => tags.delete(t));
-      target.tags = Array.from(tags);
-      target.updated_at = new Date().toISOString();
-      return { tags: Array.from(tags) };
+      const tagList = Array.from(tags);
+      await db.updateDocument(firmId, target.id, { tags: tagList });
+      return { tags: tagList };
     }
     case 'delete':
-      if (target.is_deleted !== undefined) {
-        target.is_deleted = true;
-        target.updated_at = new Date().toISOString();
+      if (isFolder) {
+        await db.deleteFolder(firmId, target.id);
       } else {
-        const idx = inMemoryDb.folders.indexOf(target);
-        if (idx > -1) inMemoryDb.folders.splice(idx, 1);
+        await db.softDeleteDocument(firmId, target.id);
       }
       return { deleted: true };
     default:
@@ -383,7 +378,7 @@ async function createOrUpdateCase(req, res, next) {
     const { case_id, payload = {}, approved = false, executable_payload } = req.body;
     const firmId = req.tenantId;
 
-    const cases = getCases(firmId);
+    const cases = await getCases(firmId);
     const existing = cases.find(c => c.case_id === case_id);
 
     const proposed = {
@@ -414,25 +409,22 @@ async function createOrUpdateCase(req, res, next) {
     if (commitPayload.status) result.applied.push(`status → ${commitPayload.status}`);
     if (commitPayload.lead_attorney) result.applied.push(`lead attorney → ${commitPayload.lead_attorney}`);
     if (commitPayload.client_update) {
-      if (!inMemoryDb.client_messages) inMemoryDb.client_messages = [];
-      inMemoryDb.client_messages.unshift({
-        id: `msg-${Date.now()}`,
-        client_name: existing?.case_name || case_id,
-        client_avatar: (existing?.case_name || case_id).slice(0, 2).toUpperCase(),
+      const label = existing?.case_name || case_id;
+      await db.insertClientMessage({
+        firmId,
+        clientName: label,
+        clientAvatar: label.slice(0, 2).toUpperCase(),
         subject: commitPayload.client_update.subject || 'Case Update',
         preview: commitPayload.client_update.body || '',
-        timestamp_text: 'Just now',
-        is_unread: true,
-        is_urgent: !!commitPayload.client_update.urgent,
-        attachment_name: null,
-        attachment_size: null,
-        attachment_doc_id: null
+        timestampText: 'Just now',
+        isUnread: true,
+        isUrgent: !!commitPayload.client_update.urgent
       });
       result.applied.push('posted client update');
     }
 
     // Log audit trail
-    logAuditTrail(req, 'update_case', case_id, 'case', commitPayload);
+    await logAuditTrail(req, 'update_case', case_id, 'case', commitPayload);
 
     res.json(CreateOrUpdateCaseOutput.parse({
       success: true,
@@ -447,24 +439,18 @@ async function createOrUpdateCase(req, res, next) {
 // ════════════════════════════════════════════════════════════════════════════
 // AUDIT LOGGING HELPER
 // ════════════════════════════════════════════════════════════════════════════
-function logAuditTrail(req, action, targetId, targetType, details) {
-  const auditRecord = {
-    id: `audit-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
-    firm_id: req.tenantId || DEFAULT_FIRM_ID,
-    user_id: req.user?.id || 'u101ac10b-58cc-4372-a567-0e02b2c3d479',
-    user_name: req.user?.full_name || 'Sarah Jennings',
-    document_id: targetType === 'file' ? targetId : null,
-    folder_id: targetType === 'folder' ? targetId : null,
-    case_id: targetType === 'case' ? targetId : null,
-    action: `COPILOT_${action.toUpperCase()}`,
-    ip_address: req.ip || req.headers['x-forwarded-for'] || req.socket.remoteAddress || '127.0.0.1',
-    user_agent: req.headers['user-agent'] || 'AI Copilot',
-    details: { target_type: targetType, ...details },
-    created_at: new Date().toISOString()
-  };
-
-  inMemoryDb.audit_logs.unshift(auditRecord);
-  console.log(`[AUDIT LOG] Copilot Action: ${action} | User: ${auditRecord.user_name} | Target: ${targetId} (${targetType})`);
+async function logAuditTrail(req, action, targetId, targetType, details) {
+  await db.insertAuditLog({
+    firmId: req.tenantId,
+    userId: req.user ? req.user.id : null,
+    documentId: targetType === 'file' ? targetId : null,
+    folderId: targetType === 'folder' ? targetId : null,
+    action: `COPILOT_${action.toUpperCase()}`.slice(0, 50),
+    ipAddress: req.ip || req.headers['x-forwarded-for'] || req.socket.remoteAddress || '127.0.0.1',
+    userAgent: req.headers['user-agent'] || 'AI Copilot',
+    details: { target_type: targetType, ...details }
+  });
+  console.log(`[AUDIT LOG] Copilot Action: ${action} | User: ${req.user ? req.user.full_name : 'unknown'} | Target: ${targetId} (${targetType})`);
 }
 
 module.exports = {

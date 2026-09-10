@@ -1,4 +1,5 @@
-const { inMemoryDb } = require('../db');
+const crypto = require('crypto');
+const db = require('../db');
 const FileService = require('./fileService');
 
 /**
@@ -12,11 +13,8 @@ class VaultService {
    * Returns aggregated metrics for total docs, storage quota, recent uploads, flagged count
    */
   static async getStats(tenantId) {
-    const activeDocs = inMemoryDb.documents.filter(d => d.firm_id === tenantId && !d.is_deleted);
-    const quota = inMemoryDb.storage_quotas[tenantId] || {
-      storage_limit_bytes: 107374182400,
-      storage_used_bytes: 34359738368
-    };
+    const activeDocs = await db.listActiveDocuments(tenantId);
+    const quota = await db.getStorageQuota(tenantId);
 
     const oneWeekAgo = new Date();
     oneWeekAgo.setDate(oneWeekAgo.getDate() - 7);
@@ -27,8 +25,8 @@ class VaultService {
     return {
       total_documents_count: activeDocs.length + 5400, // Matching UI baseline 5,412
       total_documents_change_pct: '+12%',
-      storage_used_bytes: quota.storage_used_bytes,
-      storage_limit_bytes: quota.storage_limit_bytes,
+      storage_used_bytes: Number(quota.storage_used_bytes),
+      storage_limit_bytes: Number(quota.storage_limit_bytes),
       storage_used_formatted: `${Math.round(quota.storage_used_bytes / (1024 * 1024 * 1024))}GB`,
       storage_limit_formatted: `${Math.round(quota.storage_limit_bytes / (1024 * 1024 * 1024))}GB`,
       recent_uploads_count: recentUploadsCount > 0 ? recentUploadsCount : 7,
@@ -43,8 +41,8 @@ class VaultService {
    * Builds full nested folder hierarchy tree
    */
   static async getFolderTree(tenantId) {
-    const allFolders = inMemoryDb.folders.filter(f => f.firm_id === tenantId);
-    const allDocs = inMemoryDb.documents.filter(d => d.firm_id === tenantId && !d.is_deleted);
+    const allFolders = await db.listFolders(tenantId);
+    const allDocs = await db.listActiveDocuments(tenantId);
 
     function buildNode(folderId) {
       const folder = allFolders.find(f => f.id === folderId);
@@ -62,7 +60,7 @@ class VaultService {
           id: d.id,
           name: d.file_name,
           extension: d.extension,
-          file_size_bytes: d.file_size_bytes
+          file_size_bytes: Number(d.file_size_bytes)
         }))
       };
     }
@@ -87,7 +85,7 @@ class VaultService {
       limit = 10
     } = params;
 
-    let docs = inMemoryDb.documents.filter(d => d.firm_id === tenantId && !d.is_deleted);
+    let docs = await db.listActiveDocuments(tenantId);
 
     // Filter by tab_category or folder_id
     if (folder_id) {
@@ -99,7 +97,7 @@ class VaultService {
     // Filter by search query
     if (q) {
       const searchLower = q.toLowerCase();
-      docs = docs.filter(d => 
+      docs = docs.filter(d =>
         (d.file_name && d.file_name.toLowerCase().includes(searchLower)) ||
         (d.case_name && d.case_name.toLowerCase().includes(searchLower)) ||
         (d.author_name && d.author_name.toLowerCase().includes(searchLower))
@@ -123,8 +121,8 @@ class VaultService {
         valA = (a.author_name || '').toLowerCase();
         valB = (b.author_name || '').toLowerCase();
       } else if (sort === 'size') {
-        valA = a.file_size_bytes;
-        valB = b.file_size_bytes;
+        valA = Number(a.file_size_bytes);
+        valB = Number(b.file_size_bytes);
       }
 
       if (valA < valB) return order === 'asc' ? -1 : 1;
@@ -161,18 +159,13 @@ class VaultService {
       throw new Error('Folder name is required.');
     }
 
-    const newFolder = {
-      id: `fld-${Date.now()}`,
-      firm_id: tenantId,
-      parent_id,
-      folder_name: folder_name.trim(),
+    return db.insertFolder({
+      firmId: tenantId,
+      parentId: parent_id,
+      folderName: folder_name.trim(),
       category,
-      created_by: userId,
-      created_at: new Date().toISOString()
-    };
-
-    inMemoryDb.folders.push(newFolder);
-    return newFolder;
+      createdBy: userId
+    });
   }
 
   /**
@@ -180,7 +173,10 @@ class VaultService {
    * Handle a real multipart file upload: validated + scanned upstream
    * (see server/middleware/securityScanner.js), the actual bytes are
    * written to disk here rather than only recording metadata as if a
-   * file existed.
+   * file existed. Metadata is persisted in Postgres (documents table) so
+   * it survives a server restart; storage quota usage is kept in sync by
+   * the `trigger_document_storage_quota` trigger defined in
+   * db/schema.sql, not by application code.
    *
    * @param {object} file - multer file object: { originalname, mimetype, size, buffer }
    * @param {object} fields - the rest of the multipart form fields (folder_id, case_id, tags)
@@ -202,13 +198,17 @@ class VaultService {
 
     const fileName = file.originalname;
     const ext = (fileName.split('.').pop() || '').toLowerCase();
-    const docId = `doc-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+    // documents.id is a Postgres UUID column — must be a real UUID, not an
+    // arbitrary string, or the insert below fails.
+    const docId = crypto.randomUUID();
 
     const { storage_path_url, sha256 } = await FileService.saveUploadedFile(tenantId, docId, fileName, file.buffer);
 
-    const author = inMemoryDb.users.find(u => u.id === userId);
+    if (case_id) {
+      await db.ensureCase(tenantId, case_id, null, null);
+    }
 
-    const newDoc = {
+    const newDoc = await db.insertDocument({
       id: docId,
       firm_id: tenantId,
       file_name: fileName,
@@ -222,27 +222,13 @@ class VaultService {
       case_id: case_id || null,
       folder_id: folder_id || null,
       author_id: userId,
-      author_name: author ? author.full_name : 'Unknown',
-      author_initials: author ? author.initials : '--',
-      case_name: null,
-      category: 'Case Files',
       is_archived: false,
       is_flagged: false,
       is_deleted: false,
-      is_real_upload: true, // distinguishes genuinely uploaded files from the seed/demo records in db.js
-      tags: parsedTags.length ? parsedTags : [],
-      created_at: new Date().toISOString(),
-      updated_at: new Date().toISOString()
-    };
+      tags: parsedTags
+    });
 
-    inMemoryDb.documents.unshift(newDoc);
-
-    // Update tenant storage quota
-    if (inMemoryDb.storage_quotas[tenantId]) {
-      inMemoryDb.storage_quotas[tenantId].storage_used_bytes += newDoc.file_size_bytes;
-    }
-
-    return { document: newDoc };
+    return { document: { ...newDoc, is_real_upload: true } };
   }
 }
 
