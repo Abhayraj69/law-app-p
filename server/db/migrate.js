@@ -55,9 +55,29 @@ function listMigrationFiles() {
     .sort(); // filenames are expected to be zero-padded numeric prefixes, e.g. 0001_*.sql
 }
 
+// Arbitrary fixed key for a session-level advisory lock, scoped to this
+// migration runner (see below for why it's needed). pg_advisory_lock takes
+// a bigint — kept well under Number.MAX_SAFE_INTEGER so it round-trips
+// through JS/node-pg with no floating-point precision loss.
+const MIGRATION_LOCK_KEY = 72847301;
+
 async function runMigrations() {
   const client = await pool.connect();
   try {
+    // Two processes can legitimately call runMigrations() concurrently
+    // (e.g. two `node --test` files each booting their own instance of
+    // the app against the same test database) — without serializing them,
+    // both can pass the same `alreadyApplied` check before either commits,
+    // and both then try to run the same file. CREATE TABLE/ALTER COLUMN
+    // IF NOT EXISTS tolerate that, but a bare CREATE TYPE does not — it
+    // has no idempotent form, so the loser hits a hard "already exists"
+    // error and the whole migration (and the test relying on it) fails.
+    // A session-level advisory lock held for the duration of this
+    // function makes concurrent callers queue instead of racing; it's
+    // released automatically if the connection drops, so it can't leak
+    // past a crash.
+    await client.query('SELECT pg_advisory_lock($1)', [MIGRATION_LOCK_KEY]);
+
     await ensureMigrationsTable(client);
 
     const baselineName = '0000_schema.sql';
@@ -72,6 +92,7 @@ async function runMigrations() {
 
     console.log('[MIGRATE] Database schema is up to date.');
   } finally {
+    await client.query('SELECT pg_advisory_unlock($1)', [MIGRATION_LOCK_KEY]).catch(() => {});
     client.release();
   }
 }

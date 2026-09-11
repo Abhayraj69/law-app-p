@@ -1,4 +1,4 @@
-const { Pool } = require('pg');
+const { Pool, types } = require('pg');
 
 /**
  * PostgreSQL Connection Pool
@@ -7,11 +7,27 @@ const { Pool } = require('pg');
  * that needs the database requires this file, never `pg` directly, so
  * connection config lives in one place.
  *
+ * node-pg's default DATE (oid 1082) parser builds a JS `Date` at LOCAL
+ * midnight for the value, which silently shifts the date by one day as
+ * soon as anything reads it back with a UTC-based method (getUTCDate,
+ * toISOString, …) on a host whose timezone is ahead of UTC — e.g. a
+ * `deadline_date` of 2026-07-21 becomes "2026-07-20T18:30:00.000Z" on a
+ * UTC+5:30 host. DATE columns (case_deadlines.deadline_date,
+ * invoices.issued_date/due_date/paid_date) are calendar dates with no
+ * time-of-day or timezone component, so they're kept as the plain
+ * 'YYYY-MM-DD' string Postgres sends over the wire instead — callers
+ * format that directly rather than constructing a Date from it.
+ *
+ * TIMESTAMPTZ columns (created_at, updated_at, etc.) are unaffected and
+ * keep node-pg's normal Date parsing.
+ *
  * Accepts either DATABASE_URL (a full connection string) or the discrete
  * PGHOST/PGUSER/PGPASSWORD/PGDATABASE/PGPORT vars that `pg` and most
  * Postgres tooling (psql, pg_dump) already read by convention. DATABASE_URL
  * wins if both are set.
  */
+types.setTypeParser(1082, (val) => val);
+
 function buildPoolConfig() {
   if (process.env.DATABASE_URL) {
     return {

@@ -8,326 +8,25 @@
 // ══════════════════════════════════════
 // DATA LAYER
 //
-// STATUS: STATIC MOCK DATA, NOT WIRED TO THE BACKEND.
-// CASES, HEARINGS, MESSAGES, ACTIVITIES, NOTIFICATIONS, SEARCH_DATA below,
-// and CONVERSATIONS further down, are hardcoded fixtures that drive the
-// Dashboard, Cases, and Communications pages. Unlike the Document Vault
-// page and the AI Copilot drawer (which call the real /api/v1/... backend
-// in server/), these pages never touch the server or the database — they
-// only ever render this in-file data. See README.md for the full
-// real-vs-mock breakdown before building on top of any of these pages.
+// STATUS: Dashboard, Active Cases and Client Communications now talk to
+// the real backend (server/services/{dashboardService,caseService,
+// communicationsService}.js) the same way the Document Vault page always
+// has. CASES and CONVERSATIONS below start empty and are populated by
+// loadCases()/loadConversations() (ApiClient calls), not literals.
+//
+// SEARCH_DATA (the global omnibox search) is the one exception: it is
+// still hardcoded and does NOT hit the backend. It was out of scope for
+// this pass (only the Dashboard/Cases/Communications pages were in
+// scope) — flagged here rather than silently left pretending to be real.
+// See README.md for the current real-vs-mock breakdown.
 // ══════════════════════════════════════
 
-const CASES = [
-  { 
-    id: 'LC-2026-001', 
-    name: 'Anderson v. Meridian Corp.', 
-    client: 'James Anderson', 
-    opposingParty: 'Meridian Corp.',
-    opposingCounsel: 'Sterling & Croft',
-    status: 'active',  
-    attorney: 'Sarah J.', 
-    initials: 'SJ', 
-    color: '#C9A84C', 
-    activity: '2 hrs ago',   
-    type: 'Commercial Litigation',
-    nextHearing: 'Jul 31, 2026',
-    createdDate: new Date('2026-06-01')
-  },
-  { 
-    id: 'LC-2026-002', 
-    name: 'Davies v. State',           
-    client: 'Emily Davies',   
-    opposingParty: 'State Prosecutor',
-    opposingCounsel: 'District Attorney Office',
-    status: 'pending', 
-    attorney: 'Marcus R.', 
-    initials: 'MR', 
-    color: '#3B82F6', 
-    activity: '5 hrs ago',   
-    type: 'Criminal Defense',
-    nextHearing: 'Jul 21, 2026',
-    createdDate: new Date('2026-06-05')
-  },
-  { 
-    id: 'LC-2026-003', 
-    name: 'Johnson Pre-trial Review',  
-    client: 'Liam Johnson',   
-    opposingParty: 'Rebecca Johnson',
-    opposingCounsel: 'Corey & Associates LLC',
-    status: 'pending', 
-    attorney: 'Sarah J.', 
-    initials: 'SJ', 
-    color: '#C9A84C', 
-    activity: '1 day ago',   
-    type: 'Family Law',
-    nextHearing: 'Jul 22, 2026',
-    createdDate: new Date('2026-06-12')
-  },
-  { 
-    id: 'LC-2026-004', 
-    name: 'Garrison Estate Management',           
-    client: 'Chloe Garrison', 
-    opposingParty: 'Garrison Trust Trustees',
-    opposingCounsel: 'Hampton Law Firm',
-    status: 'active',  
-    attorney: 'Priya N.', 
-    initials: 'PN', 
-    color: '#2DC8B0', 
-    activity: '1 day ago',   
-    type: 'Probate & Estate',
-    nextHearing: 'Aug 04, 2026',
-    createdDate: new Date('2026-05-18')
-  },
-  { 
-    id: 'LC-2026-005', 
-    name: 'Blake IP Dispute',          
-    client: 'FutureTech Inc.', 
-    opposingParty: 'Omni Media Group',
-    opposingCounsel: 'Vanguard Legal Advisors',
-    status: 'urgent', 
-    attorney: 'Marcus R.', 
-    initials: 'MR', 
-    color: '#3B82F6', 
-    activity: '2 days ago',  
-    type: 'Intellectual Property',
-    nextHearing: 'Jul 28, 2026',
-    createdDate: new Date('2026-05-25')
-  },
-  { 
-    id: 'LC-2026-006', 
-    name: 'Torres v. City Council',   
-    client: 'Rosa Torres',    
-    opposingParty: 'Metro City Council',
-    opposingCounsel: 'City Attorney Division',
-    status: 'pending', 
-    attorney: 'Sarah J.', 
-    initials: 'SJ', 
-    color: '#C9A84C', 
-    activity: '2 days ago',  
-    type: 'Administrative Law',
-    nextHearing: 'Jul 25, 2026',
-    createdDate: new Date('2026-06-20')
-  },
-  { 
-    id: 'LC-2026-007', 
-    name: 'Kimura Patent Filing',     
-    client: 'Kimura Corp.',   
-    opposingParty: 'US Patent Office',
-    opposingCounsel: 'USPTO Examiner Office',
-    status: 'active',  
-    attorney: 'Priya N.', 
-    initials: 'PN', 
-    color: '#2DC8B0', 
-    activity: '3 days ago',  
-    type: 'Intellectual Property',
-    nextHearing: 'Sep 10, 2026',
-    createdDate: new Date('2026-06-28')
-  },
-  { 
-    id: 'LC-2026-008', 
-    name: 'Henley v. Nationwide Ins.', 
-    client: 'David Henley',  
-    opposingParty: 'Nationwide Insurance Co.',
-    opposingCounsel: 'Lynch & Partners LLP',
-    status: 'closed',  
-    attorney: 'Marcus R.', 
-    initials: 'MR', 
-    color: '#3B82F6', 
-    activity: '1 week ago',  
-    type: 'Insurance Dispute',
-    nextHearing: 'None',
-    createdDate: new Date('2026-03-10')
-  },
-  { 
-    id: 'LC-2026-009', 
-    name: 'Rivera Wrongful Dismiss.',  
-    client: 'Ana Rivera',    
-    opposingParty: 'Apex Logistics Inc.',
-    opposingCounsel: 'Dunbar & Croft LLP',
-    status: 'active',  
-    attorney: 'Sarah J.', 
-    initials: 'SJ', 
-    color: '#C9A84C', 
-    
-    activity: '1 week ago',  
-    type: 'Employment Law',
-    nextHearing: 'Aug 14, 2026',
-    createdDate: new Date('2026-06-15')
-  },
-  { 
-    id: 'LC-2026-010', 
-    name: 'Nguyen Bankruptcy File',        
-    client: 'Tom Nguyen',     
-    opposingParty: 'First National Bank',
-    opposingCounsel: 'Kramer & Davis P.C.',
-    status: 'pending',  
-    attorney: 'Priya N.', 
-    initials: 'PN', 
-    color: '#2DC8B0', 
-    activity: '2 weeks ago', 
-    type: 'Bankruptcy',
-    nextHearing: 'Aug 19, 2026',
-    createdDate: new Date('2026-07-02')
-  },
-  {
-    id: 'LC-2026-011',
-    name: 'Smyth v. Hamilton Trust',
-    client: 'Arthur Smyth',
-    opposingParty: 'Hamilton Trust Co.',
-    opposingCounsel: 'Foster & Gedge Advocates',
-    status: 'active',
-    attorney: 'Marcus R.',
-    initials: 'MR',
-    color: '#3B82F6',
-    activity: '3 days ago',
-    type: 'Commercial Litigation',
-    nextHearing: 'Aug 28, 2026',
-    createdDate: new Date('2026-06-25')
-  },
-  {
-    id: 'LC-2026-012',
-    name: 'State v. Peterson',
-    client: 'Michael Peterson',
-    opposingParty: 'State of New York',
-    opposingCounsel: 'District Attorney Division',
-    status: 'urgent',
-    attorney: 'Marcus R.',
-    initials: 'MR',
-    color: '#3B82F6',
-    activity: '1 day ago',
-    type: 'Criminal Defense',
-    nextHearing: 'Jul 24, 2026',
-    createdDate: new Date('2026-07-01')
-  },
-  {
-    id: 'LC-2026-013',
-    name: 'Harrison Child Custody',
-    client: 'Linda Harrison',
-    opposingParty: 'Robert Harrison',
-    opposingCounsel: 'Weldon Law Group',
-    status: 'active',
-    attorney: 'Sarah J.',
-    initials: 'SJ',
-    color: '#C9A84C',
-    activity: '4 days ago',
-    type: 'Family Law',
-    nextHearing: 'Sep 05, 2026',
-    createdDate: new Date('2026-05-10')
-  },
-  {
-    id: 'LC-2026-014',
-    name: 'Vance Trust Audit',
-    client: 'Gerald Vance',
-    opposingParty: 'IRS Audit Board',
-    opposingCounsel: 'Internal IRS Counsel',
-    status: 'pending',
-    attorney: 'Priya N.',
-    initials: 'PN',
-    color: '#2DC8B0',
-    activity: '1 week ago',
-    type: 'Probate & Estate',
-    nextHearing: 'Aug 30, 2026',
-    createdDate: new Date('2026-06-18')
-  },
-  {
-    id: 'LC-2026-015',
-    name: 'Novak Trademark Infringement',
-    client: 'Novak Apparel LLC',
-    opposingParty: 'Zaara Group Ltd.',
-    opposingCounsel: 'Goldberg & Sons',
-    status: 'active',
-    attorney: 'Priya N.',
-    initials: 'PN',
-    color: '#2DC8B0',
-    activity: '5 days ago',
-    type: 'Intellectual Property',
-    nextHearing: 'Oct 15, 2026',
-    createdDate: new Date('2026-06-03')
-  },
-  {
-    id: 'LC-2026-016',
-    name: 'Zeller Zoning Challenge',
-    client: 'Zeller Dev Corp.',
-    opposingParty: 'Zoning Board of Appeals',
-    opposingCounsel: 'Municipal Counsel',
-    status: 'closed',
-    attorney: 'Sarah J.',
-    initials: 'SJ',
-    color: '#C9A84C',
-    activity: '3 weeks ago',
-    type: 'Administrative Law',
-    nextHearing: 'None',
-    createdDate: new Date('2026-02-15')
-  },
-  {
-    id: 'LC-2026-017',
-    name: 'Gomez Class Action',
-    client: 'Esteban Gomez',
-    opposingParty: 'Transit Group Inc.',
-    opposingCounsel: 'Phelps & Cole Counsel',
-    status: 'active',
-    attorney: 'Sarah J.',
-    initials: 'SJ',
-    color: '#C9A84C',
-    activity: '2 days ago',
-    type: 'Employment Law',
-    nextHearing: 'Sep 22, 2026',
-    createdDate: new Date('2026-05-30')
-  },
-  {
-    id: 'LC-2026-018',
-    name: 'Restructure of Zenith Corp.',
-    client: 'Zenith Retail',
-    opposingParty: 'Zenith Creditors Board',
-    opposingCounsel: 'Deloitte Legal Services',
-    status: 'pending',
-    attorney: 'Priya N.',
-    initials: 'PN',
-    color: '#2DC8B0',
-    activity: '6 days ago',
-    type: 'Bankruptcy',
-    nextHearing: 'Sep 02, 2026',
-    createdDate: new Date('2026-06-20')
-  }
-];
-
-const HEARINGS = [
-  { day: 21, month: 'Jul', case: 'Davies v. State',           time: '10:00 AM', room: 'Court 3B',  type: 'urgent',   fullDate: new Date(2026, 6, 21) },
-  { day: 22, month: 'Jul', case: 'Johnson Pre-trial Review',  time: '2:00 PM',  room: 'Chamber 1', type: 'normal',   fullDate: new Date(2026, 6, 22) },
-  { day: 25, month: 'Jul', case: 'Torres v. City Council',    time: '9:30 AM',  room: 'Court 7A',  type: 'deadline', fullDate: new Date(2026, 6, 25) },
-  { day: 28, month: 'Jul', case: 'Blake IP Dispute',          time: '11:00 AM', room: 'Court 2C',  type: 'normal',   fullDate: new Date(2026, 6, 28) },
-  { day: 31, month: 'Jul', case: 'Anderson v. Meridian Corp.', time: '3:30 PM', room: 'Court 5D',  type: 'urgent',   fullDate: new Date(2026, 6, 31) },
-];
-
-const MESSAGES = [
-  { initials: 'JA', name: 'James Anderson',   preview: '"Settlement counter-offer received"',     time: '9:14 AM',  unread: 2,  color: '#C9A84C', unreadItem: true },
-  { initials: 'ED', name: 'Emily Davies',      preview: '"Documents signed and uploaded"',          time: '8:45 AM',  unread: 0,  color: '#3B82F6', unreadItem: true },
-  { initials: 'LJ', name: 'Liam Johnson',     preview: '"Confirming Tuesday\'s hearing time"',      time: 'Yesterday', unread: 3, color: '#2DC8B0', unreadItem: true },
-  { initials: 'CG', name: 'Chloe Garrison',   preview: '"Please review the attached will"',         time: 'Yesterday', unread: 0, color: '#9B59B6', unreadItem: false },
-  { initials: 'AT', name: 'Ana Rivera',        preview: '"I have new evidence to submit"',           time: 'Mon',      unread: 0, color: '#F39C12', unreadItem: false },
-];
-
-const BILLING_DATA = [
-  { month: 'Jan', value: 38000 }, { month: 'Feb', value: 42000 }, { month: 'Mar', value: 31000 },
-  { month: 'Apr', value: 55000 }, { month: 'May', value: 48000 }, { month: 'Jun', value: 51000 },
-  { month: 'Jul', value: 44000 },
-];
-
-const ACTIVITIES = [
-  { icon: 'doc',     text: '<strong>New document uploaded</strong> – Pre-Trial Brief added to <strong>Davies v. State</strong>',       time: '12 min ago' },
-  { icon: 'msg',     text: '<strong>James Anderson</strong> replied to your message in <strong>Anderson v. Meridian</strong>',          time: '47 min ago' },
-  { icon: 'case',    text: 'Case status updated: <strong>Garrison Estate</strong> moved to <strong>Discovery Phase</strong>',           time: '2 hrs ago' },
-  { icon: 'billing', text: 'Invoice #INV-2026-084 for <strong>$8,400</strong> marked as <strong>Paid</strong>',                         time: '4 hrs ago' },
-  { icon: 'alert',   text: 'Deadline alert: Motion filing due in <strong>3 days</strong> – Torres v. City Council',                     time: '6 hrs ago' },
-  { icon: 'doc',     text: 'Document reviewed: <strong>NDA Agreement</strong> approved by <strong>Priya N.</strong>',                   time: 'Yesterday' },
-];
-
-const NOTIFICATIONS = [
-  { icon: 'alert', color: '#E74C3C', bgColor: 'rgba(231,76,60,0.15)', title: 'Urgent Hearing Tomorrow', desc: 'Davies v. State – Court 3B at 10:00 AM', time: '1 hour ago', unread: true },
-  { icon: 'msg',   color: '#3B82F6', bgColor: 'rgba(59,130,246,0.15)', title: 'New Client Message',     desc: 'James Anderson sent a settlement counter-offer', time: '2 hours ago', unread: true },
-  { icon: 'doc',   color: '#C9A84C', bgColor: 'rgba(201,168,76,0.15)', title: 'Document Needs Review',  desc: 'Garrison Estate – Will Amendment v3 uploaded', time: '3 hours ago', unread: true },
-];
+let CASES = [];
+let HEARINGS = [];
+let MESSAGES = [];
+let BILLING_DATA = [];
+let ACTIVITIES = [];
+let NOTIFICATIONS = [];
 
 const SEARCH_DATA = [
   { type: 'case', icon: 'case', name: 'Anderson v. Meridian Corp.', meta: 'Active · Commercial Litigation' },
@@ -436,6 +135,7 @@ async function initAuth() {
     Auth.setSession(token, json.data);
     applyUserToChrome(json.data);
     hideAuthOverlay();
+    loadInitialAppData();
   } catch (err) {
     Auth.clearSession();
     showAuthOverlay();
@@ -476,6 +176,7 @@ document.addEventListener('DOMContentLoaded', () => {
         Auth.setSession(json.data.token, json.data.user);
         applyUserToChrome(json.data.user);
         hideAuthOverlay();
+        loadInitialAppData();
         loginForm.reset();
         if (typeof showToast === 'function') {
           showToast(`Welcome back, ${json.data.user.full_name.split(' ')[0]}!`, 'info');
@@ -558,7 +259,10 @@ function navigateToPage(page) {
   if (placeholder) placeholder.classList.add('hidden');
 
   if (page === 'dashboard') {
-    if (dashboardPage) dashboardPage.classList.remove('hidden');
+    if (dashboardPage) {
+      dashboardPage.classList.remove('hidden');
+      loadDashboard();
+    }
   } else if (page === 'documents') {
     if (documentsPage) {
       documentsPage.classList.remove('hidden');
@@ -759,22 +463,137 @@ function animateCountUp() {
       const eased = 1 - Math.pow(1 - progress, 3);
       const current = Math.floor(eased * target);
 
-      if (isCurrency) {
-        el.textContent = current >= 1000 ? (current / 1000).toFixed(0) + ',000' : current;
-      } else {
-        el.textContent = current;
-      }
+      // Previously hardcoded a literal ",600" suffix onto every currency
+      // value at animation end — an artifact of the one demo number
+      // (142,600) this used to always render, which silently mis-formatted
+      // any other value. toLocaleString formats whatever number actually
+      // arrives from the API.
+      el.textContent = isCurrency ? current.toLocaleString('en-US') : current;
 
       if (progress < 1) requestAnimationFrame(update);
-      else {
-        if (isCurrency) el.textContent = (target / 1000).toFixed(0) + ',600';
-        else el.textContent = target;
-      }
+      else el.textContent = isCurrency ? target.toLocaleString('en-US') : target;
     }
 
     // Start after a short delay
     setTimeout(() => requestAnimationFrame(update), 300);
   });
+}
+
+// Pushes real KPI numbers from GET /api/v1/dashboard/summary into the
+// four stat-card [data-target] elements (Active Cases, Pending Documents,
+// Unread Messages, Revenue YTD), in that DOM order, then re-runs the
+// existing count-up animation against the new targets.
+function renderDashboardKpis(kpis) {
+  const targets = [kpis.active_cases, kpis.pending_documents, kpis.unread_messages, kpis.revenue_ytd];
+  $$('.stat-value[data-target]').forEach((el, i) => {
+    if (targets[i] !== undefined && targets[i] !== null) el.dataset.target = targets[i];
+  });
+  animateCountUp();
+}
+
+// ══════════════════════════════════════
+// LIVE DATA LOADERS
+// Dashboard, Active Cases and Client Communications now pull from the
+// real backend (server/services/{dashboardService,caseService,
+// communicationsService}.js) the same way the Document Vault page always
+// has — see ApiClient below and the DATA LAYER note near the top of this
+// file. Called once auth succeeds (loadInitialAppData) and again whenever
+// a page is (re)visited, matching initDocumentVault's re-fetch-on-visit
+// pattern.
+// ══════════════════════════════════════
+
+// A DATE column comes back from the API as a plain 'YYYY-MM-DD' string
+// (see server/db/pool.js). Parsed via the LOCAL Date constructor — NOT
+// `new Date(dateStr)`, which the spec treats as UTC midnight and would
+// shift the calendar day on any browser whose local timezone is behind
+// UTC — so `.getMonth()`/`.getDate()` (both local methods, used by
+// renderCalendar below) always agree with the date as entered.
+function parseDateOnly(dateStr) {
+  const [y, m, d] = dateStr.split('-').map(Number);
+  return new Date(y, m - 1, d);
+}
+
+async function loadDashboard() {
+  try {
+    const data = await ApiClient.get('/api/v1/dashboard/summary');
+    renderDashboardKpis(data.kpis);
+
+    BILLING_DATA = data.billing_chart;
+    renderBillingChart();
+
+    HEARINGS = data.hearings.map(h => ({ ...h, fullDate: parseDateOnly(h.fullDate) }));
+    renderCalendar();
+    renderHearings();
+
+    MESSAGES = data.messages;
+    renderMessages();
+
+    ACTIVITIES = data.activity;
+    renderActivityFeed();
+  } catch (err) {
+    console.error('Dashboard load error', err);
+  }
+}
+
+// Backs both the dashboard's "Recent Case Activity" mini table
+// (caseTableBody / renderCaseTable) and the full Active Cases page table
+// (casesLargeTableBody / renderCasesList) — both read from the same
+// CASES array, same as when it was a hardcoded fixture.
+async function loadCases() {
+  try {
+    CASES = await ApiClient.get('/api/v1/cases');
+    filteredCases = [...CASES];
+    currentPage = 1;
+    renderCaseTable();
+    casesCurrentPage = 1;
+    renderCasesList();
+  } catch (err) {
+    console.error('Cases load error', err);
+    const tbody = $('casesLargeTableBody');
+    if (tbody) tbody.innerHTML = `<tr><td colspan="6" style="text-align:center;color:var(--slate-400)">Error loading cases</td></tr>`;
+  }
+}
+
+async function loadConversations() {
+  try {
+    CONVERSATIONS = await ApiClient.get('/api/v1/conversations');
+    if (!CONVERSATIONS.find(c => c.id === activeConvId)) {
+      activeConvId = CONVERSATIONS.length ? CONVERSATIONS[0].id : null;
+    }
+    renderCommsSidebar();
+    if (activeConvId) {
+      await loadConversationDetail(activeConvId);
+    } else {
+      renderActiveChat();
+    }
+  } catch (err) {
+    console.error('Conversations load error', err);
+  }
+}
+
+// Fetches the full message thread for one conversation (GET returns
+// role-scoped messages — notes stripped server-side for a CLIENT caller,
+// see communicationsService.js) and merges it into the matching
+// CONVERSATIONS entry so renderActiveChat can keep reading from that
+// array the way it always has.
+async function loadConversationDetail(id) {
+  try {
+    const detail = await ApiClient.get(`/api/v1/conversations/${id}`);
+    const idx = CONVERSATIONS.findIndex(c => c.id === id);
+    if (idx !== -1) {
+      CONVERSATIONS[idx] = { ...CONVERSATIONS[idx], ...detail, unread: 0 };
+    } else {
+      CONVERSATIONS.push({ ...detail, unread: 0 });
+    }
+    renderCommsSidebar();
+    renderActiveChat();
+  } catch (err) {
+    console.error('Conversation detail load error', err);
+  }
+}
+
+async function loadInitialAppData() {
+  await Promise.all([loadDashboard(), loadCases()]);
 }
 
 // ══════════════════════════════════════
@@ -859,7 +678,7 @@ function initCaseTable() {
 // CALENDAR
 // ══════════════════════════════════════
 
-let calYear = 2026, calMonth = 6; // July = month index 6
+let calYear = new Date().getFullYear(), calMonth = new Date().getMonth();
 
 function renderCalendar() {
   const firstDay = new Date(calYear, calMonth, 1).getDay();
@@ -1086,6 +905,7 @@ let casesListenersInitialized = false;
 function initCasesPage() {
   renderCasesList();
   setupCasesPageListeners();
+  loadCases(); // re-fetch on every visit, same pattern as initDocumentVault
 }
 
 function renderCasesList() {
@@ -1385,56 +1205,35 @@ function closeNewCaseModal() {
   }
 }
 
-function handleNewCaseSubmit(e) {
+async function handleNewCaseSubmit(e) {
   e.preventDefault();
-  
+
   const title = $('newCaseTitle').value;
   const client = $('newCaseClient').value;
   const opposing = $('newCaseOpposing').value;
   const counsel = $('newCaseCounsel').value;
   const area = $('newCaseArea').value;
-  const attorney = $('newCaseAttorney').value;
+  const attorney = $('newCaseAttorney').value; // e.g. "Sarah J." — matched server-side to a real user
   const status = $('newCaseStatus').value;
-  let hearing = $('newCaseHearing').value || 'None';
-  
-  const attyInfo = {
-    'Sarah J.': { initials: 'SJ', color: '#C9A84C' },
-    'Marcus R.': { initials: 'MR', color: '#3B82F6' },
-    'Priya N.': { initials: 'PN', color: '#2DC8B0' }
-  };
-  
-  const info = attyInfo[attorney] || { initials: 'XX', color: '#95A5A6' };
-  const nextNum = CASES.length + 1;
-  const newId = `LC-2026-${nextNum.toString().padStart(3, '0')}`;
-  
-  const newCase = {
-    id: newId,
-    name: title,
-    client: client,
-    opposingParty: opposing,
-    opposingCounsel: counsel,
-    status: status,
-    attorney: attorney,
-    initials: info.initials,
-    color: info.color,
-    activity: 'Just now',
-    type: area,
-    nextHearing: hearing,
-    createdDate: new Date()
-  };
-  
-  CASES.unshift(newCase);
-  closeNewCaseModal();
-  showToast(`Case ${newId} created successfully.`, 'success');
-  
-  renderCaseTable();
-  renderCasesList();
-  
-  const activeCountEl = document.querySelector('.stat-card[data-animate] .stat-value');
-  if (activeCountEl) {
-    const currentTarget = parseInt(activeCountEl.dataset.target, 10);
-    activeCountEl.dataset.target = currentTarget + 1;
-    animateCountUp();
+  const hearing = $('newCaseHearing').value || 'None';
+
+  const submitBtn = e.target.querySelector('button[type="submit"]');
+  if (submitBtn) { submitBtn.disabled = true; submitBtn.textContent = 'Creating…'; }
+
+  try {
+    const { ok, json } = await ApiClient.post('/api/v1/cases', {
+      title, client, opposingParty: opposing, opposingCounsel: counsel,
+      area, attorney, status, hearing
+    });
+    if (!ok) throw new Error(json.error || 'Failed to create case.');
+
+    closeNewCaseModal();
+    showToast(`Case ${json.data.id} created successfully.`, 'success');
+    await loadCases(); // re-fetch rather than hand-splicing the new row, so every derived field (color, initials, formatted hearing date) matches what a fresh page load would show
+  } catch (err) {
+    showToast(err.message || 'Failed to create case.', 'error');
+  } finally {
+    if (submitBtn) { submitBtn.disabled = false; submitBtn.textContent = 'Create Case Record'; }
   }
 }
 
@@ -1455,7 +1254,7 @@ function closeAllActionsDropdowns() {
   });
 }
 
-function handleCaseAction(action, caseId, caseName) {
+async function handleCaseAction(action, caseId, caseName) {
   closeAllActionsDropdowns();
   if (action === 'open') {
     showToast(`Accessing secure repository for ${caseName} (${caseId}).`, 'info');
@@ -1465,14 +1264,14 @@ function handleCaseAction(action, caseId, caseName) {
     showToast(`Opening client communications panel for ${caseName}.`, 'info');
   } else if (action === 'archive') {
     const confirmArchive = confirm(`Are you sure you want to archive case: ${caseName}?`);
-    if (confirmArchive) {
-      const idx = CASES.findIndex(c => c.id === caseId);
-      if (idx !== -1) {
-        CASES[idx].status = 'closed';
-        showToast(`Case ${caseId} has been successfully archived.`, 'success');
-        renderCaseTable();
-        renderCasesList();
-      }
+    if (!confirmArchive) return;
+
+    try {
+      await ApiClient.patch(`/api/v1/cases/${caseId}/archive`, {});
+      showToast(`Case ${caseId} has been successfully archived.`, 'success');
+      await loadCases();
+    } catch (err) {
+      showToast(err.message || 'Failed to archive case.', 'error');
     }
   }
 }
@@ -1529,135 +1328,23 @@ document.addEventListener('keydown', (e) => {
 // INITIALIZATION
 // ══════════════════════════════════════
 
-document.addEventListener('DOMContentLoaded', () => {
-  updateDate();
-  initSidebar();
-  initProfileDropdown();
-  initNotifications();
-  initSearch();
-  initCaseTable();
-  initCalendar();
-  renderMessages();
-  renderBillingChart();
-  renderActivityFeed();
-  initNewCaseButton();
-  animateCountUp();
-
-  // Link dashboard cards to their pages
-  const cards = $$('.stat-card');
-  if (cards[0]) cards[0].addEventListener('click', () => navigateToPage('cases'));
-  if (cards[1]) cards[1].addEventListener('click', () => navigateToPage('documents'));
-  if (cards[2]) cards[2].addEventListener('click', () => navigateToPage('communications'));
-  if (cards[3]) cards[3].addEventListener('click', () => navigateToPage('billing'));
-
-  // Intersection observer for card animations (re-trigger on scroll)
-  const observer = new IntersectionObserver((entries) => {
-    entries.forEach(entry => {
-      if (entry.isIntersecting) {
-        entry.target.style.opacity = '';
-        entry.target.style.animation = 'fadeInUp 0.5s ease forwards';
-      }
-    });
-  }, { threshold: 0.1 });
-
-  $$('[data-animate]').forEach(el => observer.observe(el));
-
-  // Show welcome toast
-  setTimeout(() => showToast('Welcome back, Sarah! You have 3 urgent items.', 'info'), 800);
-});
 
 /* ════════════════════════════════════════════
    CLIENT COMMUNICATIONS DATA LAYER
-   STATUS: static mock data, not wired to the backend (see the DATA LAYER
-   note near the top of this file and README.md for the full picture).
+   STATUS: real data from GET /api/v1/conversations and
+   GET /api/v1/conversations/:id (server/services/communicationsService.js)
+   — populated by loadConversations()/loadConversationDetail(), not a
+   literal. Role-scoped and note-filtered server-side: see the file header
+   comment in communicationsService.js.
    ════════════════════════════════════════════ */
 
-const CONVERSATIONS = [
-  {
-    id: 'conv-1',
-    caseId: 'LC-2026-001',
-    clientName: 'James Anderson',
-    caseName: 'Anderson v. Meridian Corp.',
-    status: 'active',
-    initials: 'JA',
-    color: '#C9A84C',
-    unread: 2,
-    messages: [
-      { sender: 'client', text: 'Hi Sarah, did you get the copy of the contract signed by Meridian?', time: '9:10 AM', isNote: false },
-      { sender: 'staff', text: 'Yes, James. Our team has received it and uploaded it to the vault.', time: '9:12 AM', isNote: false },
-      { sender: 'note', text: 'STAFF NOTE: Checked contract draft. Signature verified. Ready for filing tomorrow.', time: '9:13 AM', isNote: true },
-      { sender: 'client', text: 'Perfect. Let me know when the settlement counter-offer is drafted.', time: '9:14 AM', isNote: false }
-    ]
-  },
-  {
-    id: 'conv-2',
-    caseId: 'LC-2026-002',
-    clientName: 'Emily Davies',
-    caseName: 'Davies v. State',
-    status: 'pending',
-    initials: 'ED',
-    color: '#3B82F6',
-    unread: 0,
-    messages: [
-      { sender: 'staff', text: 'Emily, we need the notarized deposition by end of week.', time: 'Yesterday', isNote: false },
-      { sender: 'client', text: 'I am signing them now and will upload them shortly.', time: 'Yesterday', isNote: false },
-      { sender: 'note', text: 'STAFF NOTE: Client will upload signed docs via portal. Follow up on Friday.', time: 'Yesterday', isNote: true },
-      { sender: 'client', text: 'Documents signed and uploaded. Please review.', time: '8:45 AM', isNote: false }
-    ]
-  },
-  {
-    id: 'conv-3',
-    caseId: 'LC-2026-003',
-    clientName: 'Liam Johnson',
-    caseName: 'Johnson Pre-trial Review',
-    status: 'pending',
-    initials: 'LJ',
-    color: '#2DC8B0',
-    unread: 3,
-    messages: [
-      { sender: 'staff', text: 'Liam, the pre-trial conference is scheduled for Tuesday.', time: '2 days ago', isNote: false },
-      { sender: 'client', text: 'Got it. Will we need to present any witness statements?', time: 'Yesterday', isNote: false },
-      { sender: 'client', text: 'Confirming Tuesday\'s hearing time. Is it still 2:00 PM?', time: 'Yesterday', isNote: false },
-      { sender: 'client', text: 'Please reply when free. Thanks!', time: 'Yesterday', isNote: false }
-    ]
-  },
-  {
-    id: 'conv-4',
-    caseId: 'LC-2026-004',
-    clientName: 'Chloe Garrison',
-    caseName: 'Garrison Estate Management',
-    status: 'active',
-    initials: 'CG',
-    color: '#9B59B6',
-    unread: 0,
-    messages: [
-      { sender: 'client', text: 'Hi Sarah, can we add a clause to the will regarding the trust distribution?', time: '3 days ago', isNote: false },
-      { sender: 'staff', text: 'Absolutely. We will draw up an amendment for your signature.', time: '2 days ago', isNote: false },
-      { sender: 'client', text: 'Please review the attached will v3.', time: 'Yesterday', isNote: false }
-    ]
-  },
-  {
-    id: 'conv-5',
-    caseId: 'LC-2026-009',
-    clientName: 'Ana Rivera',
-    caseName: 'Rivera Wrongful Dismiss.',
-    status: 'active',
-    initials: 'AR',
-    color: '#F39C12',
-    unread: 0,
-    messages: [
-      { sender: 'client', text: 'I have compiled the timesheets and email correspondence.', time: '4 days ago', isNote: false },
-      { sender: 'staff', text: 'Excellent, this is vital evidence. We will add this to the discovery files.', time: '3 days ago', isNote: false },
-      { sender: 'client', text: 'I have new evidence to submit. Let me know when we can talk.', time: 'Mon', isNote: false }
-    ]
-  }
-];
+let CONVERSATIONS = [];
 
 /* ════════════════════════════════════════════
    CLIENT COMMUNICATIONS HUB CONTROLLER
    ════════════════════════════════════════════ */
 
-let activeConvId = "conv-1";
+let activeConvId = null;
 let commsSearchQuery = "";
 let commsListenersInitialized = false;
 
@@ -1665,6 +1352,7 @@ function initCommsPage() {
   renderCommsSidebar();
   renderActiveChat();
   setupCommsPageListeners();
+  loadConversations(); // re-fetch on every visit, same pattern as initDocumentVault
 }
 
 function renderCommsSidebar() {
@@ -1674,17 +1362,18 @@ function renderCommsSidebar() {
   const filtered = CONVERSATIONS.filter(c => {
     const q = commsSearchQuery.toLowerCase();
     return c.clientName.toLowerCase().includes(q) ||
-           c.caseId.toLowerCase().includes(q) ||
-           c.caseName.toLowerCase().includes(q);
+           (c.caseId || '').toLowerCase().includes(q) ||
+           (c.caseName || '').toLowerCase().includes(q);
   });
 
   list.innerHTML = filtered.map(c => {
-    const lastMsg = c.messages[c.messages.length - 1];
-    let previewText = lastMsg ? lastMsg.text : "No messages yet";
-    if (lastMsg && lastMsg.isNote) {
-      previewText = `[Note] ${lastMsg.text.replace('STAFF NOTE: ', '')}`;
-    }
-    
+    // `preview` (last-message text, already formatted as "[Note] ..." when
+    // the last message was a staff note) comes straight from the API —
+    // see communicationsService.js's toConversationSummaryView — rather
+    // than being derived from c.messages, which isn't populated for every
+    // conversation in the list, only the one whose thread has been opened.
+    const previewText = c.preview || 'No messages yet';
+
     return `
       <div class="comms-conv-item ${c.id === activeConvId ? 'active' : ''}" onclick="selectConversation('${c.id}')">
         <div class="conv-avatar" style="background:${c.color}22; color:${c.color}">
@@ -1739,6 +1428,14 @@ function renderActiveChat() {
     </button>
   `;
 
+  // conv.messages is only populated once loadConversationDetail(id) has
+  // fetched the full thread for this specific conversation — the sidebar
+  // list endpoint doesn't include message bodies at all.
+  if (!conv.messages) {
+    stream.innerHTML = `<div style="text-align:center;color:var(--slate-400);padding:24px">Loading messages…</div>`;
+    return;
+  }
+
   stream.innerHTML = conv.messages.map(m => {
     if (m.isNote) {
       return `
@@ -1777,14 +1474,13 @@ function renderActiveChat() {
   }, 20);
 }
 
-function selectConversation(id) {
+async function selectConversation(id) {
   activeConvId = id;
   const conv = CONVERSATIONS.find(c => c.id === id);
-  if (conv) {
-    conv.unread = 0;
-  }
+  if (conv) conv.unread = 0;
   renderCommsSidebar();
-  renderActiveChat();
+  renderActiveChat(); // shows the summary row immediately; loadConversationDetail below fills in the message thread (and re-renders) once it arrives
+  await loadConversationDetail(id);
 }
 
 function setupCommsPageListeners() {
@@ -1830,39 +1526,34 @@ function setupCommsPageListeners() {
   commsListenersInitialized = true;
 }
 
-function handleSendCommsMessage(event) {
+async function handleSendCommsMessage(event) {
   event.preventDefault();
   const input = $('commsMessageInput');
   const toggle = $('internalNoteToggle');
   const text = input.value.trim();
-  
-  if (!text) return;
 
-  const conv = CONVERSATIONS.find(c => c.id === activeConvId);
-  if (!conv) return;
-
-  const now = new Date();
-  let timeStr = now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  if (!text || !activeConvId) return;
 
   const isNote = toggle.checked;
-  const newMsg = {
-    sender: isNote ? 'note' : 'staff',
-    text: isNote ? `STAFF NOTE: ${text}` : text,
-    time: timeStr,
-    isNote: isNote
-  };
+  const sendBtn = $('btnSendSecure');
+  if (sendBtn) sendBtn.disabled = true;
 
-  conv.messages.push(newMsg);
-  input.value = '';
-  input.style.height = 'auto';
-  
-  renderActiveChat();
-  renderCommsSidebar();
+  try {
+    // isNote is sent as a hint, but the server decides the actual sender
+    // — a CLIENT-role caller can never produce a note even if this box is
+    // somehow checked (see communicationsService.postMessage).
+    const { ok, json } = await ApiClient.post(`/api/v1/conversations/${activeConvId}/messages`, { text, isNote });
+    if (!ok) throw new Error(json.error || 'Failed to send message.');
 
-  if (!isNote) {
-    showToast('Secure Client Message Transmitted successfully.', 'success');
-  } else {
-    showToast('Internal Firm Note saved securely.', 'success');
+    input.value = '';
+    input.style.height = 'auto';
+    await loadConversationDetail(activeConvId); // re-fetch the thread so the new message renders with its server-assigned id/timestamp
+
+    showToast(isNote ? 'Internal Firm Note saved securely.' : 'Secure Client Message Transmitted successfully.', 'success');
+  } catch (err) {
+    showToast(err.message || 'Failed to send message.', 'error');
+  } finally {
+    if (sendBtn) sendBtn.disabled = false;
   }
 }
 
@@ -3431,8 +3122,7 @@ function initCopilot() {
   });
 }
 
-// Hook into existing DOMContentLoaded
-const originalInit = document.addEventListener('DOMContentLoaded', () => {
+document.addEventListener('DOMContentLoaded', () => {
   updateDate();
   initSidebar();
   initProfileDropdown();
@@ -3440,12 +3130,12 @@ const originalInit = document.addEventListener('DOMContentLoaded', () => {
   initSearch();
   initCaseTable();
   initCalendar();
-  renderMessages();
-  renderBillingChart();
-  renderActivityFeed();
   initNewCaseButton();
-  animateCountUp();
   initCopilot();
+  // Dashboard content, case data, and the welcome toast all depend on an
+  // authenticated identity now (real per-user names/counts, not a
+  // hardcoded "Sarah"/"3 urgent items") — loaded by loadInitialAppData()
+  // once auth resolves, see initAuth() and the login handler above.
 
   // Link dashboard cards to their pages
   const cards = $$('.stat-card');
@@ -3465,7 +3155,4 @@ const originalInit = document.addEventListener('DOMContentLoaded', () => {
   }, { threshold: 0.1 });
 
   $$('[data-animate]').forEach(el => observer.observe(el));
-
-  // Show welcome toast
-  setTimeout(() => showToast('Welcome back, Sarah! You have 3 urgent items.', 'info'), 800);
 });

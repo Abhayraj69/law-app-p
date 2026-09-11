@@ -17,6 +17,9 @@ const upload = multer({
 
 const vaultController = require('../controllers/vaultController');
 const copilotController = require('../controllers/copilotController');
+const dashboardController = require('../controllers/dashboardController');
+const caseController = require('../controllers/caseController');
+const communicationsController = require('../controllers/communicationsController');
 
 // Apply Global Tenant Authentication & User Context
 router.use(authMiddleware);
@@ -89,7 +92,31 @@ router.get('/vault/flagged-messages', vaultController.getFlaggedMessages);
 router.get('/vault/deadlines', vaultController.getDeadlines);
 router.get('/vault/sidebar-widgets', vaultController.getSidebarWidgets);
 
-// E. AI COPILOT TOOLS
+// ═════════════════════════════════════════════════════════════════════
+// E. DASHBOARD OVERVIEW
+// ═════════════════════════════════════════════════════════════════════
+router.get('/dashboard/summary', dashboardController.getSummary);
+
+// ═════════════════════════════════════════════════════════════════════
+// F. ACTIVE CASES
+// ═════════════════════════════════════════════════════════════════════
+router.get('/cases', caseController.listCases);
+router.get('/cases/:id', caseController.getCase);
+// Case audit entries are logged directly by CaseService (not via
+// logAuditAction) because that middleware's document_id column expects a
+// document UUID, and a case id like "LC-2026-001" isn't one — see
+// CaseService for where CREATE_CASE / ARCHIVE_CASE audit rows are written.
+router.post('/cases', caseController.createCase);
+router.patch('/cases/:id/archive', requireRole('ASSOCIATE'), caseController.archiveCase);
+
+// ═════════════════════════════════════════════════════════════════════
+// G. CLIENT COMMUNICATIONS
+// ═════════════════════════════════════════════════════════════════════
+router.get('/conversations', communicationsController.listConversations);
+router.get('/conversations/:id', communicationsController.getConversation);
+router.post('/conversations/:id/messages', communicationsController.postMessage);
+
+// H. AI COPILOT TOOLS
 router.post('/copilot/search', copilotController.validateToolInput('searchVault'), copilotController.searchVault);
 router.post('/copilot/summarize', copilotController.validateToolInput('summarizeDocument'), copilotController.summarizeDocument);
 router.post('/copilot/manage-files', copilotController.validateToolInput('manageFiles'), copilotController.manageFiles);

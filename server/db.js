@@ -331,10 +331,290 @@ async function insertClientMessage({ firmId, clientName, clientAvatar, subject, 
   return rows[0];
 }
 
+async function insertCaseDeadline({ firmId, caseId, title, location, deadlineDate, timeText, badgeType, badgeColor }) {
+  const { rows } = await pool.query(
+    `INSERT INTO case_deadlines (firm_id, case_id, title, location, deadline_date, time_text, badge_type, badge_color)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+     RETURNING *`,
+    [firmId, caseId, title, location || null, deadlineDate, timeText || null, badgeType || 'Hearing', badgeColor || '#C9A84C']
+  );
+  return rows[0];
+}
+
 async function listCaseDeadlines(firmId) {
   const { rows } = await pool.query(
     'SELECT * FROM case_deadlines WHERE firm_id = $1 ORDER BY deadline_date ASC',
     [firmId]
+  );
+  return rows;
+}
+
+// ── Cases (full CRUD backing the Active Cases page) ─────────────────────
+//
+// `client_user_id` is how role scoping works: a CLIENT-role user only ever
+// sees cases where this column matches their own id. Callers pass the
+// requesting `user` object in; every function here applies that filter
+// itself rather than trusting the caller to have already scoped the rows,
+// so a missing filter upstream can't leak another client's case.
+function scopeCasesToUser(query, values, user, alias = 'cases') {
+  if (user && user.role === 'CLIENT') {
+    values.push(user.id);
+    return `${query} AND ${alias}.client_user_id = $${values.length}`;
+  }
+  return query;
+}
+
+// The Active Cases table shows each case's next hearing, which lives in
+// case_deadlines — pulled here as a correlated subquery so listing N cases
+// stays one round trip instead of N+1.
+const CASE_SELECT = `
+  SELECT cases.*,
+         u.full_name AS lead_attorney_name,
+         u.initials AS lead_attorney_initials,
+         (SELECT cd.deadline_date FROM case_deadlines cd
+           WHERE cd.case_id = cases.id AND cd.deadline_date >= CURRENT_DATE
+           ORDER BY cd.deadline_date ASC LIMIT 1) AS next_hearing_date
+  FROM cases
+  LEFT JOIN users u ON u.id = cases.lead_attorney_id
+`;
+
+async function listCasesForUser(firmId, user) {
+  const values = [firmId];
+  let query = `${CASE_SELECT} WHERE cases.firm_id = $1`;
+  query = scopeCasesToUser(query, values, user);
+  query += ' ORDER BY cases.updated_at DESC';
+  const { rows } = await pool.query(query, values);
+  return rows;
+}
+
+async function getCaseByIdForUser(firmId, caseId, user) {
+  const values = [firmId, caseId];
+  let query = `${CASE_SELECT} WHERE cases.firm_id = $1 AND cases.id = $2`;
+  query = scopeCasesToUser(query, values, user);
+  const { rows } = await pool.query(query, values);
+  return rows[0] || null;
+}
+
+async function insertCase({ id, firmId, caseName, clientName, opposingParty, opposingCounsel, status, leadAttorneyId, caseType, clientUserId }) {
+  const { rows } = await pool.query(
+    `INSERT INTO cases (id, firm_id, case_name, client_name, opposing_party, opposing_counsel, status, lead_attorney_id, case_type, client_user_id)
+     VALUES ($1, $2, $3, $4, $5, $6, COALESCE($7, 'active'), $8, $9, $10)
+     RETURNING *`,
+    [id, firmId, caseName, clientName, opposingParty || null, opposingCounsel || null, status || null, leadAttorneyId || null, caseType || null, clientUserId || null]
+  );
+  return rows[0];
+}
+
+async function updateCaseStatus(firmId, caseId, status) {
+  const { rows } = await pool.query(
+    `UPDATE cases SET status = $1, updated_at = CURRENT_TIMESTAMP
+     WHERE firm_id = $2 AND id = $3
+     RETURNING *`,
+    [status, firmId, caseId]
+  );
+  return rows[0] || null;
+}
+
+// Highest existing numeric suffix of a case id like 'LC-2026-014', used to
+// generate the next id when creating a case from the UI.
+async function getMaxCaseNumber(firmId) {
+  const { rows } = await pool.query(
+    `SELECT id FROM cases WHERE firm_id = $1 AND id ~ '^LC-[0-9]{4}-[0-9]+$' ORDER BY id DESC`,
+    [firmId]
+  );
+  let max = 0;
+  for (const row of rows) {
+    const n = parseInt(row.id.split('-')[2], 10);
+    if (n > max) max = n;
+  }
+  return max;
+}
+
+// ── Invoices ─────────────────────────────────────────────────────────────
+async function listInvoicesByFirm(firmId) {
+  const { rows } = await pool.query(
+    `SELECT invoices.*, cases.case_name FROM invoices
+     LEFT JOIN cases ON cases.id = invoices.case_id
+     WHERE invoices.firm_id = $1
+     ORDER BY invoices.issued_date DESC`,
+    [firmId]
+  );
+  return rows.map(r => ({ ...r, amount_cents: Number(r.amount_cents) }));
+}
+
+// Monthly totals for the billing chart plus overdue invoice stats for the
+// dashboard KPI card. Done as two small queries rather than pulling every
+// invoice row and summing in JS, since this is meant to scale with real
+// invoice volume.
+async function getMonthlyBillingTotals(firmId, months = 7) {
+  const { rows } = await pool.query(
+    `SELECT to_char(date_trunc('month', issued_date), 'Mon') AS month,
+            date_trunc('month', issued_date) AS month_start,
+            SUM(amount_cents)::bigint AS total_cents
+     FROM invoices
+     WHERE firm_id = $1 AND status IN ('paid', 'sent', 'overdue')
+       AND issued_date >= (CURRENT_DATE - ($2 || ' months')::interval)
+     GROUP BY 1, 2
+     ORDER BY 2 ASC`,
+    [firmId, months]
+  );
+  return rows.map(r => ({ month: r.month, value: Number(r.total_cents) }));
+}
+
+async function getInvoiceStats(firmId) {
+  const { rows } = await pool.query(
+    `SELECT
+        COALESCE(SUM(amount_cents) FILTER (WHERE status = 'paid' AND issued_date >= date_trunc('year', CURRENT_DATE)), 0)::bigint AS revenue_ytd_cents,
+        COUNT(*) FILTER (WHERE status = 'overdue') AS overdue_count,
+        COALESCE(SUM(amount_cents) FILTER (WHERE status = 'overdue'), 0)::bigint AS overdue_cents
+     FROM invoices WHERE firm_id = $1`,
+    [firmId]
+  );
+  const r = rows[0];
+  return {
+    revenue_ytd_cents: Number(r.revenue_ytd_cents),
+    overdue_count: Number(r.overdue_count),
+    overdue_cents: Number(r.overdue_cents)
+  };
+}
+
+// ── Conversations / threaded client communications ──────────────────────
+// Same role-scoping rule as cases: a CLIENT only ever sees conversations
+// where client_user_id matches their own id.
+function scopeConversationsToUser(query, values, user) {
+  if (user && user.role === 'CLIENT') {
+    values.push(user.id);
+    return `${query} AND conversations.client_user_id = $${values.length}`;
+  }
+  return query;
+}
+
+async function listConversationsForUser(firmId, user) {
+  const values = [firmId];
+  let query = `SELECT conversations.*, cases.case_name,
+                      (SELECT body FROM conversation_messages cm WHERE cm.conversation_id = conversations.id
+                        ${user && user.role === 'CLIENT' ? "AND cm.sender != 'note'" : ''}
+                       ORDER BY cm.created_at DESC LIMIT 1) AS last_message_body,
+                      (SELECT sender FROM conversation_messages cm WHERE cm.conversation_id = conversations.id
+                        ${user && user.role === 'CLIENT' ? "AND cm.sender != 'note'" : ''}
+                       ORDER BY cm.created_at DESC LIMIT 1) AS last_message_sender,
+                      (SELECT COUNT(*) FROM conversation_messages cm WHERE cm.conversation_id = conversations.id
+                        AND cm.is_read = FALSE AND cm.sender != 'staff') AS unread_count
+               FROM conversations
+               LEFT JOIN cases ON cases.id = conversations.case_id
+               WHERE conversations.firm_id = $1`;
+  query = scopeConversationsToUser(query, values, user);
+  query += ' ORDER BY conversations.updated_at DESC';
+  const { rows } = await pool.query(query, values);
+  return rows.map(r => ({ ...r, unread_count: Number(r.unread_count) }));
+}
+
+// Fetches one conversation (role-scoped) with its full message list.
+// `includeNotes` is set to false by the controller for a CLIENT-role
+// caller so internal staff notes are never even serialized into the
+// response, not just hidden client-side.
+async function getConversationWithMessages(firmId, conversationId, user, includeNotes) {
+  const values = [firmId, conversationId];
+  let query = `SELECT conversations.*, cases.case_name FROM conversations
+               LEFT JOIN cases ON cases.id = conversations.case_id
+               WHERE conversations.firm_id = $1 AND conversations.id = $2`;
+  query = scopeConversationsToUser(query, values, user);
+  const { rows } = await pool.query(query, values);
+  const conversation = rows[0];
+  if (!conversation) return null;
+
+  let msgQuery = `SELECT cm.*, u.full_name AS sender_name FROM conversation_messages cm
+                  LEFT JOIN users u ON u.id = cm.sender_user_id
+                  WHERE cm.conversation_id = $1`;
+  const msgValues = [conversationId];
+  if (!includeNotes) {
+    msgQuery += ` AND cm.sender != 'note'`;
+  }
+  msgQuery += ' ORDER BY cm.created_at ASC';
+  const { rows: messages } = await pool.query(msgQuery, msgValues);
+
+  return { ...conversation, messages };
+}
+
+async function insertConversation({ id, firmId, caseId, clientUserId, clientName, clientInitials, clientColor }) {
+  const { rows } = await pool.query(
+    `INSERT INTO conversations (id, firm_id, case_id, client_user_id, client_name, client_initials, client_color)
+     VALUES (COALESCE($1, uuid_generate_v4()), $2, $3, $4, $5, $6, $7)
+     RETURNING *`,
+    [id || null, firmId, caseId || null, clientUserId || null, clientName, clientInitials || null, clientColor || null]
+  );
+  return rows[0];
+}
+
+async function insertConversationMessage({ conversationId, sender, senderUserId, body }) {
+  const { rows } = await pool.query(
+    `INSERT INTO conversation_messages (conversation_id, sender, sender_user_id, body)
+     VALUES ($1, $2, $3, $4)
+     RETURNING *`,
+    [conversationId, sender, senderUserId || null, body]
+  );
+  await pool.query('UPDATE conversations SET updated_at = CURRENT_TIMESTAMP WHERE id = $1', [conversationId]);
+  return rows[0];
+}
+
+async function markConversationRead(conversationId) {
+  await pool.query(
+    `UPDATE conversation_messages SET is_read = TRUE WHERE conversation_id = $1 AND sender != 'staff'`,
+    [conversationId]
+  );
+}
+
+// ── Dashboard aggregates ────────────────────────────────────────────────
+//
+// The dashboard's four KPI tiles are counted in SQL rather than by pulling
+// every case/document/message row into Node and counting there. Role
+// scoping is applied to the case and conversation counts the same way the
+// list queries apply it, so a CLIENT's dashboard never reports totals that
+// include other clients' matters.
+async function getDashboardCounts(firmId, user) {
+  const isClient = !!(user && user.role === 'CLIENT');
+  const clientId = isClient ? user.id : null;
+
+  const { rows } = await pool.query(
+    `SELECT
+       (SELECT COUNT(*) FROM cases
+         WHERE firm_id = $1 AND status <> 'closed'
+           AND ($2::uuid IS NULL OR client_user_id = $2)) AS active_cases,
+       (SELECT COUNT(*) FROM documents d
+         WHERE d.firm_id = $1 AND d.is_deleted = FALSE AND d.is_flagged = TRUE
+           AND ($2::uuid IS NULL OR d.case_id IN (
+                 SELECT id FROM cases WHERE firm_id = $1 AND client_user_id = $2))) AS pending_documents,
+       (SELECT COUNT(*) FROM conversation_messages cm
+         JOIN conversations c ON c.id = cm.conversation_id
+         WHERE c.firm_id = $1 AND cm.is_read = FALSE AND cm.sender <> 'staff'
+           AND ($2::uuid IS NULL OR c.client_user_id = $2)) AS unread_messages`,
+    [firmId, clientId]
+  );
+
+  const r = rows[0];
+  return {
+    active_cases: Number(r.active_cases),
+    pending_documents: Number(r.pending_documents),
+    unread_messages: Number(r.unread_messages)
+  };
+}
+
+// The dashboard activity feed is built from the real audit trail rather
+// than a fixture list, so it reflects what actually happened in the app.
+async function listRecentAuditActivity(firmId, limit = 6) {
+  const { rows } = await pool.query(
+    `SELECT a.id, a.action, a.created_at, a.details,
+            u.full_name AS user_name,
+            d.file_name AS document_name,
+            c.case_name, c.id AS case_id
+     FROM audit_logs a
+     LEFT JOIN users u ON u.id = a.user_id
+     LEFT JOIN documents d ON d.id = a.document_id
+     LEFT JOIN cases c ON c.id = d.case_id
+     WHERE a.firm_id = $1
+     ORDER BY a.created_at DESC
+     LIMIT $2`,
+    [firmId, limit]
   );
   return rows;
 }
@@ -366,5 +646,21 @@ module.exports = {
   insertAuditLog,
   listClientMessages,
   insertClientMessage,
-  listCaseDeadlines
+  listCaseDeadlines,
+  listCasesForUser,
+  getCaseByIdForUser,
+  insertCase,
+  updateCaseStatus,
+  getMaxCaseNumber,
+  listInvoicesByFirm,
+  getMonthlyBillingTotals,
+  getInvoiceStats,
+  listConversationsForUser,
+  getConversationWithMessages,
+  insertConversation,
+  insertConversationMessage,
+  markConversationRead,
+  getDashboardCounts,
+  listRecentAuditActivity,
+  insertCaseDeadline
 };
