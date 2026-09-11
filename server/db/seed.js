@@ -274,6 +274,14 @@ async function seedConversations(client) {
     );
     if (existingMessages.rows[0].n > 0) continue; // don't duplicate messages on re-run
 
+    // Deliberately still a raw plaintext insert (not
+    // messageEncryption.encryptMessageBody / db.insertConversationMessage,
+    // which now require encrypted columns) — this gives every freshly
+    // seeded environment real legacy-plaintext rows, exercising exactly
+    // the dual-read fallback (messageEncryptionService.resolveMessageBody)
+    // and the backfill script (npm run backfill:encrypt-messages) are for.
+    // See db/migrations/0006_message_encryption.sql's header for the full
+    // migration plan this models.
     for (const m of conv.messages) {
       await client.query(
         `INSERT INTO conversation_messages (conversation_id, sender, sender_user_id, body)

@@ -8,9 +8,11 @@
     "dev": "node server/server.js",
     "migrate": "node server/db/migrate.js",
     "seed": "node server/db/seed.js",
+    "backfill:encrypt-messages": "node server/scripts/backfillMessageEncryption.js",
     "test": "node --test server/test/*.test.js"
   },
   "dependencies": {
+    "@aws-sdk/client-kms": "^3.1130.0",
     "@openrouter/sdk": "^1.2.84",
     "bcryptjs": "^3.0.3",
     "cors": "^2.8.5",

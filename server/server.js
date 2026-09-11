@@ -11,6 +11,7 @@ const authRoutes = require('./routes/auth');
 const { checkConnection } = require('./db/pool');
 const { runMigrations } = require('./db/migrate');
 const { checkClamAvRequirement } = require('./middleware/securityScanner');
+const { checkMessageEncryptionRequirement } = require('./services/encryption/messageEncryptionService');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -110,6 +111,23 @@ async function start() {
     }
   } catch (err) {
     console.error('[SECURITY] FATAL: malware scanning requirement not met.');
+    console.error(`[SECURITY] ${err.message}`);
+    process.exit(1);
+  }
+
+  // Same rule, same reason, as ClamAV above: outside NODE_ENV=development,
+  // sending or reading a message requires a working KMS-backed key
+  // provider — checked here (which mints the firm's very first data
+  // encryption key on a brand-new deployment, if none exists yet) so a
+  // missing/misconfigured KMS_KEY_ARN fails the whole boot loudly instead
+  // of failing silently on someone's first message.
+  try {
+    await checkMessageEncryptionRequirement();
+    if (process.env.NODE_ENV !== 'development') {
+      console.log('[SECURITY] Message encryption key provider is reachable — messages are encrypted at rest.');
+    }
+  } catch (err) {
+    console.error('[SECURITY] FATAL: message encryption requirement not met.');
     console.error(`[SECURITY] ${err.message}`);
     process.exit(1);
   }

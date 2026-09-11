@@ -33,8 +33,23 @@ test('Role scoping: cases and conversations', { skip: !TEST_DB_URL && 'set TEST_
   const db = require('../db');
   const CaseService = require('../services/caseService');
   const CommunicationsService = require('../services/communicationsService');
+  const messageEncryption = require('../services/encryption/messageEncryptionService');
 
   await runMigrations();
+
+  // Messages are encrypted at rest (see db/migrations/0006_message_encryption.sql
+  // and server/services/encryption/) — db.insertConversationMessage no
+  // longer accepts a plaintext `body`, so seeding fixture messages here
+  // goes through the same encrypt-then-insert path
+  // CommunicationsService.postMessage itself uses, rather than a
+  // shortcut that would bypass what's actually being tested.
+  async function insertEncryptedMessage({ conversationId, sender, senderUserId, body }) {
+    const messageId = crypto.randomUUID();
+    const { bodyCiphertext, bodyNonce, bodyAuthTag, encryptionKeyId } = await messageEncryption.encryptMessageBody({
+      conversationId, messageId, plaintext: body
+    });
+    return db.insertConversationMessage({ id: messageId, conversationId, sender, senderUserId, bodyCiphertext, bodyNonce, bodyAuthTag, encryptionKeyId });
+  }
 
   // Fresh ids per run so repeated/parallel runs never collide; everything
   // is torn down at the end via the firm's ON DELETE CASCADE.
@@ -59,9 +74,9 @@ test('Role scoping: cases and conversations', { skip: !TEST_DB_URL && 'set TEST_
   const convA = await db.insertConversation({ firmId: FIRM_ID, caseId: caseA.id, clientUserId: CLIENT_A_ID, clientName: 'Client Alpha' });
   const convB = await db.insertConversation({ firmId: FIRM_ID, caseId: caseB.id, clientUserId: CLIENT_B_ID, clientName: 'Client Beta' });
 
-  await db.insertConversationMessage({ conversationId: convA.id, sender: 'client', senderUserId: CLIENT_A_ID, body: 'A client message' });
-  await db.insertConversationMessage({ conversationId: convA.id, sender: 'staff', senderUserId: STAFF_ID, body: 'A staff reply' });
-  await db.insertConversationMessage({ conversationId: convA.id, sender: 'note', senderUserId: STAFF_ID, body: 'An internal-only staff note about client A' });
+  await insertEncryptedMessage({ conversationId: convA.id, sender: 'client', senderUserId: CLIENT_A_ID, body: 'A client message' });
+  await insertEncryptedMessage({ conversationId: convA.id, sender: 'staff', senderUserId: STAFF_ID, body: 'A staff reply' });
+  await insertEncryptedMessage({ conversationId: convA.id, sender: 'note', senderUserId: STAFF_ID, body: 'An internal-only staff note about client A' });
 
   await t.test('a CLIENT only sees their own case in the case list, never the other client\'s', async () => {
     const cases = await CaseService.listCases(FIRM_ID, clientA);

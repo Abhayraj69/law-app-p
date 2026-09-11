@@ -1,4 +1,6 @@
+const crypto = require('crypto');
 const db = require('../db');
+const messageEncryption = require('./encryption/messageEncryptionService');
 
 /**
  * Communications Service
@@ -13,6 +15,13 @@ const db = require('../db');
  * notes specifically: even if a caller forgot to pass includeNotes=false,
  * `toMessageView` never emits a message whose sender is 'note' unless the
  * caller explicitly says the viewer is staff.
+ *
+ * Message bodies are encrypted at rest (see server/services/encryption/ and
+ * db/migrations/0006_message_encryption.sql) — this service is the only
+ * place that ever sees a decrypted body: every view builder here calls
+ * messageEncryption.resolveMessageBody, which transparently reads either
+ * the encrypted columns or (for a message written before the encryption
+ * migration and not yet backfilled) the legacy plaintext `body` column.
  */
 
 function notFound() {
@@ -42,9 +51,25 @@ function formatMessageTime(date) {
   return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
 }
 
-function toConversationSummaryView(row) {
-  let preview = row.last_message_body || 'No messages yet';
-  if (row.last_message_sender === 'note') preview = `[Note] ${preview}`;
+// `row` carries the last message's fields prefixed with last_message_ (see
+// db.listConversationsForUser's LATERAL join) — reshaped here into the
+// same {id, conversation_id, body, body_ciphertext, ...} shape
+// resolveMessageBody expects, since it's the same underlying row either way.
+async function toConversationSummaryView(row) {
+  let preview = 'No messages yet';
+  if (row.last_message_id) {
+    const body = await messageEncryption.resolveMessageBody({
+      id: row.last_message_id,
+      conversation_id: row.id,
+      body: row.last_message_body,
+      body_ciphertext: row.last_message_body_ciphertext,
+      body_nonce: row.last_message_body_nonce,
+      body_auth_tag: row.last_message_body_auth_tag,
+      encryption_key_id: row.last_message_encryption_key_id
+    });
+    preview = row.last_message_sender === 'note' ? `[Note] ${body}` : body;
+  }
+
   return {
     id: row.id,
     caseId: row.case_id,
@@ -59,20 +84,23 @@ function toConversationSummaryView(row) {
   };
 }
 
-function toMessageView(m, viewerIsStaff) {
+async function toMessageView(m, viewerIsStaff) {
   const isNote = m.sender === 'note';
   if (isNote && !viewerIsStaff) return null; // defense in depth — see file header
+
+  const body = await messageEncryption.resolveMessageBody(m);
   return {
     id: m.id,
     sender: m.sender,
     senderName: m.sender_name,
-    text: isNote ? `STAFF NOTE: ${m.body}` : m.body,
+    text: isNote ? `STAFF NOTE: ${body}` : body,
     time: formatMessageTime(m.created_at),
     isNote
   };
 }
 
-function toConversationDetailView(conv, viewerIsStaff) {
+async function toConversationDetailView(conv, viewerIsStaff) {
+  const messages = await Promise.all(conv.messages.map(m => toMessageView(m, viewerIsStaff)));
   return {
     id: conv.id,
     caseId: conv.case_id,
@@ -81,7 +109,7 @@ function toConversationDetailView(conv, viewerIsStaff) {
     status: conv.status,
     initials: conv.client_initials,
     color: conv.client_color,
-    messages: conv.messages.map(m => toMessageView(m, viewerIsStaff)).filter(Boolean)
+    messages: messages.filter(Boolean)
   };
 }
 
@@ -89,7 +117,7 @@ class CommunicationsService {
   /** GET /api/v1/conversations — role-scoped list for the sidebar. */
   static async listConversations(tenantId, user) {
     const rows = await db.listConversationsForUser(tenantId, user);
-    return rows.map(toConversationSummaryView);
+    return Promise.all(rows.map(toConversationSummaryView));
   }
 
   /**
@@ -112,6 +140,12 @@ class CommunicationsService {
    * is staff. Ownership is re-verified via getConversationWithMessages
    * (role-scoped) before the insert, so a CLIENT can't message into a
    * conversation that isn't theirs just by guessing its id.
+   *
+   * The message id is generated here, client-side, BEFORE encryption —
+   * not left to the database's default — because the encryption AAD
+   * binds ciphertext to a specific (conversation_id, message id) pair,
+   * which has to be known before the encrypted bytes are computed, let
+   * alone inserted.
    */
   static async postMessage(tenantId, user, conversationId, { text, isNote }) {
     if (!text || !text.trim()) {
@@ -126,12 +160,23 @@ class CommunicationsService {
 
     const wantsNote = viewerIsStaff && !!isNote;
     const sender = wantsNote ? 'note' : (viewerIsStaff ? 'staff' : 'client');
+    const messageId = crypto.randomUUID();
+
+    const { bodyCiphertext, bodyNonce, bodyAuthTag, encryptionKeyId } = await messageEncryption.encryptMessageBody({
+      conversationId,
+      messageId,
+      plaintext: text.trim()
+    });
 
     const inserted = await db.insertConversationMessage({
+      id: messageId,
       conversationId,
       sender,
       senderUserId: user.id,
-      body: text.trim()
+      bodyCiphertext,
+      bodyNonce,
+      bodyAuthTag,
+      encryptionKeyId
     });
 
     return toMessageView({ ...inserted, sender_name: user.full_name }, viewerIsStaff);

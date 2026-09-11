@@ -645,17 +645,32 @@ function scopeConversationsToUser(query, values, user) {
 
 async function listConversationsForUser(firmId, user) {
   const values = [firmId];
+  // The last message's encrypted fields (not just its plaintext `body`,
+  // which may not even be populated any more — see
+  // db/migrations/0006_message_encryption.sql) come along so the service
+  // layer can decrypt the preview text; this SQL layer never decrypts
+  // anything itself. One LATERAL join replaces what used to be two
+  // separate correlated subqueries (one for body, one for sender) now
+  // that there are several encrypted columns to pull alongside them.
   let query = `SELECT conversations.*, cases.case_name,
-                      (SELECT body FROM conversation_messages cm WHERE cm.conversation_id = conversations.id
-                        ${user && user.role === 'CLIENT' ? "AND cm.sender != 'note'" : ''}
-                       ORDER BY cm.created_at DESC LIMIT 1) AS last_message_body,
-                      (SELECT sender FROM conversation_messages cm WHERE cm.conversation_id = conversations.id
-                        ${user && user.role === 'CLIENT' ? "AND cm.sender != 'note'" : ''}
-                       ORDER BY cm.created_at DESC LIMIT 1) AS last_message_sender,
+                      lm.id AS last_message_id,
+                      lm.sender AS last_message_sender,
+                      lm.body AS last_message_body,
+                      lm.body_ciphertext AS last_message_body_ciphertext,
+                      lm.body_nonce AS last_message_body_nonce,
+                      lm.body_auth_tag AS last_message_body_auth_tag,
+                      lm.encryption_key_id AS last_message_encryption_key_id,
                       (SELECT COUNT(*) FROM conversation_messages cm WHERE cm.conversation_id = conversations.id
                         AND cm.is_read = FALSE AND cm.sender != 'staff') AS unread_count
                FROM conversations
                LEFT JOIN cases ON cases.id = conversations.case_id
+               LEFT JOIN LATERAL (
+                 SELECT id, sender, body, body_ciphertext, body_nonce, body_auth_tag, encryption_key_id
+                 FROM conversation_messages cm
+                 WHERE cm.conversation_id = conversations.id
+                   ${user && user.role === 'CLIENT' ? "AND cm.sender != 'note'" : ''}
+                 ORDER BY cm.created_at DESC LIMIT 1
+               ) lm ON true
                WHERE conversations.firm_id = $1`;
   query = scopeConversationsToUser(query, values, user);
   query += ' ORDER BY conversations.updated_at DESC';
@@ -700,12 +715,22 @@ async function insertConversation({ id, firmId, caseId, clientUserId, clientName
   return rows[0];
 }
 
-async function insertConversationMessage({ conversationId, sender, senderUserId, body }) {
+// Every NEW message is written already-encrypted — `id` is pre-generated
+// by the caller (server/services/communicationsService.js), not left to
+// the table's default, because the encryption AAD binds ciphertext to a
+// specific (conversation_id, message id) pair and has to be computed
+// BEFORE this INSERT runs (see server/services/encryption/messageCipher.js).
+// There is deliberately no plaintext `body` parameter here any more — see
+// db/migrations/0006_message_encryption.sql's header for the migration
+// plan; legacy plaintext rows written before that migration are read via
+// resolveMessageBody's fallback, never written fresh.
+async function insertConversationMessage({ id, conversationId, sender, senderUserId, bodyCiphertext, bodyNonce, bodyAuthTag, encryptionKeyId }) {
   const { rows } = await pool.query(
-    `INSERT INTO conversation_messages (conversation_id, sender, sender_user_id, body)
-     VALUES ($1, $2, $3, $4)
+    `INSERT INTO conversation_messages
+       (id, conversation_id, sender, sender_user_id, body_ciphertext, body_nonce, body_auth_tag, encryption_key_id)
+     VALUES (COALESCE($1, uuid_generate_v4()), $2, $3, $4, $5, $6, $7, $8)
      RETURNING *`,
-    [conversationId, sender, senderUserId || null, body]
+    [id || null, conversationId, sender, senderUserId || null, bodyCiphertext, bodyNonce, bodyAuthTag, encryptionKeyId]
   );
   await pool.query('UPDATE conversations SET updated_at = CURRENT_TIMESTAMP WHERE id = $1', [conversationId]);
   return rows[0];
@@ -715,6 +740,45 @@ async function markConversationRead(conversationId) {
   await pool.query(
     `UPDATE conversation_messages SET is_read = TRUE WHERE conversation_id = $1 AND sender != 'staff'`,
     [conversationId]
+  );
+}
+
+// ── Encryption keys (envelope encryption for message bodies) ────────────
+// See server/services/encryption/ for the actual crypto and KMS/local
+// provider logic — this is just the data-access layer for the
+// encryption_keys table itself.
+async function getActiveEncryptionKey(provider) {
+  const { rows } = await pool.query(
+    `SELECT * FROM encryption_keys WHERE provider = $1 AND status = 'active'`,
+    [provider]
+  );
+  return rows[0] || null;
+}
+
+async function getEncryptionKeyById(id) {
+  const { rows } = await pool.query('SELECT * FROM encryption_keys WHERE id = $1', [id]);
+  return rows[0] || null;
+}
+
+async function insertEncryptionKey({ id, provider, kmsKeyArn, wrappedDek }) {
+  const { rows } = await pool.query(
+    `INSERT INTO encryption_keys (id, provider, kms_key_arn, wrapped_dek, status)
+     VALUES (COALESCE($1, uuid_generate_v4()), $2, $3, $4, 'active')
+     RETURNING *`,
+    [id || null, provider, kmsKeyArn || null, wrappedDek]
+  );
+  return rows[0];
+}
+
+// Marks any currently-active key for this provider as retired (kept
+// forever, never deleted — any message encrypted under it still needs
+// this row to ever be decrypted again). A no-op if none is active, which
+// is the normal case on a brand-new deployment's first-ever key mint.
+async function retireActiveEncryptionKeys(provider) {
+  await pool.query(
+    `UPDATE encryption_keys SET status = 'retired', retired_at = CURRENT_TIMESTAMP
+     WHERE provider = $1 AND status = 'active'`,
+    [provider]
   );
 }
 
@@ -816,6 +880,10 @@ module.exports = {
   insertConversation,
   insertConversationMessage,
   markConversationRead,
+  getActiveEncryptionKey,
+  getEncryptionKeyById,
+  insertEncryptionKey,
+  retireActiveEncryptionKeys,
   getDashboardCounts,
   listRecentAuditActivity,
   insertCaseDeadline,
