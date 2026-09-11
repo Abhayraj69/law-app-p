@@ -24,6 +24,50 @@ async function getCase(req, res, next) {
   }
 }
 
+async function getCaseDocuments(req, res, next) {
+  try {
+    const docs = await CaseService.getCaseDocuments(req.tenantId, req.params.id, req.user);
+    res.json({ success: true, data: docs });
+  } catch (err) {
+    next(err);
+  }
+}
+
+async function uploadCaseDocument(req, res, next) {
+  try {
+    if (!req.file) {
+      const err = new Error('No file was received.');
+      err.status = 400;
+      throw err;
+    }
+    const doc = await CaseService.uploadCaseDocument(req.tenantId, req.user, req.params.id, req.file);
+    res.status(201).json({
+      success: true,
+      data: { ...doc, upload_validation: req.uploadValidation || null }
+    });
+  } catch (err) {
+    next(err);
+  }
+}
+
+async function getCaseDeadlines(req, res, next) {
+  try {
+    const deadlines = await CaseService.getCaseDeadlines(req.tenantId, req.params.id, req.user);
+    res.json({ success: true, data: deadlines });
+  } catch (err) {
+    next(err);
+  }
+}
+
+async function getCaseActivity(req, res, next) {
+  try {
+    const activity = await CaseService.getCaseActivity(req.tenantId, req.params.id, req.user);
+    res.json({ success: true, data: activity });
+  } catch (err) {
+    next(err);
+  }
+}
+
 async function createCase(req, res, next) {
   try {
     const created = await CaseService.createCase(req.tenantId, req.user, req.body);
@@ -42,4 +86,4 @@ async function archiveCase(req, res, next) {
   }
 }
 
-module.exports = { listCases, getCase, createCase, archiveCase };
+module.exports = { listCases, getCase, getCaseDocuments, uploadCaseDocument, getCaseDeadlines, getCaseActivity, createCase, archiveCase };

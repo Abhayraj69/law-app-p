@@ -73,7 +73,7 @@ class VaultService {
    * GET /api/v1/vault/files
    * Paginated list with filtering by category, folder_id, search query, tags, and sorting
    */
-  static async getFiles(tenantId, params = {}) {
+  static async getFiles(tenantId, params = {}, user) {
     const {
       folder_id,
       tab_category = 'Case Files',
@@ -85,7 +85,7 @@ class VaultService {
       limit = 10
     } = params;
 
-    let docs = await db.listActiveDocuments(tenantId);
+    let docs = await db.listActiveDocuments(tenantId, user);
 
     // Filter by tab_category or folder_id
     if (folder_id) {

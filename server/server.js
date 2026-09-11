@@ -70,6 +70,16 @@ app.use((err, req, res, next) => {
   });
 });
 
+// The client portal is a separate static page/app from the staff SPA
+// (see client-portal.html/.js) — routed explicitly here, before the staff
+// catch-all below, so a clean `/portal` URL resolves to it. Access control
+// is still enforced client-side (redirects a non-CLIENT/unauthenticated
+// visitor to `/`) and, more importantly, server-side on every API call
+// this page makes — this route just serves the static shell.
+app.get('/portal', (req, res) => {
+  res.sendFile(path.join(__dirname, '..', 'client-portal.html'));
+});
+
 // Fallback index.html for Single-Page Routing
 app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, '..', 'index.html'));

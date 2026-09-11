@@ -128,6 +128,15 @@ async function initAuth() {
     showAuthOverlay();
     return;
   }
+  // CLIENT-role users get a separate, simplified portal (see
+  // client-portal.html/.js) — they never load this staff SPA. Checked
+  // against the cached role first (synchronous, no flash of staff chrome
+  // before redirecting) rather than waiting on the /auth/me round trip.
+  const cachedUser = Auth.getUser();
+  if (cachedUser && cachedUser.role === 'CLIENT') {
+    window.location.href = '/portal';
+    return;
+  }
   try {
     const res = await fetch('/api/v1/auth/me', { headers: Auth.authHeader() });
     const json = await res.json();
@@ -174,6 +183,10 @@ document.addEventListener('DOMContentLoaded', () => {
         if (!res.ok || !json.success) throw new Error(json.error || 'Sign in failed.');
 
         Auth.setSession(json.data.token, json.data.user);
+        if (json.data.user.role === 'CLIENT') {
+          window.location.href = '/portal';
+          return;
+        }
         applyUserToChrome(json.data.user);
         hideAuthOverlay();
         loadInitialAppData();

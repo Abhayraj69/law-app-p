@@ -302,24 +302,51 @@ function normalizeDocumentRow(row) {
   return { ...row, file_size_bytes: Number(row.file_size_bytes) };
 }
 
-async function listActiveDocuments(firmId) {
-  const { rows } = await pool.query(
-    `${DOCUMENT_SELECT}
-     WHERE d.firm_id = $1 AND d.is_deleted = FALSE
-     GROUP BY d.id, u.full_name, u.initials, c.case_name, fo.category`,
-    [firmId]
-  );
+// Same rule as scopeCasesToUser: a CLIENT only ever sees documents whose
+// case is theirs (via the `c` alias's client_user_id, joined in
+// DOCUMENT_SELECT). A document with no case_id (c.client_user_id is then
+// NULL) can therefore never match a CLIENT and is correctly hidden.
+// `user` is optional — omitting it (as firm-wide staff views like vault
+// stats do) applies no filter, matching pre-existing behavior.
+function scopeDocumentsToUser(query, values, user) {
+  if (user && user.role === 'CLIENT') {
+    values.push(user.id);
+    return `${query} AND c.client_user_id = $${values.length}`;
+  }
+  return query;
+}
+
+async function listActiveDocuments(firmId, user) {
+  const values = [firmId];
+  let query = `${DOCUMENT_SELECT} WHERE d.firm_id = $1 AND d.is_deleted = FALSE`;
+  query = scopeDocumentsToUser(query, values, user);
+  query += ' GROUP BY d.id, u.full_name, u.initials, c.case_name, fo.category';
+  const { rows } = await pool.query(query, values);
   return rows.map(normalizeDocumentRow);
 }
 
-async function getDocumentById(firmId, docId) {
+async function getDocumentById(firmId, docId, user) {
+  const values = [firmId, docId];
+  let query = `${DOCUMENT_SELECT} WHERE d.firm_id = $1 AND d.id = $2 AND d.is_deleted = FALSE`;
+  query = scopeDocumentsToUser(query, values, user);
+  query += ' GROUP BY d.id, u.full_name, u.initials, c.case_name, fo.category';
+  const { rows } = await pool.query(query, values);
+  return normalizeDocumentRow(rows[0]) || null;
+}
+
+// GET /api/v1/cases/:id/documents — the client portal's document list.
+// Ownership of the case itself must already be verified by the caller
+// (CaseService.getCase, which applies scopeCasesToUser) before calling
+// this; it does no scoping of its own beyond firm_id + case_id.
+async function listDocumentsByCase(firmId, caseId) {
   const { rows } = await pool.query(
     `${DOCUMENT_SELECT}
-     WHERE d.firm_id = $1 AND d.id = $2 AND d.is_deleted = FALSE
-     GROUP BY d.id, u.full_name, u.initials, c.case_name, fo.category`,
-    [firmId, docId]
+     WHERE d.firm_id = $1 AND d.case_id = $2 AND d.is_deleted = FALSE
+     GROUP BY d.id, u.full_name, u.initials, c.case_name, fo.category
+     ORDER BY d.updated_at DESC`,
+    [firmId, caseId]
   );
-  return normalizeDocumentRow(rows[0]) || null;
+  return rows.map(normalizeDocumentRow);
 }
 
 async function insertDocument(doc) {
@@ -448,6 +475,19 @@ async function listCaseDeadlines(firmId) {
   const { rows } = await pool.query(
     'SELECT * FROM case_deadlines WHERE firm_id = $1 ORDER BY deadline_date ASC',
     [firmId]
+  );
+  return rows;
+}
+
+// GET /api/v1/cases/:id/deadlines — the client portal's hearing schedule.
+// Same convention as listDocumentsByCase: ownership of the case itself
+// must already be verified by the caller (CaseService.getCase, via
+// scopeCasesToUser) before this runs; it does no scoping of its own
+// beyond firm_id + case_id.
+async function listDeadlinesByCase(firmId, caseId) {
+  const { rows } = await pool.query(
+    'SELECT * FROM case_deadlines WHERE firm_id = $1 AND case_id = $2 ORDER BY deadline_date ASC',
+    [firmId, caseId]
   );
   return rows;
 }
@@ -850,6 +890,64 @@ async function getDashboardCounts(firmId, user) {
 
 // The dashboard activity feed is built from the real audit trail rather
 // than a fixture list, so it reflects what actually happened in the app.
+// GET /api/v1/cases/:id/activity — the client portal's case timeline.
+// Unions three independent sources that all end up tied to the same case
+// by a different path, since audit_logs has no case_id column of its own:
+//   1. Case-lifecycle events (create/archive/AI-Copilot update) — these
+//      store the case id in `details->>'case_id'` and never set
+//      document_id (see caseService.js's insertAuditLog calls). The
+//      `document_id IS NULL` guard keeps this branch and the next one
+//      mutually exclusive even though a document-scoped action (like the
+//      client-upload one below) ALSO happens to record case_id in its own
+//      details, for its own informational purposes — without the guard,
+//      that upload would double-count via both branches.
+//   2. Document events whose document's own case_id matches — covers
+//      both plain UPLOAD/DELETE/etc. and AI-Copilot file actions
+//      (COPILOT_MOVE/RENAME/TAG/DELETE), which set audit_logs.document_id
+//      to the file they acted on.
+//   3. Messages posted in this case's conversation(s). 'note' rows are
+//      excluded unless `includeNotes` is true — same staff-only rule
+//      CommunicationsService applies to the Messages tab itself; ownership
+//      of the case (and therefore of its conversations) is still the
+//      caller's responsibility (CaseService.getCaseActivity verifies it
+//      via getCaseByIdForUser before this ever runs).
+// Everything is cast to a common shape (id, action, created_at, details,
+// actor_name, target_name) so the three branches can UNION ALL cleanly.
+async function listActivityForCase(firmId, caseId, includeNotes) {
+  const { rows } = await pool.query(
+    `(
+       SELECT a.id, a.action::text AS action, a.created_at, a.details,
+              u.full_name AS actor_name, NULL::text AS target_name
+       FROM audit_logs a
+       LEFT JOIN users u ON u.id = a.user_id
+       WHERE a.firm_id = $1 AND a.document_id IS NULL AND a.details->>'case_id' = $2
+     )
+     UNION ALL
+     (
+       SELECT a.id, a.action::text AS action, a.created_at, a.details,
+              u.full_name AS actor_name, d.file_name AS target_name
+       FROM audit_logs a
+       JOIN documents d ON d.id = a.document_id
+       LEFT JOIN users u ON u.id = a.user_id
+       WHERE a.firm_id = $1 AND d.case_id = $2
+     )
+     UNION ALL
+     (
+       SELECT cm.id, ('MESSAGE_' || UPPER(cm.sender::text))::text AS action, cm.created_at,
+              jsonb_build_object('sender', cm.sender) AS details,
+              u.full_name AS actor_name, NULL::text AS target_name
+       FROM conversation_messages cm
+       JOIN conversations conv ON conv.id = cm.conversation_id
+       LEFT JOIN users u ON u.id = cm.sender_user_id
+       WHERE conv.firm_id = $1 AND conv.case_id = $2
+         AND ($3::boolean OR cm.sender::text != 'note')
+     )
+     ORDER BY created_at DESC`,
+    [firmId, caseId, !!includeNotes]
+  );
+  return rows;
+}
+
 async function listRecentAuditActivity(firmId, limit = 6) {
   const { rows } = await pool.query(
     `SELECT a.id, a.action, a.created_at, a.details,
@@ -888,6 +986,7 @@ module.exports = {
   setDocumentTags,
   listActiveDocuments,
   getDocumentById,
+  listDocumentsByCase,
   insertDocument,
   updateDocument,
   softDeleteDocument,
@@ -896,6 +995,7 @@ module.exports = {
   listClientMessages,
   insertClientMessage,
   listCaseDeadlines,
+  listDeadlinesByCase,
   listCasesForUser,
   getCaseByIdForUser,
   insertCase,
@@ -918,6 +1018,7 @@ module.exports = {
   retireActiveEncryptionKeys,
   getDashboardCounts,
   listRecentAuditActivity,
+  listActivityForCase,
   insertCaseDeadline,
   createInvitedUser,
   createUserInvite,

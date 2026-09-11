@@ -29,7 +29,7 @@ async function getTree(req, res, next) {
 
 async function getFiles(req, res, next) {
   try {
-    const result = await VaultService.getFiles(req.tenantId, req.query);
+    const result = await VaultService.getFiles(req.tenantId, req.query, req.user);
     res.json({ success: true, data: result.documents, pagination: result.pagination });
   } catch (err) {
     next(err);
@@ -60,7 +60,7 @@ async function uploadFile(req, res, next) {
 // C. File Operations (Row Actions)
 async function getPreview(req, res, next) {
   try {
-    const preview = await FileService.getPreview(req.tenantId, req.params.id);
+    const preview = await FileService.getPreview(req.tenantId, req.params.id, req.user);
     res.json({ success: true, data: preview });
   } catch (err) {
     next(err);
@@ -69,7 +69,7 @@ async function getPreview(req, res, next) {
 
 async function downloadFile(req, res, next) {
   try {
-    const download = await FileService.getDownloadStream(req.tenantId, req.params.id);
+    const download = await FileService.getDownloadStream(req.tenantId, req.params.id, req.user);
     res.setHeader('Content-Type', download.headers['Content-Type']);
     res.setHeader('Content-Disposition', download.headers['Content-Disposition']);
     res.setHeader('Content-Length', download.headers['Content-Length']);

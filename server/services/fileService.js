@@ -68,8 +68,8 @@ class FileService {
    * GET /api/v1/files/:id/preview
    * Generates secure short-lived preview token & metadata for rendering PDF/docx/xlsx in UI
    */
-  static async getPreview(tenantId, docId) {
-    const doc = await db.getDocumentById(tenantId, docId);
+  static async getPreview(tenantId, docId, user) {
+    const doc = await db.getDocumentById(tenantId, docId, user);
     if (!doc) {
       const err = new Error(`Document '${docId}' not found.`);
       err.status = 404;
@@ -97,8 +97,8 @@ class FileService {
    * this app; returns a clear error for the seed/demo documents that only
    * ever existed as metadata.
    */
-  static async getDownloadStream(tenantId, docId) {
-    const doc = await db.getDocumentById(tenantId, docId);
+  static async getDownloadStream(tenantId, docId, user) {
+    const doc = await db.getDocumentById(tenantId, docId, user);
     if (!doc) {
       const err = new Error(`Document '${docId}' not found.`);
       err.status = 404;

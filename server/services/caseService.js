@@ -1,4 +1,5 @@
 const db = require('../db');
+const VaultService = require('./vaultService');
 
 /**
  * Case Service
@@ -68,6 +69,18 @@ function formatHearingDate(dateVal) {
   return d.toLocaleDateString('en-US', { month: 'short', day: '2-digit', year: 'numeric', timeZone: 'UTC' });
 }
 
+// `dateVal` is the raw 'YYYY-MM-DD' string described above formatHearingDate.
+// Comparing two such strings lexicographically gives the same result as
+// comparing them chronologically, so this sidesteps the local-midnight
+// footgun entirely rather than routing through a JS Date at all.
+// `badgeType` distinguishes a missed court appearance (Hearing/Trial) —
+// worth flagging to a client — from a merely-elapsed paperwork deadline
+// (Discovery/Filing), which is just "past", not something gone wrong.
+function deadlineStatus(dateVal, badgeType, todayVal) {
+  if (dateVal >= todayVal) return 'upcoming';
+  return (badgeType === 'Hearing' || badgeType === 'Trial') ? 'missed' : 'past';
+}
+
 function toCaseView(row) {
   return {
     id: row.id,
@@ -93,6 +106,60 @@ function notFound() {
   const err = new Error('Case not found.');
   err.status = 404;
   return err;
+}
+
+// Same rule CommunicationsService applies: everyone except a CLIENT is
+// "staff" for the purposes of what they're allowed to see (here, internal
+// 'note' messages in the case activity timeline).
+function isStaff(user) {
+  return !!user && user.role !== 'CLIENT';
+}
+
+// Label/type shown per activity-feed row. Case-lifecycle and document
+// actions come straight from the audit_action enum; MESSAGE_CLIENT/
+// MESSAGE_STAFF/MESSAGE_NOTE are synthesized in db.listActivityForCase
+// (conversation_messages has no audit_action of its own).
+const ACTIVITY_LABEL_BY_ACTION = {
+  CREATE_CASE: 'Case opened',
+  COPILOT_CREATE_CASE: 'Case opened (via AI Copilot)',
+  ARCHIVE_CASE: 'Case closed',
+  COPILOT_UPDATE_CASE: 'Case updated (via AI Copilot)',
+  UPLOAD: 'Document uploaded',
+  UPDATE_METADATA: 'Document updated',
+  DELETE: 'Document deleted',
+  FLAG: 'Document flagged for review',
+  UNFLAG: 'Document unflagged',
+  SHARE: 'Document shared',
+  VIEW: 'Document viewed',
+  PREVIEW: 'Document previewed',
+  DOWNLOAD: 'Document downloaded',
+  COPILOT_MOVE: 'Document moved (via AI Copilot)',
+  COPILOT_RENAME: 'Document renamed (via AI Copilot)',
+  COPILOT_TAG: 'Document tagged (via AI Copilot)',
+  COPILOT_DELETE: 'Document deleted (via AI Copilot)',
+  MESSAGE_CLIENT: 'Message sent',
+  MESSAGE_STAFF: 'Message from your legal team',
+  MESSAGE_NOTE: 'Internal note added'
+};
+
+const ACTIVITY_TYPE_BY_ACTION = {
+  CREATE_CASE: 'case', COPILOT_CREATE_CASE: 'case', ARCHIVE_CASE: 'case', COPILOT_UPDATE_CASE: 'case',
+  UPLOAD: 'document', UPDATE_METADATA: 'document', DELETE: 'document', FLAG: 'document',
+  UNFLAG: 'document', SHARE: 'document', VIEW: 'document', PREVIEW: 'document', DOWNLOAD: 'document',
+  COPILOT_MOVE: 'document', COPILOT_RENAME: 'document',
+  COPILOT_TAG: 'document', COPILOT_DELETE: 'document',
+  MESSAGE_CLIENT: 'message', MESSAGE_STAFF: 'message', MESSAGE_NOTE: 'message'
+};
+
+function toActivityView(row) {
+  return {
+    id: row.id,
+    type: ACTIVITY_TYPE_BY_ACTION[row.action] || 'other',
+    label: ACTIVITY_LABEL_BY_ACTION[row.action] || row.action,
+    actorName: row.actor_name || null,
+    targetName: row.target_name || null,
+    date: row.created_at
+  };
 }
 
 // The only statuses the rest of the app actually understands (status
@@ -282,6 +349,98 @@ class CaseService {
     const row = await db.getCaseByIdForUser(tenantId, caseId, user);
     if (!row) throw notFound();
     return toCaseView(row);
+  }
+
+  /**
+   * POST /api/v1/cases/:id/documents — lets a client (or staff) upload a
+   * document straight to one of their own cases, rather than the portal
+   * being read-only. Ownership is verified exactly like getCase()/
+   * getCaseDocuments() before any upload work happens. Delegates the
+   * actual file handling (quota/ClamAV already ran as route middleware —
+   * see server/routes/api.js) to VaultService.initiateUpload, then writes
+   * its own audit log entry with the new document's real UUID rather than
+   * relying on the generic logAuditAction middleware: that middleware
+   * falls back to `req.params.id` for the document id, which on this
+   * route is the CASE id (e.g. "LC-2026-001") — not a UUID, and
+   * document_id is a UUID FK, so that fallback would fail the insert the
+   * same way the pre-existing CREATE_CASE/ARCHIVE_CASE audit entries had
+   * to route around it (see this file's header comment).
+   */
+  static async uploadCaseDocument(tenantId, user, caseId, file) {
+    const caseRow = await db.getCaseByIdForUser(tenantId, caseId, user);
+    if (!caseRow) throw notFound();
+
+    const { document } = await VaultService.initiateUpload(tenantId, user.id, file, { case_id: caseId });
+
+    await db.insertAuditLog({
+      firmId: tenantId,
+      userId: user.id,
+      documentId: document.id,
+      action: 'UPLOAD',
+      details: { case_id: caseId, uploaded_via: user.role === 'CLIENT' ? 'client_portal' : 'staff' }
+    });
+
+    return document;
+  }
+
+  /**
+   * GET /api/v1/cases/:id/deadlines — the client portal's expanded hearing
+   * schedule (every case_deadlines row for this case, not just the single
+   * "next hearing" toCaseView summarizes). Ownership is verified the same
+   * way getCase()/getCaseDocuments() verify it.
+   */
+  static async getCaseDeadlines(tenantId, caseId, user) {
+    const caseRow = await db.getCaseByIdForUser(tenantId, caseId, user);
+    if (!caseRow) throw notFound();
+    const rows = await db.listDeadlinesByCase(tenantId, caseId);
+    const today = new Date().toISOString().slice(0, 10);
+    return rows.map(r => ({
+      id: r.id,
+      title: r.title,
+      location: r.location,
+      date: r.deadline_date,
+      dateFormatted: formatHearingDate(r.deadline_date),
+      timeText: r.time_text,
+      badgeType: r.badge_type,
+      status: deadlineStatus(r.deadline_date, r.badge_type, today)
+    }));
+  }
+
+  /**
+   * GET /api/v1/cases/:id/activity — the client portal's case timeline:
+   * status/lifecycle changes, document uploads, AI Copilot actions, and
+   * messages, all tied to this one case and merged into a single
+   * chronological feed by db.listActivityForCase. Ownership is verified
+   * the same way every other case sub-resource here verifies it.
+   */
+  static async getCaseActivity(tenantId, caseId, user) {
+    const caseRow = await db.getCaseByIdForUser(tenantId, caseId, user);
+    if (!caseRow) throw notFound();
+    const rows = await db.listActivityForCase(tenantId, caseId, isStaff(user));
+    return rows.map(toActivityView);
+  }
+
+  /**
+   * GET /api/v1/cases/:id/documents — the client portal's document list.
+   * Ownership is verified the same way getCase() verifies it (a CLIENT
+   * gets a 404, not the document list, if the case isn't theirs) before
+   * ever touching the documents table.
+   */
+  static async getCaseDocuments(tenantId, caseId, user) {
+    const caseRow = await db.getCaseByIdForUser(tenantId, caseId, user);
+    if (!caseRow) throw notFound();
+    const docs = await db.listDocumentsByCase(tenantId, caseId);
+    return docs.map(d => ({
+      id: d.id,
+      file_name: d.file_name,
+      extension: d.extension,
+      file_size_bytes: d.file_size_bytes,
+      category: d.category,
+      author_name: d.author_name,
+      is_flagged: d.is_flagged,
+      created_at: d.created_at,
+      updated_at: d.updated_at
+    }));
   }
 
   /**

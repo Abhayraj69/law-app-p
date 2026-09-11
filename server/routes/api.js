@@ -61,9 +61,14 @@ router.get(
   vaultController.getPreview
 );
 
+// The client portal's Preview modal fetches these same bytes (there's no
+// separate content-rendering route to fetch from — see FileService's own
+// comment on why /preview only ever returns metadata) and passes
+// ?intent=preview so that use logs as PREVIEW, not DOWNLOAD; omitting it
+// (the plain Download button) keeps the original DOWNLOAD logging.
 router.get(
   '/files/:id/download',
-  logAuditAction('DOWNLOAD'),
+  (req, res, next) => logAuditAction(req.query.intent === 'preview' ? 'PREVIEW' : 'DOWNLOAD')(req, res, next),
   vaultController.downloadFile
 );
 
@@ -104,6 +109,21 @@ router.get('/dashboard/summary', dashboardController.getSummary);
 // ═════════════════════════════════════════════════════════════════════
 router.get('/cases', caseController.listCases);
 router.get('/cases/:id', caseController.getCase);
+router.get('/cases/:id/documents', caseController.getCaseDocuments);
+// Deliberately no logAuditAction('UPLOAD') here (unlike /vault/upload
+// below) — that middleware would fall back to req.params.id for the
+// document id, which on this route is the case id, not a document UUID.
+// CaseService.uploadCaseDocument writes its own audit entry once the
+// real document id exists. See its doc comment for the full reasoning.
+router.post(
+  '/cases/:id/documents',
+  upload.single('file'),
+  enforceStorageQuota,
+  validateAndScanUpload,
+  caseController.uploadCaseDocument
+);
+router.get('/cases/:id/deadlines', caseController.getCaseDeadlines);
+router.get('/cases/:id/activity', caseController.getCaseActivity);
 // Case audit entries are logged directly by CaseService (not via
 // logAuditAction) because that middleware's document_id column expects a
 // document UUID, and a case id like "LC-2026-001" isn't one — see
