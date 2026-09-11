@@ -24,33 +24,6 @@ const {
   CreateOrUpdateCaseError,
 } = require('../tools/copilotSchemas');
 
-// ── "Cases" derivation ──────────────────────────────────────────────────
-// There's no dedicated case-management UI yet; cases are inferred from the
-// documents that reference a case_id (the `cases` table itself only carries
-// enough to satisfy the documents.case_id foreign key today).
-async function getCases(firmId) {
-  const docs = await db.listActiveDocuments(firmId);
-  const cases = {};
-  docs.forEach(d => {
-    if (!d.case_id) return;
-    if (!cases[d.case_id]) {
-      cases[d.case_id] = {
-        case_id: d.case_id,
-        case_name: d.case_name,
-        status: 'ACTIVE',
-        lead_attorney: d.author_name,
-        document_count: 0,
-        updated_at: d.updated_at
-      };
-    }
-    cases[d.case_id].document_count++;
-    if (new Date(d.updated_at) > new Date(cases[d.case_id].updated_at)) {
-      cases[d.case_id].updated_at = d.updated_at;
-    }
-  });
-  return Object.values(cases);
-}
-
 // ── Simple token-overlap semantic search ─────────────────────────────────────
 function scoreMatch(haystack, terms) {
   const h = haystack.toLowerCase();
@@ -115,10 +88,18 @@ async function searchVault(req, res, next) {
     }
 
     if (scope === 'all' || scope === 'cases') {
-      const cases = await getCases(firmId);
+      // Real cases table (CaseService.listCases), same as the Active
+      // Cases page and createOrUpdateCase's commit path — previously this
+      // searched a pseudo-case view derived from documents.case_id, which
+      // had no real status/attorney and could drift from what
+      // createOrUpdateCase actually writes. Role-scoped by req.user, same
+      // as everywhere else a case is read: a CLIENT caller must not be
+      // able to search-discover another client's case through the
+      // Copilot even though a direct fetch of it is already blocked.
+      const cases = await CaseService.listCases(firmId, req.user);
       cases.forEach(c => {
-        const score = scoreMatch(`${c.case_name} ${c.case_id} ${c.lead_attorney}`, terms);
-        if (score > 0) results.push({ type: 'case', score, id: c.case_id, title: c.case_name, meta: c.case_id, snippet: `${c.case_name} — ${c.status}` });
+        const score = scoreMatch(`${c.name} ${c.id} ${c.attorney || ''}`, terms);
+        if (score > 0) results.push({ type: 'case', score, id: c.id, title: c.name, meta: c.id, snippet: `${c.name} — ${c.status}` });
       });
     }
 

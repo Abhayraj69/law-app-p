@@ -41,7 +41,11 @@ section before assuming a feature is wired up.
   not-enough-info-to-create case are all refused with a clear error
   rather than silently guessed at or ignored. See
   `server/test/copilotCase.test.js`, including a genuine concurrent-create
-  race test.
+  race test. `searchVault`'s "cases" scope reads that same real, role-scoped
+  `cases` table too (`server/test/copilotSearch.test.js`) — a `CLIENT`
+  cannot search-discover another client's case through the Copilot, and a
+  status/attorney change made via `createOrUpdateCase` shows up in search
+  immediately, not from a stale derived snapshot.
 - **Authentication** — `/api/v1/auth/login` issues a signed JWT after
   verifying a password against the `users` table in Postgres; every other
   API route requires that token via `Authorization: Bearer <token>`
@@ -244,10 +248,3 @@ or fake stream.
   built for firm staff, not as a client-facing portal (see the note on the
   `CLIENT` demo accounts above); the case and conversation APIs that a
   client-portal experience would actually depend on ARE fully role-scoped.
-- **The AI Copilot's `searchVault` tool's "cases" search scope is still a
-  pseudo-view derived from `documents.case_id`**, not the real `cases`
-  table `createOrUpdateCase` now writes to (see "What's real" above) — so
-  a case's real status/attorney (as just updated via `createOrUpdateCase`)
-  won't be reflected in a `searchVault` "cases" hit. Left as-is since it
-  was outside the scope of fixing `createOrUpdateCase` specifically;
-  flagged rather than silently inconsistent.
