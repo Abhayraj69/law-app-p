@@ -10,6 +10,7 @@ const authRoutes = require('./routes/auth');
 
 const { checkConnection } = require('./db/pool');
 const { runMigrations } = require('./db/migrate');
+const { checkClamAvRequirement } = require('./middleware/securityScanner');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -93,6 +94,23 @@ async function start() {
   } catch (err) {
     console.error('[DB] FATAL: migration failed.');
     console.error(`[DB] ${err.message}`);
+    process.exit(1);
+  }
+
+  // Outside NODE_ENV=development, uploads require a reachable ClamAV —
+  // checked here at boot (fail fast and loud) rather than only discovering
+  // it's missing on the first real upload. See
+  // server/middleware/securityScanner.js for the corresponding per-request
+  // enforcement (an upload is refused with 503 if ClamAV becomes
+  // unreachable sometime after boot).
+  try {
+    await checkClamAvRequirement();
+    if (process.env.NODE_ENV !== 'development') {
+      console.log('[SECURITY] ClamAV is reachable — malware scanning is active.');
+    }
+  } catch (err) {
+    console.error('[SECURITY] FATAL: malware scanning requirement not met.');
+    console.error(`[SECURITY] ${err.message}`);
     process.exit(1);
   }
 

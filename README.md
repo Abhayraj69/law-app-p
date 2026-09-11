@@ -197,10 +197,18 @@ the server validates them, and the accepted file is written to disk under
    extension implies — this is what actually catches a renamed executable
    or a mismatched file type, which trusting the client's claimed MIME type
    alone cannot.
-3. A real ClamAV scan, **only if configured** via `CLAMAV_HOST`/`CLAMAV_PORT`.
-   Without a configured scanner, the upload response and audit log say so
-   explicitly (`antivirus_engine: "none"`) rather than implying a malware
-   scan ran when it didn't.
+3. A real ClamAV scan over its INSTREAM protocol
+   (`CLAMAV_HOST`/`CLAMAV_PORT`). **Required unless `NODE_ENV=development`**:
+   outside development, the server refuses to boot at all if ClamAV isn't
+   configured and reachable (`checkClamAvRequirement`, called from
+   `server/server.js`), and if it becomes unreachable sometime after a
+   successful boot (daemon crash, network partition), every upload is
+   refused with `503 ANTIVIRUS_UNAVAILABLE` rather than silently falling
+   back to signature-only validation. Only in development does a missing
+   scanner degrade to signature-only checks — and the upload response and
+   audit log say so explicitly (`antivirus_engine: "none"`) rather than
+   implying a malware scan ran when it didn't. See
+   `server/test/securityScanner.test.js`.
 
 Document metadata (filename, size, uploader, case/folder association,
 storage path, tags) is written to the `documents` table in Postgres, so it
@@ -212,9 +220,12 @@ or fake stream.
 
 ## Known limitations
 
-- **No antivirus engine configured by default.** Point `CLAMAV_HOST` at a
-  running ClamAV daemon to get a real malware scan on top of the signature
-  check; without it, only the content-signature validation runs (see above).
+- **No antivirus engine configured by default in this local environment**
+  (`NODE_ENV=development` in `.env.local`), so uploads here only get the
+  content-signature check, not a live scan — point `CLAMAV_HOST` at a
+  running ClamAV daemon to get a real malware scan on top of it. This is a
+  deliberate escape hatch for development ONLY; every other `NODE_ENV`
+  requires ClamAV (see "File uploads" above).
 - **No email/SMTP integration** — an ADMIN's invite link (see "Adding a
   user" below) is shown once in the UI for them to relay however they
   currently reach new hires; nothing is emailed automatically.
