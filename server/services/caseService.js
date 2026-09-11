@@ -94,7 +94,182 @@ function notFound() {
   return err;
 }
 
+// The only statuses the rest of the app actually understands (status
+// pills/badges on the Active Cases page, the dashboard's active-case
+// count, etc.). Writing anything else into `cases.status` wouldn't be
+// rejected by the database — there's no CHECK constraint on that column —
+// but it would silently break the UI, so it's validated in application
+// code wherever a caller-supplied status can reach the table.
+const VALID_STATUSES = ['active', 'pending', 'urgent', 'closed'];
+
 class CaseService {
+  /**
+   * Resolves a shorthand like "Sarah J." (first name + last initial —
+   * what the case table/filters/forms have always displayed) to a real
+   * user row. Returns null if nothing matches; never throws, so callers
+   * decide for themselves whether a miss is fatal (creating a case with
+   * no lead attorney is fine; failing to UPDATE one to a name that
+   * doesn't resolve to anyone should not be silently ignored — see
+   * applyFieldUpdate below).
+   */
+  static async resolveAttorneyByShorthand(tenantId, shorthand) {
+    if (!shorthand) return null;
+    const users = await db.listUsersByFirm(tenantId);
+    return users.find(u => shorthandName(u.full_name) === shorthand) || null;
+  }
+
+  /**
+   * Resolves a case reference to a real row, or null if nothing matches.
+   * Two-step: an exact `caseId` match first (the common path — most
+   * callers, including a human via the UI, already know the real id);
+   * falling back to an exact (not fuzzy) case-insensitive `caseName`
+   * match only if the id didn't resolve. A caller that supplies a name
+   * matching more than one case gets a 409 rather than an arbitrary pick
+   * — silently guessing which case an AI tool or API caller meant would
+   * be a worse failure mode than asking them to disambiguate.
+   */
+  static async resolveCaseIdentity(tenantId, { caseId, caseName } = {}) {
+    if (caseId) {
+      const byId = await db.getCaseByIdForUser(tenantId, caseId, null);
+      if (byId) return { case: toCaseView(byId), matchedBy: 'id' };
+    }
+
+    if (caseName && caseName.trim()) {
+      const matches = await db.findCasesByExactName(tenantId, caseName.trim());
+      if (matches.length === 1) return { case: toCaseView(matches[0]), matchedBy: 'name' };
+      if (matches.length > 1) {
+        const err = new Error(`Multiple cases are named "${caseName}" — ambiguous. Specify the exact case_id instead.`);
+        err.status = 409;
+        err.code = 'AMBIGUOUS_CASE_NAME';
+        throw err;
+      }
+    }
+
+    return { case: null, matchedBy: null };
+  }
+
+  /**
+   * Applies status/attorney/opposing-party/case-type changes to an
+   * EXISTING case (by real id). Every field is validated against
+   * something real before it touches the row:
+   *   - status must be one of VALID_STATUSES.
+   *   - lead_attorney (a shorthand string) must resolve to a real user —
+   *     an unresolvable name is a hard error, not a silent no-op, since
+   *     silently failing to reassign a case's attorney is exactly the
+   *     kind of mistake a legal practice's audit trail exists to catch.
+   */
+  static async applyFieldUpdate(tenantId, caseId, payload = {}) {
+    const updates = {};
+
+    if (payload.status !== undefined) {
+      if (!VALID_STATUSES.includes(payload.status)) {
+        const err = new Error(`Invalid status "${payload.status}". Must be one of: ${VALID_STATUSES.join(', ')}.`);
+        err.status = 400;
+        throw err;
+      }
+      updates.status = payload.status;
+    }
+
+    if (payload.lead_attorney !== undefined) {
+      const attorney = await this.resolveAttorneyByShorthand(tenantId, payload.lead_attorney);
+      if (!attorney) {
+        const err = new Error(`No attorney matches "${payload.lead_attorney}". Expected a shorthand like "Sarah J." (first name + last initial) matching a firm user.`);
+        err.status = 400;
+        err.code = 'ATTORNEY_NOT_FOUND';
+        throw err;
+      }
+      updates.leadAttorneyId = attorney.id;
+    }
+
+    if (payload.opposing_party !== undefined) updates.opposingParty = payload.opposing_party;
+    if (payload.opposing_counsel !== undefined) updates.opposingCounsel = payload.opposing_counsel;
+    if (payload.case_type !== undefined) updates.caseType = payload.case_type;
+
+    const row = await db.updateCaseFields(tenantId, caseId, updates);
+    if (!row) throw notFound();
+    return toCaseView(row);
+  }
+
+  /**
+   * The entry point for a caller (the AI Copilot's createOrUpdateCase
+   * tool) that only has an opaque case reference — an id that might not
+   * exist yet, optionally alongside a case_name — not a guaranteed real
+   * id the way the UI's edit/archive actions do. Resolves identity first;
+   * updates the match if one exists, otherwise creates a new case IF the
+   * payload has enough information to (case_name + client_name), and
+   * refuses with 404 otherwise rather than silently inventing a case
+   * from partial information.
+   *
+   * A brand-new case is always given a freshly minted id (see createCase)
+   * — the caller's own `caseId` is only ever a resolution HINT, never
+   * written as the literal primary key, since it's an arbitrary
+   * caller/AI-supplied string that may not fit this firm's LC-YYYY-NNN
+   * numbering and could collide with it in confusing ways if inserted
+   * directly.
+   *
+   * Returns { action: 'create'|'update', matchedBy: 'id'|'name'|null, case }.
+   */
+  static async resolveAndApply(tenantId, actingUser, { caseId, payload = {} } = {}) {
+    const resolution = await this.resolveCaseIdentity(tenantId, { caseId, caseName: payload.case_name });
+
+    if (resolution.case) {
+      const updated = await this.applyFieldUpdate(tenantId, resolution.case.id, payload);
+      if (actingUser) {
+        await db.insertAuditLog({
+          firmId: tenantId,
+          userId: actingUser.id,
+          action: 'COPILOT_UPDATE_CASE',
+          details: { case_id: resolution.case.id, matched_by: resolution.matchedBy, payload }
+        });
+      }
+      return { action: 'update', matchedBy: resolution.matchedBy, case: updated };
+    }
+
+    // No existing case matched — only create one if there's enough
+    // information to (a real case needs at least a name and a client).
+    if (!payload.case_name || !payload.case_name.trim() || !payload.client_name || !payload.client_name.trim()) {
+      const err = new Error(
+        `No case matches "${caseId}"${payload.case_name ? ` or the name "${payload.case_name}"` : ''}, and there isn't ` +
+        'enough information to create one — both case_name and client_name are required to create a new case.'
+      );
+      err.status = 404;
+      err.code = 'CASE_NOT_FOUND';
+      throw err;
+    }
+
+    try {
+      const created = await this.createCase(tenantId, actingUser, {
+        title: payload.case_name,
+        client: payload.client_name,
+        opposingParty: payload.opposing_party,
+        opposingCounsel: payload.opposing_counsel,
+        area: payload.case_type,
+        attorney: payload.lead_attorney,
+        status: payload.status,
+        hearing: null
+      }, 'COPILOT_CREATE_CASE');
+      return { action: 'create', matchedBy: null, case: created };
+    } catch (err) {
+      // A second request could have created a matching case between our
+      // resolution check above and this insert (createCase's next-id
+      // computation isn't a locked sequence — two concurrent callers can
+      // compute the same next id and race on it). Postgres' unique
+      // constraint on cases.id rejects the loser with 23505; re-resolve
+      // and fall through to updating the winner's row instead of
+      // surfacing a raw database error for what is, from the caller's
+      // perspective, a completely reasonable "someone else just created
+      // this" outcome.
+      if (err.code === '23505') {
+        const retry = await this.resolveCaseIdentity(tenantId, { caseId, caseName: payload.case_name });
+        if (retry.case) {
+          const updated = await this.applyFieldUpdate(tenantId, retry.case.id, payload);
+          return { action: 'update', matchedBy: retry.matchedBy, case: updated };
+        }
+      }
+      throw err;
+    }
+  }
+
   /** GET /api/v1/cases — role-scoped list backing the Active Cases table. */
   static async listCases(tenantId, user) {
     const rows = await db.listCasesForUser(tenantId, user);
@@ -109,12 +284,21 @@ class CaseService {
   }
 
   /**
-   * POST /api/v1/cases — create a new case from the "New Case" modal.
-   * `attorney` arrives as the shorthand shown in the form's select (e.g.
-   * "Sarah J.") — matched back to a real user id so the case has a proper
-   * FK, not just a display string.
+   * POST /api/v1/cases — create a new case, from either the "New Case"
+   * modal or (via resolveAndApply) the AI Copilot when no existing case
+   * matched. `attorney` arrives as the shorthand shown in the form's
+   * select (e.g. "Sarah J.") — matched back to a real user id so the case
+   * has a proper FK, not just a display string. Unlike applyFieldUpdate,
+   * an unresolvable attorney here is NOT a hard error — a brand-new case
+   * with no lead attorney assigned yet is a normal, valid state; failing
+   * to REASSIGN an existing case's attorney is the dangerous silent
+   * failure (see applyFieldUpdate).
+   *
+   * `auditAction` lets a caller other than the plain case-create API
+   * (namely the Copilot) attribute the audit log entry accurately —
+   * defaults to the human-UI action name.
    */
-  static async createCase(tenantId, actingUser, payload = {}) {
+  static async createCase(tenantId, actingUser, payload = {}, auditAction = 'CREATE_CASE') {
     const { title, client, opposingParty, opposingCounsel, area, attorney, status, hearing } = payload;
 
     if (!title || !title.trim() || !client || !client.trim()) {
@@ -123,8 +307,13 @@ class CaseService {
       throw err;
     }
 
-    const users = await db.listUsersByFirm(tenantId);
-    const matchedAttorney = users.find(u => shorthandName(u.full_name) === attorney);
+    if (status !== undefined && status !== null && !VALID_STATUSES.includes(status)) {
+      const err = new Error(`Invalid status "${status}". Must be one of: ${VALID_STATUSES.join(', ')}.`);
+      err.status = 400;
+      throw err;
+    }
+
+    const matchedAttorney = await this.resolveAttorneyByShorthand(tenantId, attorney);
 
     const year = new Date().getFullYear();
     const maxNum = await db.getMaxCaseNumber(tenantId);
@@ -165,7 +354,7 @@ class CaseService {
     await db.insertAuditLog({
       firmId: tenantId,
       userId: actingUser ? actingUser.id : null,
-      action: 'CREATE_CASE',
+      action: auditAction,
       details: { case_id: id, case_name: title.trim() }
     });
 
@@ -189,5 +378,7 @@ class CaseService {
     return toCaseView(row);
   }
 }
+
+CaseService.VALID_STATUSES = VALID_STATUSES;
 
 module.exports = CaseService;

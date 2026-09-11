@@ -7,6 +7,7 @@
  */
 
 const z = require('zod');
+const CaseService = require('../services/caseService');
 
 // ════════════════════════════════════════════════════════════════════════════
 // 1. SEARCH VAULT — READ-ONLY
@@ -159,15 +160,51 @@ const ManageFilesError = z.object({
 
 // ════════════════════════════════════════════════════════════════════════════
 // 4. CREATE OR UPDATE CASE — MUTATIVE (HITL)
+//
+// `case_id` is a RESOLUTION HINT, not a guaranteed real primary key: the
+// tool tries an exact id match first, falls back to an exact case_name
+// match, and only creates a new case (with a freshly minted id — never
+// the caller's case_id string literally) if neither resolves AND the
+// payload carries enough information to create one (case_name +
+// client_name). See server/services/caseService.js's resolveAndApply.
+//
+// `status` is a strict enum now, not a freeform string — this payload
+// writes to the real `cases.status` column (server/services/
+// caseService.js's VALID_STATUSES), which the rest of the app's UI reads
+// directly (status pills/badges, dashboard active-case count); an
+// arbitrary AI-generated string there would silently break rendering
+// rather than fail loudly at the API boundary the way this schema does.
 // ════════════════════════════════════════════════════════════════════════════
+// .nullish() (not just .optional()) because both the controller's
+// proposal payload AND a caller's own request body legitimately send an
+// explicit `client_update: null` for "no client update this time", not
+// only an omitted key — a pre-existing bug (present before this session,
+// not introduced by it) had this as .optional() only, which made every
+// createOrUpdateCase call THAT DIDN'T include a client update fail Zod
+// validation on the controller's own output the moment it was actually
+// exercised end-to-end.
 const ClientUpdatePayload = z.object({
   subject: z.string().min(1).max(200).optional(),
   body: z.string().min(1).max(5000).optional(),
   urgent: z.boolean().default(false),
-}).optional();
+}).nullish();
+
+// Single source of truth: server/services/caseService.js's VALID_STATUSES
+// (z.enum needs at least one value, hence the fallback — CaseService
+// always sets this, but it guards against an import-order accident).
+const CASE_STATUS_VALUES = CaseService.VALID_STATUSES && CaseService.VALID_STATUSES.length
+  ? CaseService.VALID_STATUSES
+  : ['active', 'pending', 'urgent', 'closed'];
 
 const CreateOrUpdateCasePayload = z.object({
-  status: z.string().max(50).optional(),
+  // Only meaningful (and required together) when no existing case
+  // resolves — see the tool-level comment above.
+  case_name: z.string().min(1).max(255).optional(),
+  client_name: z.string().min(1).max(255).optional(),
+  opposing_party: z.string().max(255).optional(),
+  opposing_counsel: z.string().max(255).optional(),
+  case_type: z.string().max(100).optional(),
+  status: z.enum(CASE_STATUS_VALUES).optional(),
   lead_attorney: z.string().max(100).optional(),
   client_update: ClientUpdatePayload,
 });
@@ -181,6 +218,8 @@ const CreateOrUpdateCaseInput = z.object({
 
 const CaseProposal = z.object({
   case_id: z.string(),
+  action: z.enum(['create', 'update']),
+  matched_by: z.enum(['id', 'name']).nullable(),
   status: z.string().optional(),
   lead_attorney: z.string().optional(),
   client_update: ClientUpdatePayload,
@@ -197,6 +236,8 @@ const CreateOrUpdateCaseApprovalData = z.object({
 
 const CaseUpdateResult = z.object({
   case_id: z.string(),
+  action: z.enum(['create', 'update']),
+  matched_by: z.enum(['id', 'name']).nullable(),
   applied: z.array(z.string()),
 });
 
@@ -216,6 +257,7 @@ const CreateOrUpdateCaseOutput = z.object({
 const CreateOrUpdateCaseError = z.object({
   success: z.literal(false),
   error: z.string(),
+  code: z.string().optional(),
 });
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -278,8 +320,12 @@ module.exports = {
     },
     createOrUpdateCase: {
       name: 'createOrUpdateCase',
-      displayName: 'Update Case',
-      description: 'Update case status, assign attorney, post client update (requires approval)',
+      displayName: 'Create or Update Case',
+      description: 'Update an existing case\'s status/attorney/opposing-party details, or create a new one if case_id ' +
+        'doesn\'t match any real case AND case_name + client_name are both provided (requires approval). ' +
+        'case_id is a resolution hint, not a guaranteed literal id: an exact match against a real case wins; ' +
+        'otherwise an exact case_name match is tried; a new case (with a freshly assigned id) is only created if ' +
+        'neither resolves. status must be one of: active, pending, urgent, closed.',
       category: 'mutative',
       hitl: true,
     },

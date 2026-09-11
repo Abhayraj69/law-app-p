@@ -518,6 +518,57 @@ async function updateCaseStatus(firmId, caseId, status) {
   return rows[0] || null;
 }
 
+// General field update (status, lead attorney, opposing party/counsel,
+// case type) — distinct from the narrow updateCaseStatus above (kept as
+// the dedicated path for the "Archive Case" UI action). Only fields
+// actually present in `updates` are changed; anything else on the row is
+// left alone. Used by the AI Copilot's createOrUpdateCase tool.
+async function updateCaseFields(firmId, caseId, updates = {}) {
+  const fieldMap = {
+    status: 'status',
+    leadAttorneyId: 'lead_attorney_id',
+    opposingParty: 'opposing_party',
+    opposingCounsel: 'opposing_counsel',
+    caseType: 'case_type'
+  };
+
+  const setClauses = [];
+  const values = [];
+  let i = 1;
+  for (const [key, column] of Object.entries(fieldMap)) {
+    if (updates[key] !== undefined) {
+      setClauses.push(`${column} = $${i}`);
+      values.push(updates[key]);
+      i += 1;
+    }
+  }
+  if (!setClauses.length) return getCaseByIdForUser(firmId, caseId, null);
+
+  setClauses.push('updated_at = CURRENT_TIMESTAMP');
+  values.push(firmId, caseId);
+  await pool.query(
+    `UPDATE cases SET ${setClauses.join(', ')} WHERE firm_id = $${i} AND id = $${i + 1}`,
+    values
+  );
+  return getCaseByIdForUser(firmId, caseId, null);
+}
+
+// Case-insensitive EXACT match on case_name (not a substring/fuzzy
+// search) — used to resolve a case by name when a caller-supplied
+// case_id doesn't match any real row. Deliberately exact rather than
+// ILIKE '%name%': a substring search would almost always return more
+// than one hit in a real firm's case list, making "is this ambiguous"
+// meaningless. Returns an array since a firm CAN legitimately have two
+// differently-numbered cases with the same name — callers must treat
+// more than one result as ambiguous, not just take the first.
+async function findCasesByExactName(firmId, name) {
+  const { rows } = await pool.query(
+    `${CASE_SELECT} WHERE cases.firm_id = $1 AND LOWER(cases.case_name) = LOWER($2)`,
+    [firmId, name]
+  );
+  return rows;
+}
+
 // Highest existing numeric suffix of a case id like 'LC-2026-014', used to
 // generate the next id when creating a case from the UI.
 async function getMaxCaseNumber(firmId) {
@@ -754,6 +805,8 @@ module.exports = {
   getCaseByIdForUser,
   insertCase,
   updateCaseStatus,
+  updateCaseFields,
+  findCasesByExactName,
   getMaxCaseNumber,
   listInvoicesByFirm,
   getMonthlyBillingTotals,

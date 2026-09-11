@@ -12,6 +12,7 @@
 
 const db = require('../db');
 const aiProvider = require('../services/aiProvider');
+const CaseService = require('../services/caseService');
 const {
   ToolInputs,
   SearchVaultOutput,
@@ -20,6 +21,7 @@ const {
   ManageFilesOutput,
   ManageFilesError,
   CreateOrUpdateCaseOutput,
+  CreateOrUpdateCaseError,
 } = require('../tools/copilotSchemas');
 
 // ── "Cases" derivation ──────────────────────────────────────────────────
@@ -371,45 +373,92 @@ async function commitFileAction(firmId, action, targetType, target, payload) {
 
 // ════════════════════════════════════════════════════════════════════════════
 // 4. createOrUpdateCase — WRITE (HITL-gated)
-//    Updates case status, assigns attorneys, posts client updates.
+//    Updates an existing case's status/attorney/opposing-party details, or
+//    creates a new one — for real, in the `cases` table — via
+//    CaseService.resolveAndApply. `case_id` is a resolution hint, never a
+//    guaranteed literal primary key: an exact id match wins; failing that,
+//    an exact case_name match; a new case (freshly minted id) is created
+//    only if neither resolves AND the payload has enough information to
+//    (case_name + client_name) — see caseService.js for why, and for the
+//    concurrent-create race handling.
 // ════════════════════════════════════════════════════════════════════════════
 async function createOrUpdateCase(req, res, next) {
   try {
     const { case_id, payload = {}, approved = false, executable_payload } = req.body;
     const firmId = req.tenantId;
 
-    const cases = await getCases(firmId);
-    const existing = cases.find(c => c.case_id === case_id);
+    // Resolved once here (for the approval preview) and again inside
+    // resolveAndApply at commit time — not because this result is
+    // untrusted, but because state can legitimately change in the window
+    // between a human seeing the proposal and clicking "approve" (someone
+    // else could create/rename a matching case in the meantime), and the
+    // human must never approve one plan and have a different one execute.
+    let resolution;
+    try {
+      resolution = await CaseService.resolveCaseIdentity(firmId, { caseId: case_id, caseName: payload.case_name });
+    } catch (err) {
+      if (err.status) {
+        return res.status(err.status).json(CreateOrUpdateCaseError.parse({ success: false, error: err.message, code: err.code }));
+      }
+      throw err;
+    }
 
-    const proposed = {
-      case_id,
-      status: payload.status || existing?.status,
-      lead_attorney: payload.lead_attorney || existing?.lead_attorney,
-      client_update: payload.client_update || null
-    };
+    const action = resolution.case ? 'update' : 'create';
+    const resolvedCaseId = resolution.case ? resolution.case.id : case_id;
+    const caseName = resolution.case ? resolution.case.name : payload.case_name;
 
     if (!approved) {
+      if (action === 'create' && (!payload.case_name || !payload.client_name)) {
+        // Fail the proposal clearly now, rather than showing an approval
+        // prompt for a "create" the commit step could never actually do.
+        const message = `No case matches "${case_id}"${payload.case_name ? ` or the name "${payload.case_name}"` : ''}, and there isn't enough information to create one — both case_name and client_name are required.`;
+        return res.status(404).json(CreateOrUpdateCaseError.parse({ success: false, error: message, code: 'CASE_NOT_FOUND' }));
+      }
+
+      const message = action === 'create'
+        ? `No existing case matches "${case_id}". Approve CREATING a new case "${payload.case_name}" for client "${payload.client_name}"?`
+        : `Approve update to case "${caseName}" (${resolvedCaseId})${resolution.matchedBy === 'name' ? ` — matched by name, not id "${case_id}"` : ''}?`;
+
       return res.json(CreateOrUpdateCaseOutput.parse({
         success: true,
         requires_approval: true,
         data: {
           tool: 'createOrUpdateCase',
-          case_id,
-          case_name: existing?.case_name || case_id,
-          proposed_payload: proposed,
+          case_id: resolvedCaseId,
+          case_name: caseName || case_id,
+          proposed_payload: {
+            case_id: resolvedCaseId,
+            action,
+            matched_by: resolution.matchedBy,
+            status: payload.status || resolution.case?.status,
+            lead_attorney: payload.lead_attorney || resolution.case?.attorney,
+            client_update: payload.client_update || null
+          },
           executable_payload: executable_payload || payload,
-          message: `Approve update to case "${existing?.case_name || case_id}"?`
+          message
         }
       }));
     }
 
-    // Commit — use executable_payload if provided (from approval confirm), else payload
+    // Commit — use executable_payload if provided (from approval confirm),
+    // else payload. resolveAndApply does the real work: re-resolves
+    // identity, validates status/attorney, writes to `cases` for real, and
+    // logs its own audit entry (COPILOT_CREATE_CASE / COPILOT_UPDATE_CASE).
     const commitPayload = executable_payload || payload;
-    const result = { case_id, applied: [] };
+    const applyResult = await CaseService.resolveAndApply(firmId, req.user, { caseId: case_id, payload: commitPayload });
+
+    const result = {
+      case_id: applyResult.case.id,
+      action: applyResult.action,
+      matched_by: applyResult.matchedBy,
+      applied: []
+    };
+    if (applyResult.action === 'create') result.applied.push(`created case "${applyResult.case.name}"`);
     if (commitPayload.status) result.applied.push(`status → ${commitPayload.status}`);
     if (commitPayload.lead_attorney) result.applied.push(`lead attorney → ${commitPayload.lead_attorney}`);
+
     if (commitPayload.client_update) {
-      const label = existing?.case_name || case_id;
+      const label = applyResult.case.name;
       await db.insertClientMessage({
         firmId,
         clientName: label,
@@ -423,15 +472,22 @@ async function createOrUpdateCase(req, res, next) {
       result.applied.push('posted client update');
     }
 
-    // Log audit trail
-    await logAuditTrail(req, 'update_case', case_id, 'case', commitPayload);
-
     res.json(CreateOrUpdateCaseOutput.parse({
       success: true,
       requires_approval: false,
-      data: { tool: 'createOrUpdateCase', case_id, result }
+      data: { tool: 'createOrUpdateCase', case_id: applyResult.case.id, result }
     }));
   } catch (err) {
+    // Business-logic failures from CaseService (ambiguous name, case not
+    // found with insufficient create info, unresolvable attorney, invalid
+    // status) all carry `.status` — surfaced in the same shape every other
+    // copilot tool's expected errors use, rather than falling through to
+    // the generic {error, code} the global handler produces (no
+    // `success: false`), which the frontend's copilot response handling
+    // doesn't expect.
+    if (err.status) {
+      return res.status(err.status).json(CreateOrUpdateCaseError.parse({ success: false, error: err.message, code: err.code }));
+    }
     next(err);
   }
 }

@@ -30,11 +30,18 @@ section before assuming a feature is wired up.
 - **AI Copilot drawer** — search, summarize, manage-files, and case-update
   tools under `/api/v1/copilot/*` (`server/controllers/copilotController.js`).
   Mutative tools (`manageFiles`, `createOrUpdateCase`) use a human-in-the-loop
-  approval step before committing any change. Note: `createOrUpdateCase`'s
-  case list and its "commit" step are still separate from the real
-  `caseService.js`/`cases` table described above — it doesn't yet write to
-  `cases`. Flagging this rather than claiming otherwise; wiring it up was
-  outside the scope of the Dashboard/Cases/Communications pass.
+  approval step before committing any change. `createOrUpdateCase` writes
+  to the real `cases` table via `CaseService.resolveAndApply`
+  (`server/services/caseService.js`) — it resolves the caller's `case_id`
+  against a real case first (exact id, then an exact case_name match),
+  updates it if found, or creates a genuinely new case (with a properly
+  minted id — the caller's own reference string is never used as the
+  literal primary key) if not found AND the payload has enough
+  information to. An ambiguous name, an unresolvable attorney, or a
+  not-enough-info-to-create case are all refused with a clear error
+  rather than silently guessed at or ignored. See
+  `server/test/copilotCase.test.js`, including a genuine concurrent-create
+  race test.
 - **Authentication** — `/api/v1/auth/login` issues a signed JWT after
   verifying a password against the `users` table in Postgres; every other
   API route requires that token via `Authorization: Bearer <token>`
@@ -237,5 +244,10 @@ or fake stream.
   built for firm staff, not as a client-facing portal (see the note on the
   `CLIENT` demo accounts above); the case and conversation APIs that a
   client-portal experience would actually depend on ARE fully role-scoped.
-- **The AI Copilot's `createOrUpdateCase` tool doesn't write to the real
-  `cases` table** — see "What's real" above.
+- **The AI Copilot's `searchVault` tool's "cases" search scope is still a
+  pseudo-view derived from `documents.case_id`**, not the real `cases`
+  table `createOrUpdateCase` now writes to (see "What's real" above) — so
+  a case's real status/attorney (as just updated via `createOrUpdateCase`)
+  won't be reflected in a `searchVault` "cases" hit. Left as-is since it
+  was outside the scope of fixing `createOrUpdateCase` specifically;
+  flagged rather than silently inconsistent.
