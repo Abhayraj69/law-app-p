@@ -597,6 +597,24 @@ async function listInvoicesByFirm(firmId) {
   return rows.map(r => ({ ...r, amount_cents: Number(r.amount_cents) }));
 }
 
+// GET /api/v1/invoices — the client portal's billing view. Same
+// client_user_id scoping rule as cases/documents: a CLIENT only ever sees
+// invoices billed against one of their own cases. An invoice with no
+// case_id (cases.client_user_id then NULL) can never match a CLIENT.
+async function listInvoicesForUser(firmId, user) {
+  const values = [firmId];
+  let query = `SELECT invoices.*, cases.case_name FROM invoices
+     LEFT JOIN cases ON cases.id = invoices.case_id
+     WHERE invoices.firm_id = $1`;
+  if (user && user.role === 'CLIENT') {
+    values.push(user.id);
+    query += ` AND cases.client_user_id = $${values.length}`;
+  }
+  query += ' ORDER BY invoices.issued_date DESC';
+  const { rows } = await pool.query(query, values);
+  return rows.map(r => ({ ...r, amount_cents: Number(r.amount_cents) }));
+}
+
 // Monthly totals for the billing chart plus overdue invoice stats for the
 // dashboard KPI card. Done as two small queries rather than pulling every
 // invoice row and summing in JS, since this is meant to scale with real
@@ -886,6 +904,7 @@ module.exports = {
   findCasesByExactName,
   getMaxCaseNumber,
   listInvoicesByFirm,
+  listInvoicesForUser,
   getMonthlyBillingTotals,
   getInvoiceStats,
   listConversationsForUser,

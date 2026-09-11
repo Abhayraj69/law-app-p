@@ -21,6 +21,7 @@ const dashboardController = require('../controllers/dashboardController');
 const caseController = require('../controllers/caseController');
 const communicationsController = require('../controllers/communicationsController');
 const inviteController = require('../controllers/inviteController');
+const invoiceController = require('../controllers/invoiceController');
 
 // Apply Global Tenant Authentication & User Context
 router.use(authMiddleware);
@@ -116,6 +117,11 @@ router.patch('/cases/:id/archive', requireRole('ASSOCIATE'), caseController.arch
 router.get('/conversations', communicationsController.listConversations);
 router.get('/conversations/:id', communicationsController.getConversation);
 router.post('/conversations/:id/messages', communicationsController.postMessage);
+
+// ═════════════════════════════════════════════════════════════════════
+// G2. INVOICES / BILLING (client portal)
+// ═════════════════════════════════════════════════════════════════════
+router.get('/invoices', invoiceController.listInvoices);
 
 // ═════════════════════════════════════════════════════════════════════
 // H. ADMIN — TEAM / USER PROVISIONING
