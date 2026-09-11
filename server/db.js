@@ -498,12 +498,12 @@ async function getCaseByIdForUser(firmId, caseId, user) {
   return rows[0] || null;
 }
 
-async function insertCase({ id, firmId, caseName, clientName, opposingParty, opposingCounsel, status, leadAttorneyId, caseType, clientUserId }) {
+async function insertCase({ id, firmId, caseName, clientName, opposingParty, opposingCounsel, status, leadAttorneyId, caseType, clientUserId, description }) {
   const { rows } = await pool.query(
-    `INSERT INTO cases (id, firm_id, case_name, client_name, opposing_party, opposing_counsel, status, lead_attorney_id, case_type, client_user_id)
-     VALUES ($1, $2, $3, $4, $5, $6, COALESCE($7, 'active'), $8, $9, $10)
+    `INSERT INTO cases (id, firm_id, case_name, client_name, opposing_party, opposing_counsel, status, lead_attorney_id, case_type, client_user_id, description)
+     VALUES ($1, $2, $3, $4, $5, $6, COALESCE($7, 'active'), $8, $9, $10, $11)
      RETURNING *`,
-    [id, firmId, caseName, clientName, opposingParty || null, opposingCounsel || null, status || null, leadAttorneyId || null, caseType || null, clientUserId || null]
+    [id, firmId, caseName, clientName, opposingParty || null, opposingCounsel || null, status || null, leadAttorneyId || null, caseType || null, clientUserId || null, description || null]
   );
   return rows[0];
 }
@@ -529,7 +529,8 @@ async function updateCaseFields(firmId, caseId, updates = {}) {
     leadAttorneyId: 'lead_attorney_id',
     opposingParty: 'opposing_party',
     opposingCounsel: 'opposing_counsel',
-    caseType: 'case_type'
+    caseType: 'case_type',
+    description: 'description'
   };
 
   const setClauses = [];

@@ -78,10 +78,10 @@ const SEED_FOLDERS = [
 // filter has both "belongs to this client" and "belongs to nobody" rows
 // to prove it excludes correctly.
 const SEED_CASES = [
-  { id: 'LC-2026-001', caseName: 'Anderson v. Meridian Corp.', clientName: 'James Anderson', opposingParty: 'Meridian Corp.', opposingCounsel: 'Sterling & Croft', status: 'active', caseType: 'Commercial Litigation', leadAttorneyId: ATTORNEY_IDS.jennings, clientUserId: CLIENT_USER_IDS.anderson },
-  { id: 'LC-2026-002', caseName: 'Davies v. State', clientName: 'Emily Davies', opposingParty: 'State Prosecutor', opposingCounsel: 'District Attorney Office', status: 'pending', caseType: 'Criminal Defense', leadAttorneyId: ATTORNEY_IDS.ross, clientUserId: CLIENT_USER_IDS.davies },
-  { id: 'LC-2026-004', caseName: 'Garrison Estate Management', clientName: 'Chloe Garrison', opposingParty: 'Garrison Trust Trustees', opposingCounsel: 'Hampton Law Firm', status: 'active', caseType: 'Probate & Estate', leadAttorneyId: ATTORNEY_IDS.nair, clientUserId: null },
-  { id: 'LC-2026-005', caseName: 'Blake IP Dispute', clientName: 'FutureTech Inc.', opposingParty: 'Omni Media Group', opposingCounsel: 'Vanguard Legal Advisors', status: 'urgent', caseType: 'Intellectual Property', leadAttorneyId: ATTORNEY_IDS.ross, clientUserId: null }
+  { id: 'LC-2026-001', caseName: 'Anderson v. Meridian Corp.', clientName: 'James Anderson', opposingParty: 'Meridian Corp.', opposingCounsel: 'Sterling & Croft', status: 'active', caseType: 'Commercial Litigation', leadAttorneyId: ATTORNEY_IDS.jennings, clientUserId: CLIENT_USER_IDS.anderson, description: 'Breach-of-contract claim against Meridian Corp. arising from their unilateral cancellation of a multi-year supply agreement. Seeking damages for lost revenue and reputational harm; settlement discussions are ongoing alongside trial preparation.' },
+  { id: 'LC-2026-002', caseName: 'Davies v. State', clientName: 'Emily Davies', opposingParty: 'State Prosecutor', opposingCounsel: 'District Attorney Office', status: 'pending', caseType: 'Criminal Defense', leadAttorneyId: ATTORNEY_IDS.ross, clientUserId: CLIENT_USER_IDS.davies, description: 'Defense against state charges stemming from a traffic stop. Currently in the discovery phase; motion to suppress evidence obtained during the stop is under preparation.' },
+  { id: 'LC-2026-004', caseName: 'Garrison Estate Management', clientName: 'Chloe Garrison', opposingParty: 'Garrison Trust Trustees', opposingCounsel: 'Hampton Law Firm', status: 'active', caseType: 'Probate & Estate', leadAttorneyId: ATTORNEY_IDS.nair, clientUserId: null, description: null },
+  { id: 'LC-2026-005', caseName: 'Blake IP Dispute', clientName: 'FutureTech Inc.', opposingParty: 'Omni Media Group', opposingCounsel: 'Vanguard Legal Advisors', status: 'urgent', caseType: 'Intellectual Property', leadAttorneyId: ATTORNEY_IDS.ross, clientUserId: null, description: null }
 ];
 
 // Deadline dates are computed relative to "today" (rather than hardcoded)
@@ -217,16 +217,17 @@ async function seedFolders(client) {
 async function seedCases(client) {
   for (const c of SEED_CASES) {
     await client.query(
-      `INSERT INTO cases (id, firm_id, case_name, client_name, opposing_party, opposing_counsel, status, case_type, lead_attorney_id, client_user_id)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+      `INSERT INTO cases (id, firm_id, case_name, client_name, opposing_party, opposing_counsel, status, case_type, lead_attorney_id, client_user_id, description)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
        ON CONFLICT (id) DO UPDATE SET
          opposing_party = EXCLUDED.opposing_party,
          opposing_counsel = EXCLUDED.opposing_counsel,
          status = EXCLUDED.status,
          case_type = EXCLUDED.case_type,
          lead_attorney_id = EXCLUDED.lead_attorney_id,
-         client_user_id = EXCLUDED.client_user_id`,
-      [c.id, DEFAULT_FIRM_ID, c.caseName, c.clientName, c.opposingParty, c.opposingCounsel, c.status, c.caseType, c.leadAttorneyId, c.clientUserId]
+         client_user_id = EXCLUDED.client_user_id,
+         description = EXCLUDED.description`,
+      [c.id, DEFAULT_FIRM_ID, c.caseName, c.clientName, c.opposingParty, c.opposingCounsel, c.status, c.caseType, c.leadAttorneyId, c.clientUserId, c.description]
     );
   }
 }

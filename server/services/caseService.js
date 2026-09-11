@@ -84,7 +84,8 @@ function toCaseView(row) {
     type: row.case_type,
     nextHearing: formatHearingDate(row.next_hearing_date),
     createdDate: row.created_at,
-    client_user_id: row.client_user_id
+    client_user_id: row.client_user_id,
+    description: row.description
   };
 }
 
@@ -299,7 +300,7 @@ class CaseService {
    * defaults to the human-UI action name.
    */
   static async createCase(tenantId, actingUser, payload = {}, auditAction = 'CREATE_CASE') {
-    const { title, client, opposingParty, opposingCounsel, area, attorney, status, hearing } = payload;
+    const { title, client, opposingParty, opposingCounsel, area, attorney, status, hearing, description } = payload;
 
     if (!title || !title.trim() || !client || !client.trim()) {
       const err = new Error('Case title and client name are required.');
@@ -328,7 +329,8 @@ class CaseService {
       opposingCounsel: opposingCounsel || null,
       status: status || 'active',
       leadAttorneyId: matchedAttorney ? matchedAttorney.id : null,
-      caseType: area || null
+      caseType: area || null,
+      description: description || null
     });
 
     if (hearing && hearing.trim() && hearing.trim().toLowerCase() !== 'none') {
