@@ -249,6 +249,7 @@ function navigateToPage(page) {
   const casesPage = $('casesPage');
   const commsPage = $('commsPage');
   const documentsPage = $('documentsPage');
+  const settingsPage = $('settingsPage');
   const placeholder = $('placeholderPage');
 
   // Hide all main pages
@@ -256,6 +257,7 @@ function navigateToPage(page) {
   if (casesPage) casesPage.classList.add('hidden');
   if (commsPage) commsPage.classList.add('hidden');
   if (documentsPage) documentsPage.classList.add('hidden');
+  if (settingsPage) settingsPage.classList.add('hidden');
   if (placeholder) placeholder.classList.add('hidden');
 
   if (page === 'dashboard') {
@@ -277,6 +279,11 @@ function navigateToPage(page) {
     if (commsPage) {
       commsPage.classList.remove('hidden');
       initCommsPage();
+    }
+  } else if (page === 'settings') {
+    if (settingsPage) {
+      settingsPage.classList.remove('hidden');
+      initSettingsPage();
     }
   } else {
     showPlaceholderPage(pageTitles[page] || page);
@@ -1564,6 +1571,115 @@ function handleInputQuickAction(action) {
     showToast('Generating secure Signature Request template...', 'success');
   } else if (action === 'template') {
     showToast('Loading Quick Replies and legal templates...', 'info');
+  }
+}
+
+/* ════════════════════════════════════════════
+   SETTINGS / TEAM MEMBERS — ADMIN-INVITE USER PROVISIONING
+   The only way to add a user used to be running `npm run seed` with a new
+   hardcoded entry — this talks to a real, ADMIN-gated backend
+   (server/services/inviteService.js): GET /api/v1/admin/users (roster) and
+   POST /api/v1/admin/invites (create a placeholder user + one-time invite
+   link). The admin never sets the invitee's password — only the invitee
+   does, by visiting accept-invite.html with the returned link.
+   ════════════════════════════════════════════ */
+
+let settingsListenersInitialized = false;
+
+function initSettingsPage() {
+  const isAdmin = Auth.getUser() && Auth.getUser().role === 'ADMIN';
+  $('inviteUserBtn').classList.toggle('hidden', !isAdmin);
+  $('settingsNonAdminNotice').classList.toggle('hidden', isAdmin);
+
+  setupSettingsPageListeners();
+  loadTeam();
+}
+
+async function loadTeam() {
+  const tbody = $('teamTableBody');
+  if (!tbody) return;
+  try {
+    // A non-ADMIN gets a 403 here — that's expected, not an error state;
+    // the roster is an admin-only view (server-enforced, not just the
+    // hidden invite button above).
+    const team = await ApiClient.get('/api/v1/admin/users');
+    renderTeamTable(team);
+  } catch (err) {
+    tbody.innerHTML = `<tr><td colspan="5" style="text-align:center;color:var(--slate-400)">${Auth.getUser() && Auth.getUser().role === 'ADMIN' ? 'Error loading team roster' : 'Only firm administrators can view the team roster.'}</td></tr>`;
+  }
+}
+
+function renderTeamTable(team) {
+  const tbody = $('teamTableBody');
+  const statusLabels = { active: 'Active', pending: 'Invite Pending', expired: 'Invite Expired' };
+  const statusClass = { active: 'active', pending: 'pending', expired: 'closed' };
+
+  if (!team.length) {
+    tbody.innerHTML = `<tr><td colspan="5" style="text-align:center;color:var(--slate-400)">No team members yet</td></tr>`;
+    return;
+  }
+
+  tbody.innerHTML = team.map(u => `
+    <tr>
+      <td>${u.full_name}</td>
+      <td>${u.email}</td>
+      <td>${u.role}</td>
+      <td><span class="status-badge ${statusClass[u.invite_status] || 'active'}">${statusLabels[u.invite_status] || u.invite_status}</span></td>
+      <td class="activity-time">${new Date(u.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}</td>
+    </tr>
+  `).join('');
+}
+
+function setupSettingsPageListeners() {
+  if (settingsListenersInitialized) return;
+
+  $('inviteUserBtn').addEventListener('click', () => {
+    $('inviteResultBox').classList.add('hidden');
+    $('inviteUserForm').reset();
+    $('inviteUserModal').classList.remove('hidden');
+  });
+
+  const closeInviteModal = () => $('inviteUserModal').classList.add('hidden');
+  $('inviteModalCloseBtn').addEventListener('click', closeInviteModal);
+  $('inviteModalCancelBtn').addEventListener('click', closeInviteModal);
+  $('inviteUserModal').addEventListener('click', (e) => {
+    if (e.target === $('inviteUserModal')) closeInviteModal();
+  });
+
+  settingsListenersInitialized = true;
+}
+
+async function handleInviteUserSubmit(event) {
+  event.preventDefault();
+  const fullName = $('inviteFullName').value;
+  const initials = $('inviteInitials').value;
+  const email = $('inviteEmail').value;
+  const role = $('inviteRole').value;
+
+  const submitBtn = $('inviteSubmitBtn');
+  submitBtn.disabled = true;
+  submitBtn.textContent = 'Sending…';
+
+  try {
+    const { ok, json } = await ApiClient.post('/api/v1/admin/invites', { fullName, initials, email, role });
+    if (!ok) throw new Error(json.error || 'Failed to create invite.');
+
+    // No email/SMTP is configured in this project (see .env.local) — the
+    // link is shown here, once, for the admin to relay however they
+    // currently communicate with new hires, rather than silently
+    // pretending an email was sent.
+    const fullUrl = `${window.location.origin}${json.data.invite_path}`;
+    const box = $('inviteResultBox');
+    box.innerHTML = `<strong>${json.data.user.full_name}</strong> was created. Send them this one-time link (expires ${new Date(json.data.expires_at).toLocaleDateString()}):<br><br>${fullUrl}`;
+    box.classList.remove('hidden');
+
+    showToast(`Invite created for ${json.data.user.full_name}.`, 'success');
+    loadTeam();
+  } catch (err) {
+    showToast(err.message || 'Failed to create invite.', 'error');
+  } finally {
+    submitBtn.disabled = false;
+    submitBtn.textContent = 'Send Invite';
   }
 }
 

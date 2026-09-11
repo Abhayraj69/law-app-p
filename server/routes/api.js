@@ -20,6 +20,7 @@ const copilotController = require('../controllers/copilotController');
 const dashboardController = require('../controllers/dashboardController');
 const caseController = require('../controllers/caseController');
 const communicationsController = require('../controllers/communicationsController');
+const inviteController = require('../controllers/inviteController');
 
 // Apply Global Tenant Authentication & User Context
 router.use(authMiddleware);
@@ -116,7 +117,22 @@ router.get('/conversations', communicationsController.listConversations);
 router.get('/conversations/:id', communicationsController.getConversation);
 router.post('/conversations/:id/messages', communicationsController.postMessage);
 
-// H. AI COPILOT TOOLS
+// ═════════════════════════════════════════════════════════════════════
+// H. ADMIN — TEAM / USER PROVISIONING
+// Single-firm, admin-invite only: there is no self-signup route anywhere
+// in this app, and nothing here accepts a firm_id from the caller — every
+// invite is created under req.tenantId (the ADMIN's own firm, resolved
+// from their verified token, same as every other route in this file).
+// ═════════════════════════════════════════════════════════════════════
+router.get('/admin/users', requireRole('ADMIN'), inviteController.listTeam);
+router.post(
+  '/admin/invites',
+  requireRole('ADMIN'),
+  logAuditAction('CREATE_USER_INVITE'),
+  inviteController.createInvite
+);
+
+// I. AI COPILOT TOOLS
 router.post('/copilot/search', copilotController.validateToolInput('searchVault'), copilotController.searchVault);
 router.post('/copilot/summarize', copilotController.validateToolInput('summarizeDocument'), copilotController.summarizeDocument);
 router.post('/copilot/manage-files', copilotController.validateToolInput('manageFiles'), copilotController.manageFiles);

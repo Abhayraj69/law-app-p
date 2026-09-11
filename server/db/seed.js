@@ -32,6 +32,11 @@ const DEFAULT_FIRM_ID = 'f47ac10b-58cc-4372-a567-0e02b2c3d479';
 // users.id and folders.id are UUID columns, so an arbitrary label like
 // "fld-root-1" is rejected by Postgres outright.
 const SEED_USERS = [
+  // The firm's practice administrator — the only role that can invite new
+  // users (see server/services/inviteService.js). No other seed user has
+  // the ADMIN role, so this account is required for the invite flow to be
+  // reachable at all on a freshly seeded database.
+  { id: 'a1100ac1-58cc-4372-a567-0e02b2c3d479', email: 'a.morgan@slf.law', fullName: 'Alex Morgan', role: 'ADMIN', initials: 'AM', envVar: 'SEED_MORGAN_PASSWORD' },
   { id: 'a1101ac1-58cc-4372-a567-0e02b2c3d479', email: 's.jennings@slf.law', fullName: 'Sarah Jennings', role: 'SENIOR_PARTNER', initials: 'SJ', envVar: 'SEED_JENNINGS_PASSWORD' },
   { id: 'a1102ac1-58cc-4372-a567-0e02b2c3d479', email: 'm.ross@slf.law', fullName: 'Marcus Ross', role: 'ASSOCIATE', initials: 'MR', envVar: 'SEED_ROSS_PASSWORD' },
   { id: 'a1103ac1-58cc-4372-a567-0e02b2c3d479', email: 'p.nair@slf.law', fullName: 'Priya Nair', role: 'ASSOCIATE', initials: 'PN', envVar: 'SEED_NAIR_PASSWORD' },

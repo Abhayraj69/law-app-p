@@ -69,6 +69,109 @@ async function createUser({ id, firmId, email, fullName, role, initials, passwor
   return rows[0];
 }
 
+// ── Admin-invite user provisioning ──────────────────────────────────────
+//
+// Unlike createUser (which upserts on email conflict — needed so the
+// `npm run seed` script stays re-runnable), this deliberately does NOT
+// overwrite an existing account: ON CONFLICT DO NOTHING, and the caller
+// (inviteService) checks whether a row actually came back to distinguish
+// "created" from "email already taken" and return a proper 409.
+async function createInvitedUser({ firmId, email, fullName, role, initials, placeholderPasswordHash }) {
+  const { rows } = await pool.query(
+    `INSERT INTO users (firm_id, email, full_name, role, initials, password_hash)
+     VALUES ($1, $2, $3, $4, $5, $6)
+     ON CONFLICT (email) DO NOTHING
+     RETURNING *`,
+    [firmId, email, fullName, role, initials || null, placeholderPasswordHash]
+  );
+  return rows[0] || null;
+}
+
+async function createUserInvite({ firmId, userId, invitedBy, tokenHash, expiresAt }) {
+  const { rows } = await pool.query(
+    `INSERT INTO user_invites (firm_id, user_id, invited_by, token_hash, expires_at)
+     VALUES ($1, $2, $3, $4, $5)
+     RETURNING *`,
+    [firmId, userId, invitedBy || null, tokenHash, expiresAt]
+  );
+  return rows[0];
+}
+
+// Returns the invite + the user it will activate, but ONLY if it hasn't
+// expired and hasn't already been accepted — an expired or spent token
+// must behave exactly like "doesn't exist" to the caller, not like a
+// valid-but-flagged one, so there's nothing for a caller to branch on
+// that would distinguish "wrong token" from "right token, too late".
+async function getUsableInviteByTokenHash(tokenHash) {
+  const { rows } = await pool.query(
+    `SELECT ui.*, u.email, u.full_name, u.role, u.initials
+     FROM user_invites ui
+     JOIN users u ON u.id = ui.user_id
+     WHERE ui.token_hash = $1
+       AND ui.accepted_at IS NULL
+       AND ui.expires_at > CURRENT_TIMESTAMP`,
+    [tokenHash]
+  );
+  return rows[0] || null;
+}
+
+// Sets the invitee's own chosen password and marks the invite spent, in
+// one transaction — a token must not be usable twice even under a race
+// (two requests accepting the same invite at once).
+async function acceptUserInvite(inviteId, userId, passwordHash) {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const { rowCount } = await client.query(
+      `UPDATE user_invites SET accepted_at = CURRENT_TIMESTAMP
+       WHERE id = $1 AND accepted_at IS NULL`,
+      [inviteId]
+    );
+    if (rowCount === 0) {
+      await client.query('ROLLBACK');
+      return false; // already accepted by a concurrent request
+    }
+    await client.query(
+      `UPDATE users SET password_hash = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2`,
+      [passwordHash, userId]
+    );
+    await client.query('COMMIT');
+    return true;
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+// Roster view for the admin "Team Members" panel: every user in the firm,
+// with their invite status (accepted / pending / expired) if they were
+// invited through this flow at all (seed-script users have no invite row
+// and are just reported as accepted).
+async function listUsersWithInviteStatus(firmId) {
+  const { rows } = await pool.query(
+    `SELECT u.id, u.email, u.full_name, u.role, u.initials, u.created_at,
+            ui.expires_at AS invite_expires_at,
+            ui.accepted_at AS invite_accepted_at
+     FROM users u
+     LEFT JOIN LATERAL (
+       SELECT expires_at, accepted_at FROM user_invites
+       WHERE user_id = u.id ORDER BY created_at DESC LIMIT 1
+     ) ui ON true
+     WHERE u.firm_id = $1
+     ORDER BY u.created_at DESC`,
+    [firmId]
+  );
+  return rows.map(r => ({
+    ...r,
+    invite_status: !r.invite_expires_at ? 'active' // no invite row at all (seeded directly)
+      : r.invite_accepted_at ? 'active'
+      : new Date(r.invite_expires_at) < new Date() ? 'expired'
+      : 'pending'
+  }));
+}
+
 // ── Storage quotas ───────────────────────────────────────────────────────
 async function getStorageQuota(firmId) {
   const { rows } = await pool.query('SELECT * FROM storage_quotas WHERE firm_id = $1', [firmId]);
@@ -662,5 +765,10 @@ module.exports = {
   markConversationRead,
   getDashboardCounts,
   listRecentAuditActivity,
-  insertCaseDeadline
+  insertCaseDeadline,
+  createInvitedUser,
+  createUserInvite,
+  getUsableInviteByTokenHash,
+  acceptUserInvite,
+  listUsersWithInviteStatus
 };

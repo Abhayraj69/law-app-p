@@ -39,7 +39,18 @@ section before assuming a feature is wired up.
   verifying a password against the `users` table in Postgres; every other
   API route requires that token via `Authorization: Bearer <token>`
   (`server/middleware/auth.js`, `server/services/authService.js`). There are
-  five demo accounts (three staff, two client-portal), documented below.
+  six demo accounts (one admin, three other staff, two client-portal),
+  documented below.
+- **User provisioning is single-firm, admin-invite only** — there is no
+  self-signup route anywhere in the app, and no way for a caller to choose
+  their own firm. An `ADMIN`-role user creates an invite (Settings > Team
+  Members > Invite User, or `POST /api/v1/admin/invites`); this creates a
+  real user row with a random, unusable placeholder password and returns a
+  one-time link. The invitee — not the admin — sets their own password by
+  visiting that link (`accept-invite.html`,
+  `GET`/`POST /api/v1/auth/invite/:token[/accept]`). See "Adding a user"
+  below. (`server/services/inviteService.js`,
+  `server/test/invite.test.js`.)
 - **Persistence** — every table in `db/schema.sql` plus `db/migrations/`
   (firms, users, cases, folders, documents, tags, shares, audit logs,
   client messages, case deadlines, invoices, conversations and
@@ -94,6 +105,7 @@ one of the seed accounts:
 
 | Email | Role |
 |---|---|
+| `a.morgan@slf.law` | Administrator (the only role that can invite users) |
 | `s.jennings@slf.law` | Senior Partner |
 | `m.ross@slf.law` | Associate |
 | `p.nair@slf.law` | Associate |
@@ -109,11 +121,35 @@ staff UI with API responses quietly filtered — the enforcement is real, the
 tailored client experience isn't built yet.
 
 Each account gets its **own** password, generated and printed once by
-`npm run seed` (or set in advance via `SEED_JENNINGS_PASSWORD` /
-`SEED_ROSS_PASSWORD` / `SEED_NAIR_PASSWORD` / `SEED_ANDERSON_PASSWORD` /
-`SEED_DAVIES_PASSWORD` in `.env.local`) — there is no shared demo
-credential. If you lose a printed password, re-run `npm run seed` with that
-user's env var set to a new value.
+`npm run seed` (or set in advance via `SEED_MORGAN_PASSWORD` /
+`SEED_JENNINGS_PASSWORD` / `SEED_ROSS_PASSWORD` / `SEED_NAIR_PASSWORD` /
+`SEED_ANDERSON_PASSWORD` / `SEED_DAVIES_PASSWORD` in `.env.local`) — there
+is no shared demo credential. If you lose a printed password, re-run
+`npm run seed` with that user's env var set to a new value.
+
+### Adding a user
+
+Once the app is running, sign in as `a.morgan@slf.law` (the seeded
+`ADMIN` account — no other seed user has that role) and go to
+**Settings > Team Members > + Invite User**. Fill in name, email, and
+role, and submit. There's no email integration configured (see "Known
+limitations"), so the one-time invite link is shown directly in the
+modal for you to copy and send the new hire however you'd normally reach
+them. They open that link (`/accept-invite.html?token=...`), set their
+own password, and are logged straight in — you never see or choose their
+password, only they do. The same flow works via `curl`:
+
+```bash
+TOKEN=$(curl -s -X POST http://localhost:3000/api/v1/auth/login \
+  -H 'Content-Type: application/json' \
+  -d '{"email":"a.morgan@slf.law","password":"<their password>"}' \
+  | node -e "process.stdin.once('data', d => console.log(JSON.parse(d).data.token))")
+
+curl -s -X POST http://localhost:3000/api/v1/admin/invites \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"email":"new.hire@slf.law","fullName":"New Hire","role":"ASSOCIATE"}'
+# -> { "data": { "invite_path": "/accept-invite.html?token=..." , ... } }
+```
 
 ### Getting a Postgres without Docker or admin rights
 
@@ -179,10 +215,9 @@ or fake stream.
 - **No antivirus engine configured by default.** Point `CLAMAV_HOST` at a
   running ClamAV daemon to get a real malware scan on top of the signature
   check; without it, only the content-signature validation runs (see above).
-- **No signup flow or admin "invite a user" UI yet** — new users are
-  currently provisioned by running `npm run seed` with new entries, not
-  through the app itself. Each seed user does get a distinct, non-shared
-  password (see "Running it locally" above).
+- **No email/SMTP integration** — an ADMIN's invite link (see "Adding a
+  user" below) is shown once in the UI for them to relay however they
+  currently reach new hires; nothing is emailed automatically.
 - **The global omnibox search and message encryption are still mock/absent**,
   as described in "What's still mock/static" above.
 - **The dashboard's hearings widget (`case_deadlines`) and client-messages

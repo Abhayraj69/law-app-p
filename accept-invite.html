@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Accept Invite — SLF</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap"
+    rel="stylesheet" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+
+<body class="auth-locked">
+
+  <!-- ══════════════════════════════════════════
+       ACCEPT-INVITE PAGE
+       Reached only via a one-time link an ADMIN generated through the
+       Settings > Team Members > Invite User flow (see app.js's
+       handleInviteUserSubmit and server/services/inviteService.js). The
+       invitee sets their OWN password here — the admin who created the
+       invite never sees or chooses it. This page is deliberately outside
+       the main SPA (index.html) since the invitee has no session yet.
+  ══════════════════════════════════════════ -->
+  <div class="auth-overlay" id="authOverlay" style="display:flex">
+    <form class="auth-card" id="acceptInviteForm" autocomplete="off">
+      <div class="auth-logo">
+        <div class="logo-icon">
+          <svg viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <rect width="32" height="32" rx="8" fill="url(#authLogoGrad)" />
+            <path d="M16 6L8 12v4l8-4 8 4v-4L16 6z" fill="white" opacity="0.9" />
+            <path d="M10 18v6h4v-4h4v4h4v-6L16 15l-6 3z" fill="white" />
+            <defs>
+              <linearGradient id="authLogoGrad" x1="0" y1="0" x2="32" y2="32" gradientUnits="userSpaceOnUse">
+                <stop stop-color="#C9A84C" /><stop offset="1" stop-color="#A0722A" />
+              </linearGradient>
+            </defs>
+          </svg>
+        </div>
+        <span class="logo-name">SLF</span>
+      </div>
+
+      <!-- Loading state, shown while the token is being validated -->
+      <div id="inviteLoadingState">
+        <h2 class="auth-title">Checking your invite…</h2>
+      </div>
+
+      <!-- Invalid/expired state -->
+      <div id="inviteInvalidState" class="hidden">
+        <h2 class="auth-title">This invite link is invalid or expired</h2>
+        <p class="auth-subtitle">Ask your firm administrator to send you a new one from Settings &gt; Team
+          Members.</p>
+        <a class="btn-primary vault-submit-btn" style="width:100%; text-align:center; display:block; text-decoration:none;"
+          href="/">Go to Sign In</a>
+      </div>
+
+      <!-- Set-password state, shown once the token checks out -->
+      <div id="inviteFormState" class="hidden">
+        <h2 class="auth-title" id="inviteWelcomeTitle">Welcome</h2>
+        <p class="auth-subtitle" id="inviteWelcomeSubtitle">Set a password to activate your account.</p>
+
+        <div class="form-group-modal">
+          <label for="invitePassword">New Password</label>
+          <input type="password" id="invitePassword" placeholder="At least 8 characters"
+            autocomplete="new-password" required minlength="8" />
+        </div>
+        <div class="form-group-modal">
+          <label for="invitePasswordConfirm">Confirm Password</label>
+          <input type="password" id="invitePasswordConfirm" placeholder="••••••••"
+            autocomplete="new-password" required minlength="8" />
+        </div>
+        <div class="auth-error hidden" id="inviteError"></div>
+        <button type="submit" class="btn-primary vault-submit-btn" id="inviteAcceptBtn"
+          style="width:100%">Activate Account</button>
+      </div>
+    </form>
+  </div>
+
+  <script>
+    'use strict';
+    const $ = (id) => document.getElementById(id);
+
+    function getToken() {
+      return new URLSearchParams(window.location.search).get('token') || '';
+    }
+
+    function showState(name) {
+      ['inviteLoadingState', 'inviteInvalidState', 'inviteFormState'].forEach(id => {
+        $(id).classList.toggle('hidden', id !== name);
+      });
+    }
+
+    async function init() {
+      const token = getToken();
+      if (!token) { showState('inviteInvalidState'); return; }
+
+      try {
+        const res = await fetch(`/api/v1/auth/invite/${encodeURIComponent(token)}`);
+        const json = await res.json();
+        if (!res.ok || !json.success) throw new Error('invalid');
+
+        $('inviteWelcomeTitle').textContent = `Welcome, ${json.data.full_name.split(' ')[0]}`;
+        $('inviteWelcomeSubtitle').textContent = `Set a password for ${json.data.email} to activate your account.`;
+        showState('inviteFormState');
+      } catch (err) {
+        showState('inviteInvalidState');
+      }
+    }
+
+    $('acceptInviteForm').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const token = getToken();
+      const password = $('invitePassword').value;
+      const confirm = $('invitePasswordConfirm').value;
+      const errBox = $('inviteError');
+      errBox.classList.add('hidden');
+
+      if (password !== confirm) {
+        errBox.textContent = 'Passwords do not match.';
+        errBox.classList.remove('hidden');
+        return;
+      }
+
+      const btn = $('inviteAcceptBtn');
+      btn.disabled = true;
+      btn.textContent = 'Activating…';
+
+      try {
+        const res = await fetch(`/api/v1/auth/invite/${encodeURIComponent(token)}/accept`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ password })
+        });
+        const json = await res.json();
+        if (!res.ok || !json.success) throw new Error(json.error || 'Failed to activate account.');
+
+        // Same localStorage keys the main app's Auth module reads (see
+        // app.js) — this logs the invitee straight in on redirect.
+        try {
+          localStorage.setItem('slf_auth_token', json.data.token);
+          localStorage.setItem('slf_auth_user', JSON.stringify(json.data.user));
+        } catch { /* localStorage unavailable — they'll just need to log in manually */ }
+
+        window.location.href = '/';
+      } catch (err) {
+        errBox.textContent = err.message;
+        errBox.classList.remove('hidden');
+        btn.disabled = false;
+        btn.textContent = 'Activate Account';
+      }
+    });
+
+    init();
+  </script>
+</body>
+
+</html>
