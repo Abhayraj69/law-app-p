@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Client Portal — SLF</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap"
+    rel="stylesheet" />
+  <link rel="stylesheet" href="styles.css" />
+  <link rel="stylesheet" href="client-portal.css" />
+</head>
+
+<body>
+  <!-- ══════════════════════════════════════════════════════════════════
+       CLIENT PORTAL
+       A separate, simplified app for CLIENT-role users — not the staff
+       SPA (index.html/app.js) with filtered responses. It surfaces only
+       what a client needs (their case status, documents, messages,
+       invoices) via its own small script, calling the same role-scoped
+       API the staff app calls, and is reached at /portal (see
+       server/server.js) rather than through the staff SPA's router.
+       Real access control is server-side on every API call this page
+       makes; the guard in client-portal.js is a UX redirect only.
+  ══════════════════════════════════════════════════════════════════ -->
+
+  <div id="portalRoot" class="portal-root hidden">
+    <header class="portal-header">
+      <div class="portal-brand">
+        <div class="logo-icon">
+          <svg viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <rect width="32" height="32" rx="8" fill="url(#portalLogoGrad)" />
+            <path d="M16 6L8 12v4l8-4 8 4v-4L16 6z" fill="white" opacity="0.9" />
+            <path d="M10 18v6h4v-4h4v4h4v-6L16 15l-6 3z" fill="white" />
+            <defs>
+              <linearGradient id="portalLogoGrad" x1="0" y1="0" x2="32" y2="32" gradientUnits="userSpaceOnUse">
+                <stop stop-color="#C9A84C" /><stop offset="1" stop-color="#A0722A" />
+              </linearGradient>
+            </defs>
+          </svg>
+        </div>
+        <div class="portal-brand-text">
+          <span class="portal-brand-name">SLF</span>
+          <span class="portal-brand-sub">Client Portal</span>
+        </div>
+      </div>
+
+      <nav class="portal-nav" id="portalNav">
+        <button class="portal-nav-link" data-route="cases">My Cases</button>
+        <button class="portal-nav-link" data-route="documents">Documents</button>
+        <button class="portal-nav-link" data-route="messages">Messages</button>
+        <button class="portal-nav-link" data-route="invoices">Invoices</button>
+      </nav>
+
+      <div class="portal-user">
+        <span class="portal-user-name" id="portalUserName"></span>
+        <div class="portal-user-avatar" id="portalUserAvatar"></div>
+        <button class="portal-signout-btn" id="portalSignOutBtn" title="Sign out">Sign Out</button>
+      </div>
+    </header>
+
+    <main class="portal-main" id="portalMain">
+      <!-- Views are rendered into here by client-portal.js -->
+    </main>
+  </div>
+
+  <div id="portalLoading" class="portal-loading">
+    <span>Loading your portal…</span>
+  </div>
+
+  <script src="client-portal.js"></script>
+</body>
+
+</html>
