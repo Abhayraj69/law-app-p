@@ -244,12 +244,13 @@ genuine concurrent key-mint race, and the backfill script below).
 encryption_keys                          conversation_messages
 ├─ id UUID PK                             ├─ ... (unchanged columns)
 ├─ provider  'aws_kms' | 'local'          ├─ body TEXT              (nullable now — legacy rows only)
-├─ kms_key_arn TEXT (null for 'local')    ├─ body_ciphertext BYTEA
-├─ wrapped_dek BYTEA  ← never plaintext   ├─ body_nonce BYTEA
-├─ status 'active' | 'retired'            ├─ body_auth_tag BYTEA
-├─ created_at / retired_at                └─ encryption_key_id UUID → encryption_keys.id
+├─ firm_id UUID → firms.id                ├─ body_ciphertext BYTEA
+├─ kms_key_arn TEXT (null for 'local')    ├─ body_nonce BYTEA
+├─ wrapped_dek BYTEA  ← never plaintext   ├─ body_auth_tag BYTEA
+├─ status 'active' | 'retired'            └─ encryption_key_id UUID → encryption_keys.id
+├─ created_at / retired_at
 └─ (partial unique index: at most one
-    'active' row per provider)
+    'active' row per (provider, firm_id))
 ```
 
 A CHECK constraint (`chk_body_encryption_consistent`) enforces that every
@@ -299,16 +300,22 @@ again. A message's `encryption_key_id` never changes after it's written,
 even across later rotations; decrypting looks the key up by id
 (`getDekById`), not by "whatever's active now".
 
-**Concurrency**: two processes can both observe "no active key exists yet"
-and race to mint the first one. A partial unique index
-(`idx_one_active_key_per_provider`) makes the loser's insert fail with a
-`23505`, at which point it simply re-reads and uses the winner's key
-instead of erroring or minting a second active key — the same
+**Concurrency**: two processes can both observe "no active key exists yet
+for this firm" and race to mint the first one. A partial unique index
+(`idx_one_active_key_per_provider_firm`) makes the loser's insert fail
+with a `23505`, at which point it simply re-reads and uses the winner's
+key instead of erroring or minting a second active key — the same
 re-resolve-on-conflict pattern `CaseService.resolveAndApply` uses for a
 concurrent case-creation race.
 
-**Known scope limit**: `encryption_keys` is not scoped per-firm — see
-"Known limitations" below.
+**Per-firm isolation**: `encryption_keys` is scoped to a firm
+(`db/migrations/0008_per_firm_encryption_keys.sql`) — each firm mints,
+caches, and rotates its own DEK under the same shared KMS master key
+(`KMS_KEY_ARN`), so a key compromise, rotation, or legal hold on one
+firm's messages never affects another firm's. Looking a key up by id
+(decrypting an existing message) doesn't need a firm check — a key id
+already uniquely identifies one key, and every caller that has one only
+ever got it from a message row it already proved firm-scoped access to.
 
 ### Migration plan for existing plaintext messages
 
@@ -356,12 +363,6 @@ work end to end.
   currently reach new hires; nothing is emailed automatically.
 - **The global omnibox search is still mock/absent**, as described in
   "What's still mock/static" above.
-- **`encryption_keys` (message encryption) is not scoped per-firm** — one
-  active key per provider is shared across the whole deployment. This app
-  is explicitly single-firm (see "User provisioning" above); a genuinely
-  multi-tenant deployment wanting per-tenant key isolation would need a
-  `firm_id` column there and a per-firm uniqueness constraint instead of
-  the current per-provider one. See "Message encryption" below.
 - **The dashboard's hearings widget (`case_deadlines`) and client-messages
   widget (`client_messages`) are firm-wide, not client-scoped** — those two
   tables have no per-client ownership column in the schema. This app is

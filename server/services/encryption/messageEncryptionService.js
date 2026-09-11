@@ -12,10 +12,14 @@ const cipher = require('./messageCipher');
 
 /**
  * Encrypts a message body for storage. Always encrypts under the CURRENT
- * active key — a message's encryption_key_id is fixed at write time and
- * never changes, even across a later key rotation (see decrypt, which
- * looks the key up by id rather than assuming "active").
+ * active key for this firm — a message's encryption_key_id is fixed at
+ * write time and never changes, even across a later key rotation (see
+ * decrypt, which looks the key up by id rather than assuming "active").
+ * Keys are scoped per firm (db/migrations/0008_per_firm_encryption_keys.sql)
+ * so one firm's rotation, compromise, or legal hold never touches
+ * another firm's messages.
  *
+ * @param {string} firmId - whose active key to encrypt under
  * @param {string} conversationId
  * @param {string} messageId - pre-generated (not DB-assigned) so it can
  *   be bound into the AAD before the row is ever inserted — see
@@ -24,8 +28,8 @@ const cipher = require('./messageCipher');
  * @param {string} plaintext
  * @returns {Promise<{ bodyCiphertext: Buffer, bodyNonce: Buffer, bodyAuthTag: Buffer, encryptionKeyId: string }>}
  */
-async function encryptMessageBody({ conversationId, messageId, plaintext }) {
-  const { keyId, dek } = await getKeyProvider().getActiveDek();
+async function encryptMessageBody({ firmId, conversationId, messageId, plaintext }) {
+  const { keyId, dek } = await getKeyProvider().getActiveDek(firmId);
   const { ciphertext, nonce, authTag } = cipher.encrypt({ dek, conversationId, messageId, plaintext });
   return { bodyCiphertext: ciphertext, bodyNonce: nonce, bodyAuthTag: authTag, encryptionKeyId: keyId };
 }
@@ -77,13 +81,17 @@ async function resolveMessageBody(row) {
  * encryption is required (anything but NODE_ENV=development) but KMS
  * isn't configured/reachable, rather than only discovering it the moment
  * the first real user sends a message.
+ *
+ * A firm-agnostic connectivity check (checkConnectivity on whichever
+ * provider is selected), not a "get or mint the active DEK" call — keys
+ * are scoped per firm now, and there's no single firm to mint one for at
+ * boot; minting one for whichever firm happens to exist first would be
+ * arbitrary. Each firm's actual key is minted lazily, the first time that
+ * firm sends a message (see encryptMessageBody / getActiveDek above).
  */
 async function checkMessageEncryptionRequirement() {
   if (!messageEncryptionRequiresKms()) return;
-  // Getting (or, on a brand-new deployment, minting) the active DEK is
-  // exactly what sending/reading a message needs to succeed — so this
-  // IS the right liveness check, not a separate synthetic one.
-  await getKeyProvider().getActiveDek();
+  await getKeyProvider().checkConnectivity();
 }
 
 module.exports = {

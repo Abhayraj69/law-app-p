@@ -40,9 +40,16 @@ class AwsKmsKeyProvider {
     this._dekCache = new Map();
   }
 
-  /** Mints a brand-new active DEK via KMS, retiring whatever was active before. */
-  async rotateKey() {
-    await db.retireActiveEncryptionKeys('aws_kms');
+  /**
+   * Mints a brand-new active DEK via KMS for this firm, retiring
+   * whatever was active for it before. Keys are per (provider, firm) —
+   * see db/migrations/0008_per_firm_encryption_keys.sql — so rotating
+   * one firm's key never touches another firm's, even though every firm
+   * shares the same underlying KMS master key.
+   */
+  async rotateKey(firmId) {
+    if (!firmId) throw new Error('rotateKey requires a firmId — encryption keys are scoped per firm.');
+    await db.retireActiveEncryptionKeys('aws_kms', firmId);
 
     const result = await this.kms.send(new GenerateDataKeyCommand({
       KeyId: this.keyArn,
@@ -54,29 +61,30 @@ class AwsKmsKeyProvider {
     const wrappedDek = Buffer.from(result.CiphertextBlob);
 
     const keyId = crypto.randomUUID();
-    await db.insertEncryptionKey({ id: keyId, provider: 'aws_kms', kmsKeyArn: this.keyArn, wrappedDek });
+    await db.insertEncryptionKey({ id: keyId, provider: 'aws_kms', firmId, kmsKeyArn: this.keyArn, wrappedDek });
     this._dekCache.set(keyId, dek);
     return { keyId, dek };
   }
 
   /**
-   * Returns the current active DEK, minting one on first use if none
-   * exists yet. Two processes can both observe "no active key" and race
-   * to mint the first one via GenerateDataKey — the database's partial
-   * unique index (idx_one_active_key_per_provider, db/migrations/0006)
-   * rejects the loser's insert with a 23505, at which point the loser
-   * simply reads back and uses the winner's key (one extra KMS Decrypt
-   * call to unwrap it) instead of erroring or minting a second,
-   * orphaned active key.
+   * Returns firmId's current active DEK, minting one on first use if none
+   * exists yet. Two processes can both observe "no active key for this
+   * firm" and race to mint the first one via GenerateDataKey — the
+   * database's partial unique index (idx_one_active_key_per_provider_firm,
+   * db/migrations/0008) rejects the loser's insert with a 23505, at which
+   * point the loser simply reads back and uses the winner's key (one
+   * extra KMS Decrypt call to unwrap it) instead of erroring or minting a
+   * second, orphaned active key.
    */
-  async getActiveDek() {
-    const active = await db.getActiveEncryptionKey('aws_kms');
+  async getActiveDek(firmId) {
+    if (!firmId) throw new Error('getActiveDek requires a firmId — encryption keys are scoped per firm.');
+    const active = await db.getActiveEncryptionKey('aws_kms', firmId);
     if (!active) {
       try {
-        return await this.rotateKey();
+        return await this.rotateKey(firmId);
       } catch (err) {
         if (err.code === '23505') {
-          const winner = await db.getActiveEncryptionKey('aws_kms');
+          const winner = await db.getActiveEncryptionKey('aws_kms', firmId);
           if (winner) {
             const dek = await this._unwrapViaKms(winner.id, winner.wrapped_dek, winner.kms_key_arn);
             this._dekCache.set(winner.id, dek);
@@ -94,7 +102,14 @@ class AwsKmsKeyProvider {
     return { keyId: active.id, dek };
   }
 
-  /** Returns the DEK for a specific (possibly retired) key id — needed to decrypt older messages after a rotation. */
+  /**
+   * Returns the DEK for a specific (possibly retired) key id — needed to
+   * decrypt older messages after a rotation. No firmId parameter: a key
+   * id already uniquely identifies one key belonging to one firm, and
+   * every caller that has a key id got it from a message row it already
+   * proved access to via firm-scoped reads upstream — see
+   * db.getEncryptionKeyById's own comment.
+   */
   async getDekById(keyId) {
     if (this._dekCache.has(keyId)) return this._dekCache.get(keyId);
 
@@ -113,6 +128,20 @@ class AwsKmsKeyProvider {
       KeyId: kmsKeyArn || this.keyArn
     }));
     return Buffer.from(result.Plaintext);
+  }
+
+  /**
+   * A firm-agnostic liveness check for the boot-time requirement
+   * (server/services/encryption/messageEncryptionService.js). Mints a
+   * throwaway 1-byte data key and discards it — cheap, doesn't persist
+   * anything, but proves KMS is reachable and KMS_KEY_ARN is valid and
+   * usable with the ambient AWS credentials. Deliberately does NOT touch
+   * any firm's actual active key: there's no single firm to check at
+   * boot, and minting one blindly for whichever firm happens to exist
+   * first would be arbitrary.
+   */
+  async checkConnectivity() {
+    await this.kms.send(new GenerateDataKeyCommand({ KeyId: this.keyArn, NumberOfBytes: 1 }));
   }
 }
 

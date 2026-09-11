@@ -42,6 +42,20 @@ test('Message encryption at rest', { skip: !TEST_DB_URL && 'set TEST_DATABASE_UR
 
   await runMigrations();
 
+  // Set up once, used throughout — keys are scoped per firm
+  // (db/migrations/0008_per_firm_encryption_keys.sql), so even the raw
+  // key-provider tests below need a real firm id to test against.
+  const FIRM_ID = crypto.randomUUID();
+  const STAFF_ID = crypto.randomUUID();
+  const passwordHash = bcrypt.hashSync('irrelevant-not-used-directly', 10);
+
+  await pool.query(`INSERT INTO firms (id, name, domain) VALUES ($1, $2, $3)`, [
+    FIRM_ID, 'Message Encryption Test Firm', `msg-enc-${FIRM_ID}.example`
+  ]);
+  await db.ensureStorageQuota(FIRM_ID);
+  const staff = await db.createUser({ id: STAFF_ID, firmId: FIRM_ID, email: `staff-${STAFF_ID}@example.com`, fullName: 'Test Staff', role: 'ASSOCIATE', initials: 'TS', passwordHash });
+  const conv = await db.insertConversation({ firmId: FIRM_ID, clientName: 'Test Client' });
+
   // ── 1. Raw cipher: round trip + tamper detection ───────────────────────
 
   await t.test('messageCipher: encrypt/decrypt round trip returns the exact original plaintext', () => {
@@ -90,22 +104,22 @@ test('Message encryption at rest', { skip: !TEST_DB_URL && 'set TEST_DATABASE_UR
 
   await t.test('LocalKeyProvider: getActiveDek mints on first use, then returns the SAME key on subsequent calls', async () => {
     const provider = new LocalKeyProvider();
-    const first = await provider.getActiveDek();
-    const second = await provider.getActiveDek();
+    const first = await provider.getActiveDek(FIRM_ID);
+    const second = await provider.getActiveDek(FIRM_ID);
     assert.equal(first.keyId, second.keyId);
     assert.ok(first.dek.equals(second.dek));
   });
 
   await t.test('LocalKeyProvider: rotateKey retires the old key and mints a new active one; old messages still decrypt via getDekById', async () => {
     const provider = new LocalKeyProvider();
-    const before = await provider.getActiveDek();
+    const before = await provider.getActiveDek(FIRM_ID);
 
     const encryptedUnderOldKey = cipher.encrypt({ dek: before.dek, conversationId: 'conv-rot', messageId: 'msg-rot', plaintext: 'encrypted before rotation' });
 
-    const after = await provider.rotateKey();
+    const after = await provider.rotateKey(FIRM_ID);
     assert.notEqual(after.keyId, before.keyId, 'rotation must produce a genuinely new key id');
 
-    const nowActive = await provider.getActiveDek();
+    const nowActive = await provider.getActiveDek(FIRM_ID);
     assert.equal(nowActive.keyId, after.keyId, 'the newly rotated key must be the one reported as active');
 
     // The OLD key's row still exists (retired, not deleted) and its DEK
@@ -117,56 +131,50 @@ test('Message encryption at rest', { skip: !TEST_DB_URL && 'set TEST_DATABASE_UR
   });
 
   await t.test('LocalKeyProvider.getActiveDek: gracefully recovers when it loses a concurrent first-mint race', async () => {
-    // encryption_keys is deliberately NOT scoped to a test's own fresh
-    // firm id (see this file's teardown comment / README.md) — it's
-    // shared across the whole deployment, which in this test suite means
-    // shared across every concurrently-running test FILE too. Forcibly
-    // clearing the real active key (as an earlier version of this test
-    // did) is unsafe here: another test file running at the same moment
-    // (e.g. roleScoping.test.js, which also encrypts messages) could be
-    // mid-flight relying on an active key existing, and node:test runs
-    // separate test files concurrently by default.
-    //
-    // So the race is exercised deterministically instead: db.insertEncryptionKey
-    // is stubbed to fail exactly the way a real unique-constraint
-    // collision would (23505 on idx_one_active_key_per_provider, added in
-    // db/migrations/0006) — simulating "another process's insert won the
-    // race a moment before mine" — and this proves getActiveDek falls
-    // back to reading and using the real winner's key instead of
-    // crashing or minting a duplicate.
-    const realActive = await new LocalKeyProvider().getActiveDek(); // the genuine current active key, whatever it is
+    // Keys are now scoped per (provider, firm) — db/migrations/0008 —
+    // and this test uses its own fresh FIRM_ID, so there's no risk of
+    // colliding with another concurrently-running test file the way an
+    // earlier version of this test (written before per-firm scoping)
+    // discovered when it tried forcibly clearing the shared global
+    // active key. Even so, the race itself is exercised deterministically
+    // rather than by timing: db.insertEncryptionKey is stubbed to fail
+    // exactly the way a real unique-constraint collision would (23505 on
+    // idx_one_active_key_per_provider_firm, added in db/migrations/0008)
+    // — simulating "another process's insert won the race a moment before
+    // mine" — which proves getActiveDek falls back to reading and using
+    // the real winner's key instead of crashing or minting a duplicate.
+    const realActive = await new LocalKeyProvider().getActiveDek(FIRM_ID); // the genuine current active key for this firm, whatever it is
 
     const racingProvider = new LocalKeyProvider();
     const originalGetActive = db.getActiveEncryptionKey;
     const originalInsert = db.insertEncryptionKey;
     const originalRetire = db.retireActiveEncryptionKeys;
 
-    // First read pretends no active key exists yet (as if this process
-    // checked a moment before the real winner's insert committed); the
-    // SECOND read — inside getActiveDek's 23505 recovery branch — is the
-    // real, unmodified lookup, which finds the real winner's key.
+    // First read pretends no active key exists yet for this firm (as if
+    // this process checked a moment before the real winner's insert
+    // committed); the SECOND read — inside getActiveDek's 23505 recovery
+    // branch — is the real, unmodified lookup, which finds the real
+    // winner's key.
     let getActiveCalls = 0;
-    db.getActiveEncryptionKey = async (provider) => {
+    db.getActiveEncryptionKey = async (provider, firmId) => {
       getActiveCalls++;
-      if (provider === 'local' && getActiveCalls === 1) return null;
-      return originalGetActive(provider);
+      if (provider === 'local' && firmId === FIRM_ID && getActiveCalls === 1) return null;
+      return originalGetActive(provider, firmId);
     };
     // rotateKey() (called by getActiveDek's "no active key" branch, which
     // the stub above forces it into) retires the current active key
-    // before inserting — a real call here would actually retire the
-    // genuine shared active key as a side effect of this test, which
-    // would corrupt state for concurrently-running test files. Stubbed
-    // to a no-op since this test isn't exercising retirement.
+    // before inserting — stubbed to a no-op since this test isn't
+    // exercising retirement, only the insert-collision recovery path.
     db.retireActiveEncryptionKeys = async () => {};
     db.insertEncryptionKey = async () => {
-      const err = new Error('duplicate key value violates unique constraint "idx_one_active_key_per_provider"');
+      const err = new Error('duplicate key value violates unique constraint "idx_one_active_key_per_provider_firm"');
       err.code = '23505';
       throw err;
     };
 
     let result;
     try {
-      result = await racingProvider.getActiveDek();
+      result = await racingProvider.getActiveDek(FIRM_ID);
     } finally {
       // Restored immediately, pass or fail — these are shared module
       // exports, not per-test state, so a stub left in place would break
@@ -199,15 +207,6 @@ test('Message encryption at rest', { skip: !TEST_DB_URL && 'set TEST_DATABASE_UR
     const testWrapKey = Buffer.from('0123456789abcdef0123456789abcdef', 'utf8').subarray(0, 32);
     function xorWrap(buf) { return Buffer.from(buf.map((b, i) => b ^ testWrapKey[i % testWrapKey.length])); }
 
-    // encryption_keys isn't scoped to this test's own fresh firm id, so
-    // an 'aws_kms' row from a PREVIOUS run of this suite can still be
-    // sitting there as "active", which would make getActiveDek() below
-    // skip minting a fresh one and this test's generateCalls assertion
-    // fail. Safe to unconditionally clear here — 'aws_kms' is a provider
-    // value only this one test ever uses; no other test or concurrently
-    // running test file touches it.
-    await pool.query(`DELETE FROM encryption_keys WHERE provider = 'aws_kms'`);
-
     let generateCalls = 0;
     let decryptCalls = 0;
     const mockKmsClient = {
@@ -227,8 +226,12 @@ test('Message encryption at rest', { skip: !TEST_DB_URL && 'set TEST_DATABASE_UR
 
     const provider = new AwsKmsKeyProvider({ kmsClient: mockKmsClient, keyArn: 'arn:aws:kms:us-east-1:000000000000:key/test-key' });
 
-    const active = await provider.getActiveDek();
-    assert.equal(generateCalls, 1, 'a fresh provider with no existing active key must mint one via GenerateDataKey');
+    // A fresh FIRM_ID (created at the top of this test file, unique to
+    // this run) guarantees no active 'aws_kms' key already exists for
+    // it, regardless of what earlier runs of this suite left behind —
+    // keys are scoped per (provider, firm) since db/migrations/0008.
+    const active = await provider.getActiveDek(FIRM_ID);
+    assert.equal(generateCalls, 1, 'a fresh provider with no existing active key for this firm must mint one via GenerateDataKey');
     assert.equal(active.dek.length, 32);
 
     // Verify what's actually PERSISTED is the wrapped form, never the
@@ -256,17 +259,6 @@ test('Message encryption at rest', { skip: !TEST_DB_URL && 'set TEST_DATABASE_UR
   });
 
   // ── 4. Full integration: CommunicationsService really stores ciphertext ─
-
-  const FIRM_ID = crypto.randomUUID();
-  const STAFF_ID = crypto.randomUUID();
-  const passwordHash = bcrypt.hashSync('irrelevant-not-used-directly', 10);
-
-  await pool.query(`INSERT INTO firms (id, name, domain) VALUES ($1, $2, $3)`, [
-    FIRM_ID, 'Message Encryption Test Firm', `msg-enc-${FIRM_ID}.example`
-  ]);
-  await db.ensureStorageQuota(FIRM_ID);
-  const staff = await db.createUser({ id: STAFF_ID, firmId: FIRM_ID, email: `staff-${STAFF_ID}@example.com`, fullName: 'Test Staff', role: 'ASSOCIATE', initials: 'TS', passwordHash });
-  const conv = await db.insertConversation({ firmId: FIRM_ID, clientName: 'Test Client' });
 
   await t.test('CommunicationsService.postMessage stores real ciphertext in Postgres — the plaintext never appears in the row', async () => {
     const secretText = 'This settlement amount must stay confidential: $847,500.';

@@ -747,38 +747,50 @@ async function markConversationRead(conversationId) {
 // See server/services/encryption/ for the actual crypto and KMS/local
 // provider logic — this is just the data-access layer for the
 // encryption_keys table itself.
-async function getActiveEncryptionKey(provider) {
+//
+// Keys are scoped per (provider, firm) — see db/migrations/0008_per_firm_
+// encryption_keys.sql — so one firm's key compromise, rotation, or legal
+// hold never touches another firm's messages, even though every firm
+// shares the same underlying KMS master key (KMS_KEY_ARN) or, in
+// development, the same local master key.
+async function getActiveEncryptionKey(provider, firmId) {
   const { rows } = await pool.query(
-    `SELECT * FROM encryption_keys WHERE provider = $1 AND status = 'active'`,
-    [provider]
+    `SELECT * FROM encryption_keys WHERE provider = $1 AND firm_id = $2 AND status = 'active'`,
+    [provider, firmId]
   );
   return rows[0] || null;
 }
 
+// Looked up by id alone, no firm filter — a message's encryption_key_id
+// already uniquely identifies one key, and the message itself was only
+// ever reachable through a firm-scoped read in the first place (see
+// scopeConversationsToUser / role scoping upstream), so there's no
+// caller that has a key id without already having proven access to the
+// firm it belongs to.
 async function getEncryptionKeyById(id) {
   const { rows } = await pool.query('SELECT * FROM encryption_keys WHERE id = $1', [id]);
   return rows[0] || null;
 }
 
-async function insertEncryptionKey({ id, provider, kmsKeyArn, wrappedDek }) {
+async function insertEncryptionKey({ id, provider, firmId, kmsKeyArn, wrappedDek }) {
   const { rows } = await pool.query(
-    `INSERT INTO encryption_keys (id, provider, kms_key_arn, wrapped_dek, status)
-     VALUES (COALESCE($1, uuid_generate_v4()), $2, $3, $4, 'active')
+    `INSERT INTO encryption_keys (id, provider, firm_id, kms_key_arn, wrapped_dek, status)
+     VALUES (COALESCE($1, uuid_generate_v4()), $2, $3, $4, $5, 'active')
      RETURNING *`,
-    [id || null, provider, kmsKeyArn || null, wrappedDek]
+    [id || null, provider, firmId, kmsKeyArn || null, wrappedDek]
   );
   return rows[0];
 }
 
-// Marks any currently-active key for this provider as retired (kept
-// forever, never deleted — any message encrypted under it still needs
-// this row to ever be decrypted again). A no-op if none is active, which
-// is the normal case on a brand-new deployment's first-ever key mint.
-async function retireActiveEncryptionKeys(provider) {
+// Marks this firm's currently-active key for this provider as retired
+// (kept forever, never deleted — any message encrypted under it still
+// needs this row to ever be decrypted again). A no-op if none is active,
+// which is the normal case on a firm's first-ever key mint.
+async function retireActiveEncryptionKeys(provider, firmId) {
   await pool.query(
     `UPDATE encryption_keys SET status = 'retired', retired_at = CURRENT_TIMESTAMP
-     WHERE provider = $1 AND status = 'active'`,
-    [provider]
+     WHERE provider = $1 AND firm_id = $2 AND status = 'active'`,
+    [provider, firmId]
   );
 }
 

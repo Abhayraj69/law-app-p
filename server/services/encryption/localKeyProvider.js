@@ -83,38 +83,45 @@ class LocalKeyProvider {
     return Buffer.from(base64Dek, 'base64');
   }
 
-  /** Mints a brand-new active DEK, retiring whatever was active before. */
-  async rotateKey() {
-    await db.retireActiveEncryptionKeys('local');
+  /**
+   * Mints a brand-new active DEK for this firm, retiring whatever was
+   * active for it before. Keys are per (provider, firm) — see
+   * db/migrations/0008_per_firm_encryption_keys.sql — so rotating one
+   * firm's key never touches another firm's.
+   */
+  async rotateKey(firmId) {
+    if (!firmId) throw new Error('rotateKey requires a firmId — encryption keys are scoped per firm.');
+    await db.retireActiveEncryptionKeys('local', firmId);
 
     const keyId = crypto.randomUUID();
     const dek = cipher.generateDek();
     const wrapped = await this._wrapDek(keyId, dek);
 
-    await db.insertEncryptionKey({ id: keyId, provider: 'local', kmsKeyArn: null, wrappedDek: wrapped });
+    await db.insertEncryptionKey({ id: keyId, provider: 'local', firmId, kmsKeyArn: null, wrappedDek: wrapped });
     this._dekCache.set(keyId, dek);
     return { keyId, dek };
   }
 
   /**
-   * Returns the current active DEK, minting one on first use if none
-   * exists yet. Two processes can both observe "no active key" and race
-   * to mint the first one (there's no lock between the read and the
-   * insert) — the database's partial unique index
-   * (idx_one_active_key_per_provider, db/migrations/0006) rejects the
-   * loser's insert with a 23505, at which point the loser simply reads
-   * back and uses the winner's key instead of erroring, the same
+   * Returns firmId's current active DEK, minting one on first use if none
+   * exists yet. Two processes can both observe "no active key for this
+   * firm" and race to mint the first one (there's no lock between the
+   * read and the insert) — the database's partial unique index
+   * (idx_one_active_key_per_provider_firm, db/migrations/0008) rejects
+   * the loser's insert with a 23505, at which point the loser simply
+   * reads back and uses the winner's key instead of erroring, the same
    * re-resolve-on-conflict pattern server/services/caseService.js's
    * resolveAndApply uses for a concurrent case-creation race.
    */
-  async getActiveDek() {
-    const active = await db.getActiveEncryptionKey('local');
+  async getActiveDek(firmId) {
+    if (!firmId) throw new Error('getActiveDek requires a firmId — encryption keys are scoped per firm.');
+    const active = await db.getActiveEncryptionKey('local', firmId);
     if (!active) {
       try {
-        return await this.rotateKey();
+        return await this.rotateKey(firmId);
       } catch (err) {
         if (err.code === '23505') {
-          const winner = await db.getActiveEncryptionKey('local');
+          const winner = await db.getActiveEncryptionKey('local', firmId);
           if (winner) {
             const dek = this._unwrapDek(winner.id, winner.wrapped_dek);
             this._dekCache.set(winner.id, dek);
@@ -132,7 +139,14 @@ class LocalKeyProvider {
     return { keyId: active.id, dek };
   }
 
-  /** Returns the DEK for a specific (possibly retired) key id — needed to decrypt older messages after a rotation. */
+  /**
+   * Returns the DEK for a specific (possibly retired) key id — needed to
+   * decrypt older messages after a rotation. No firmId parameter: a key
+   * id already uniquely identifies one key belonging to one firm, and
+   * every caller that has a key id got it from a message row it already
+   * proved access to via firm-scoped reads upstream — see
+   * db.getEncryptionKeyById's own comment.
+   */
   async getDekById(keyId) {
     if (this._dekCache.has(keyId)) return this._dekCache.get(keyId);
 
@@ -143,6 +157,18 @@ class LocalKeyProvider {
     const dek = this._unwrapDek(keyId, row.wrapped_dek);
     this._dekCache.set(keyId, dek);
     return dek;
+  }
+
+  /**
+   * A firm-agnostic liveness check for the boot-time requirement
+   * (server/services/encryption/messageEncryptionService.js) — just
+   * confirms the local master key itself is configured and well-formed.
+   * Deliberately does NOT mint or touch any firm's key: there's no single
+   * firm to check at boot, and minting one blindly for whichever firm
+   * happens to exist first would be arbitrary.
+   */
+  checkConnectivity() {
+    getMasterKey(); // throws with a clear message if unset/malformed
   }
 }
 

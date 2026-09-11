@@ -163,6 +163,7 @@ class CommunicationsService {
     const messageId = crypto.randomUUID();
 
     const { bodyCiphertext, bodyNonce, bodyAuthTag, encryptionKeyId } = await messageEncryption.encryptMessageBody({
+      firmId: tenantId,
       conversationId,
       messageId,
       plaintext: text.trim()

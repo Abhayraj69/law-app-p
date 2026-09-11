@@ -82,17 +82,24 @@ async function backfill() {
 // each instance grabs a distinct batch instead of both racing to encrypt
 // (and both trying to UPDATE) the same rows.
 async function backfillBatchWithClient(client) {
+  // Encryption keys are scoped per firm (db/migrations/0008_per_firm_
+  // encryption_keys.sql), so each row needs its owning firm's id, not
+  // just its conversation id — joined in from conversations here rather
+  // than making a separate query per row.
   const { rows } = await client.query(
-    `SELECT id, conversation_id, body FROM conversation_messages
-     WHERE body IS NOT NULL AND body_ciphertext IS NULL
-     ORDER BY created_at ASC
+    `SELECT cm.id, cm.conversation_id, cm.body, c.firm_id
+     FROM conversation_messages cm
+     JOIN conversations c ON c.id = cm.conversation_id
+     WHERE cm.body IS NOT NULL AND cm.body_ciphertext IS NULL
+     ORDER BY cm.created_at ASC
      LIMIT $1
-     FOR UPDATE SKIP LOCKED`,
+     FOR UPDATE OF cm SKIP LOCKED`,
     [BATCH_SIZE]
   );
 
   for (const row of rows) {
     const { bodyCiphertext, bodyNonce, bodyAuthTag, encryptionKeyId } = await messageEncryption.encryptMessageBody({
+      firmId: row.firm_id,
       conversationId: row.conversation_id,
       messageId: row.id,
       plaintext: row.body
