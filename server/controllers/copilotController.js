@@ -1,18 +1,31 @@
 /**
  * AI Copilot Controller
  *
- * Exposes autonomous app-control tools with mandatory Human-in-the-Loop (HITL)
- * authorization for write/mutative actions.
+ * Exposes autonomous app-control tools with a mandatory Human-in-the-Loop
+ * (HITL) confirmation step for write/mutative actions.
  *
  *  - READ-ONLY tools (searchVault, summarizeDocument) execute automatically.
  *  - WRITE tools (manageFiles, createOrUpdateCase) return a pending "approval"
  *    payload that the frontend must present to the user. The action is only
  *    committed when the client re-calls with { approved: true }.
+ *
+ * SECURITY NOTE — HITL `approved` is a UX gate, not an authorization control.
+ * It only proves a human clicked "approve" in the Copilot UI; it says
+ * nothing about whether that human is allowed to perform the action at all.
+ * `approved: true` is a value the caller supplies in the request body, so
+ * treating it as proof of authorization would let anyone self-certify their
+ * own mutation. The actual authorization boundary is the role checks below
+ * (hasMinRole / requireCaseChangeRole), which mirror the requireRole()
+ * floors already enforced on the equivalent direct routes (e.g. DELETE
+ * /api/v1/files/:id -> ASSOCIATE, see server/routes/api.js) and are applied
+ * regardless of `approved`, so a caller can't reach a privileged mutation
+ * just by skipping straight to the commit call with approved:true.
  */
 
 const db = require('../db');
 const aiProvider = require('../services/aiProvider');
 const CaseService = require('../services/caseService');
+const { ROLE_HIERARCHY } = require('../middleware/auth');
 const {
   ToolInputs,
   SearchVaultOutput,
@@ -28,6 +41,45 @@ const {
 function scoreMatch(haystack, terms) {
   const h = haystack.toLowerCase();
   return terms.reduce((score, t) => (h.includes(t) ? score + 1 : score), 0);
+}
+
+// ── Role gating for Copilot write tools ──────────────────────────────────────
+// requireRole() in server/middleware/auth.js only works as route middleware,
+// gating an entire route to one floor. manageFiles and createOrUpdateCase
+// each share a single route across several actions/fields with different
+// privilege requirements (manageFiles' delete vs. move/rename/tag;
+// createOrUpdateCase's status/lead_attorney vs. opposing-party edits), so
+// the equivalent check has to live in the handler and be applied per
+// action/field rather than per route. Same ROLE_HIERARCHY, same semantics.
+function hasMinRole(user, minRole) {
+  const userLevel = ROLE_HIERARCHY[user && user.role] || 0;
+  const requiredLevel = ROLE_HIERARCHY[minRole] || 99;
+  return userLevel >= requiredLevel;
+}
+
+function forbiddenError(message) {
+  const err = new Error(message);
+  err.status = 403;
+  err.code = 'INSUFFICIENT_ROLE';
+  return err;
+}
+
+// Status changes and lead-attorney reassignment are the two case fields
+// with real seniority consequences (closing/reopening a matter, handing it
+// to a different attorney) — opposing-party/case-type edits are left
+// ungated, same as before. Checked against whatever payload governs the
+// call it's guarding (the proposal payload for the HITL preview, the
+// executable payload for the commit) since the two can legitimately
+// differ, and `approved: true` alone must never be enough to bypass this
+// (see the SECURITY NOTE at the top of this file).
+function requireCaseChangeRole(user, payload) {
+  const changesStatus = Object.prototype.hasOwnProperty.call(payload || {}, 'status');
+  const changesAttorney = Object.prototype.hasOwnProperty.call(payload || {}, 'lead_attorney');
+  if (!changesStatus && !changesAttorney) return;
+  if (hasMinRole(user, 'ASSOCIATE')) return;
+
+  const fields = [changesStatus && 'status', changesAttorney && 'lead_attorney'].filter(Boolean).join(' and ');
+  throw forbiddenError(`Forbidden: changing a case's ${fields} requires role 'ASSOCIATE' or higher.`);
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -247,6 +299,19 @@ async function manageFiles(req, res, next) {
       }));
     }
 
+    // Matches the requireRole('ASSOCIATE') floor already enforced on
+    // DELETE /api/v1/files/:id (server/routes/api.js) — without this, a
+    // PARALEGAL blocked from deleting a file via the Vault UI could still
+    // delete it via the Copilot, since this route only requires
+    // authMiddleware. Checked before touching the target and regardless of
+    // `approved`, so it blocks both the HITL preview and the commit call.
+    if (action === 'delete' && !hasMinRole(req.user, 'ASSOCIATE')) {
+      return res.status(403).json(ManageFilesError.parse({
+        success: false,
+        error: `Forbidden: deleting files/folders requires role 'ASSOCIATE' or higher.`
+      }));
+    }
+
     const target = target_type === 'folder'
       ? await db.getFolderById(firmId, target_id)
       : await db.getDocumentById(firmId, target_id);
@@ -264,6 +329,10 @@ async function manageFiles(req, res, next) {
     const proposed = await buildFileProposal(firmId, action, target, payload);
 
     // HITL: if not yet approved, return the pending approval — do NOT mutate.
+    // This is a UX confirmation step only (did a human click "approve"?),
+    // not an authorization check — `approved` is caller-supplied and proves
+    // nothing about privilege. The role check above already ran and applies
+    // the same regardless of this flag.
     if (!approved) {
       return res.json(ManageFilesOutput.parse({
         success: true,
@@ -368,6 +437,14 @@ async function createOrUpdateCase(req, res, next) {
     const { case_id, payload = {}, approved = false, executable_payload } = req.body;
     const firmId = req.tenantId;
 
+    // No seniority floor previously existed here at all: any authenticated
+    // caller could reassign a case's lead attorney or change/close its
+    // status through the Copilot. Gated to ASSOCIATE+ — same floor as
+    // PATCH /api/v1/cases/:id/archive (server/routes/api.js) — checked
+    // against the proposal payload before any work happens, so an
+    // under-privileged caller is refused even at the HITL preview step.
+    requireCaseChangeRole(req.user, payload);
+
     // Resolved once here (for the approval preview) and again inside
     // resolveAndApply at commit time — not because this result is
     // untrusted, but because state can legitimately change in the window
@@ -426,6 +503,15 @@ async function createOrUpdateCase(req, res, next) {
     // identity, validates status/attorney, writes to `cases` for real, and
     // logs its own audit entry (COPILOT_CREATE_CASE / COPILOT_UPDATE_CASE).
     const commitPayload = executable_payload || payload;
+
+    // Re-checked against commitPayload, not just the proposal `payload`
+    // above: executable_payload is client-supplied and can differ from
+    // what was proposed, so a caller who lacked status/lead_attorney at
+    // preview time must not be able to smuggle them in at commit time.
+    // `approved: true` does not substitute for this check — see the
+    // SECURITY NOTE at the top of this file.
+    requireCaseChangeRole(req.user, commitPayload);
+
     const applyResult = await CaseService.resolveAndApply(firmId, req.user, { caseId: case_id, payload: commitPayload });
 
     const result = {
