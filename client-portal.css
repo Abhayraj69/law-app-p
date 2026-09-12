@@ -29,7 +29,21 @@ html, body {
   letter-spacing: 0.02em;
 }
 
-.portal-root { min-height: 100vh; }
+/* styles.css (loaded before this file, reused here only for shared design
+   tokens/fonts) sets `body { display: flex }` for the staff SPA's
+   sidebar-beside-content layout. That makes .portal-root a flex item here
+   too, and flex items default to `min-width: auto` — refusing to shrink
+   below their content's intrinsic width. A wide descendant (a
+   .portal-table with several columns, several levels down) was hitting
+   that floor and forcing this whole element wider than the viewport,
+   which `overflow-x: hidden` on body then silently clipped rather than
+   making scrollable — e.g. the sign-out button was fully unreachable on
+   a phone-width screen, not just hard to see. min-width: 0 is the
+   standard fix: it lets this element actually shrink to the viewport,
+   so overflow is handled by the inner elements that opt into it
+   (.portal-nav, .portal-card) instead of by clipping the whole page.
+   ═══════════════════════════════════════════════════ */
+.portal-root { min-height: 100vh; min-width: 0; width: 100%; }
 
 /* ── Header ── */
 .portal-header {
@@ -98,6 +112,37 @@ html, body {
 }
 .portal-signout-btn:hover { color: var(--urgent-color); border-color: var(--urgent-color); }
 
+/* Below ~640px the brand + nav + user name/avatar/sign-out no longer fit
+   on one row (this was never checked against a real phone width before —
+   the row simply overflowed, pushing Invoices and the sign-out button off
+   screen with no way to reach them short of scrolling the whole page
+   sideways). Wrap into two rows instead: brand + avatar/sign-out stay on
+   row one (user name hidden — the avatar's initials are enough here),
+   and nav drops to its own full-width row where it scrolls horizontally
+   on its own rather than widening the page. */
+@media (max-width: 640px) {
+  .portal-header {
+    flex-wrap: wrap;
+    height: auto;
+    padding: 10px 16px;
+    row-gap: 10px;
+  }
+  .portal-brand { order: 1; }
+  .portal-user { order: 2; margin-left: auto; }
+  .portal-user-name { display: none; }
+  .portal-nav {
+    order: 3;
+    flex: 0 0 100%;
+    width: 100%;
+    margin-left: 0;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+  }
+  .portal-nav::-webkit-scrollbar { display: none; }
+  .portal-nav-link { flex-shrink: 0; }
+}
+
 /* ── Main ── */
 .portal-main {
   max-width: 1100px;
@@ -131,12 +176,24 @@ html, body {
   border: var(--card-border);
   border-radius: var(--radius-md);
   box-shadow: var(--shadow-sm);
+  /* A portal-table's columns (invoices, hearings) don't compress below
+     their content's natural width — on a phone that's wider than the
+     viewport. Scroll the card itself horizontally rather than letting it
+     force the whole page wider (harmless when nothing inside is wide). */
+  max-width: 100%;
+  overflow-x: auto;
 }
 
 /* ── Cases ── */
 .portal-case-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  /* minmax(300px, 1fr)'s 300px floor is wider than the available content
+     width on the narrowest real phones (~320px, e.g. iPhone SE) once the
+     page's own side padding is subtracted — min(300px, 100%) lets the
+     column shrink to fit there instead of forcing a few px of page
+     overflow, while still behaving exactly like a flat 300px everywhere
+     wider. */
+  grid-template-columns: repeat(auto-fill, minmax(min(300px, 100%), 1fr));
   gap: 16px;
 }
 
@@ -462,7 +519,7 @@ html, body {
 .portal-thread-reply textarea:focus { outline: none; border-color: var(--gold-500); }
 
 /* ── Invoices ── */
-.portal-table { width: 100%; border-collapse: collapse; }
+.portal-table { width: 100%; min-width: 480px; border-collapse: collapse; }
 .portal-table th {
   text-align: left; font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em;
   color: var(--slate-500); padding: 12px 16px; border-bottom: var(--border-faint);
