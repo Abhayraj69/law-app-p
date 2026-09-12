@@ -190,6 +190,23 @@ async function ensureStorageQuota(firmId, limitBytes = 107374182400) {
   );
 }
 
+// Admin-facing quota edit (Settings > Storage). Upserts rather than assuming
+// a row already exists — a firm that has never uploaded anything (and so
+// never hit ensureStorageQuota via the upload path) can still have its
+// limit raised in advance.
+async function updateStorageQuotaLimit(firmId, limitBytes) {
+  const { rows } = await pool.query(
+    `INSERT INTO storage_quotas (firm_id, storage_limit_bytes, storage_used_bytes)
+     VALUES ($1, $2, 0)
+     ON CONFLICT (firm_id) DO UPDATE SET
+       storage_limit_bytes = EXCLUDED.storage_limit_bytes,
+       updated_at = CURRENT_TIMESTAMP
+     RETURNING *`,
+    [firmId, limitBytes]
+  );
+  return rows[0];
+}
+
 // ── Folders ──────────────────────────────────────────────────────────────
 async function listFolders(firmId) {
   const { rows } = await pool.query('SELECT * FROM folders WHERE firm_id = $1', [firmId]);
@@ -438,6 +455,48 @@ async function insertAuditLog({ firmId, userId, documentId, folderId, action, ip
      VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
     [firmId, userId || null, documentId || null, folderId || null, action, ipAddress || null, userAgent || null, details || {}]
   );
+}
+
+// Settings > Audit Log admin viewer. Filters are all optional and AND'd
+// together; dateFrom/dateTo are date-only strings ('YYYY-MM-DD') compared
+// against the full created_at timestamp — dateTo is treated as inclusive
+// of that whole calendar day (< dateTo + 1 day), not truncated to midnight.
+function buildAuditLogFilter(firmId, { userId, action, dateFrom, dateTo }) {
+  const conditions = ['a.firm_id = $1'];
+  const params = [firmId];
+  if (userId) conditions.push(`a.user_id = $${params.push(userId)}`);
+  if (action) conditions.push(`a.action = $${params.push(action)}`);
+  if (dateFrom) conditions.push(`a.created_at >= $${params.push(dateFrom)}::date`);
+  if (dateTo) conditions.push(`a.created_at < $${params.push(dateTo)}::date + interval '1 day'`);
+  return { where: conditions.join(' AND '), params };
+}
+
+async function listAuditLogsForFirm(firmId, filters, limit, offset) {
+  const { where, params } = buildAuditLogFilter(firmId, filters);
+  const limitIdx = params.push(limit);
+  const offsetIdx = params.push(offset);
+  const { rows } = await pool.query(
+    `SELECT a.id, a.action::text AS action, a.created_at, a.details, a.ip_address,
+            u.full_name AS user_name, u.email AS user_email,
+            d.file_name AS document_name
+     FROM audit_logs a
+     LEFT JOIN users u ON u.id = a.user_id
+     LEFT JOIN documents d ON d.id = a.document_id
+     WHERE ${where}
+     ORDER BY a.created_at DESC
+     LIMIT $${limitIdx} OFFSET $${offsetIdx}`,
+    params
+  );
+  return rows;
+}
+
+async function countAuditLogsForFirm(firmId, filters) {
+  const { where, params } = buildAuditLogFilter(firmId, filters);
+  const { rows } = await pool.query(
+    `SELECT COUNT(*)::int AS n FROM audit_logs a WHERE ${where}`,
+    params
+  );
+  return rows[0].n;
 }
 
 // ── Client messages / case deadlines (widget data) ──────────────────────
@@ -1067,6 +1126,7 @@ module.exports = {
   createUser,
   getStorageQuota,
   ensureStorageQuota,
+  updateStorageQuotaLimit,
   listFolders,
   insertFolder,
   getFolderById,
@@ -1082,6 +1142,8 @@ module.exports = {
   softDeleteDocument,
   insertShare,
   insertAuditLog,
+  listAuditLogsForFirm,
+  countAuditLogsForFirm,
   listClientMessages,
   insertClientMessage,
   listCaseDeadlines,

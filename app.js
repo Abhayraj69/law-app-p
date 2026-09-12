@@ -1999,14 +1999,34 @@ function handleInputQuickAction(action) {
    ════════════════════════════════════════════ */
 
 let settingsListenersInitialized = false;
+let settingsActiveTab = 'team';
 
 function initSettingsPage() {
   const isAdmin = Auth.getUser() && Auth.getUser().role === 'ADMIN';
   $('inviteUserBtn').classList.toggle('hidden', !isAdmin);
   $('settingsNonAdminNotice').classList.toggle('hidden', isAdmin);
+  $('settingsAuditTabBtn').classList.toggle('hidden', !isAdmin);
+  $('settingsStorageTabBtn').classList.toggle('hidden', !isAdmin);
 
   setupSettingsPageListeners();
+  setSettingsTab(isAdmin ? settingsActiveTab : 'team');
   loadTeam();
+}
+
+function setSettingsTab(tab) {
+  settingsActiveTab = tab;
+  $$('[data-settings-tab]').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.settingsTab === tab);
+  });
+  $('settingsTeamTab').classList.toggle('hidden', tab !== 'team');
+  $('settingsAuditTab').classList.toggle('hidden', tab !== 'audit');
+  $('settingsStorageTab').classList.toggle('hidden', tab !== 'storage');
+
+  if (tab === 'audit' && !AuditLogState.filterOptionsLoaded) {
+    loadAuditLogFilterOptions();
+  }
+  if (tab === 'audit') loadAuditLog();
+  if (tab === 'storage') loadStorageQuota();
 }
 
 async function loadTeam() {
@@ -2060,6 +2080,40 @@ function setupSettingsPageListeners() {
     if (e.target === $('inviteUserModal')) closeInviteModal();
   });
 
+  $$('[data-settings-tab]').forEach(btn => {
+    btn.addEventListener('click', () => setSettingsTab(btn.dataset.settingsTab));
+  });
+
+  ['auditFilterUser', 'auditFilterAction', 'auditFilterFrom', 'auditFilterTo'].forEach(id => {
+    $(id).addEventListener('change', () => {
+      AuditLogState.page = 1;
+      loadAuditLog();
+    });
+  });
+  $('auditFilterClearBtn').addEventListener('click', () => {
+    $('auditFilterUser').value = '';
+    $('auditFilterAction').value = '';
+    $('auditFilterFrom').value = '';
+    $('auditFilterTo').value = '';
+    AuditLogState.page = 1;
+    loadAuditLog();
+  });
+  $('auditLogPrevPage').addEventListener('click', () => {
+    if (AuditLogState.page > 1) {
+      AuditLogState.page--;
+      loadAuditLog();
+    }
+  });
+  $('auditLogNextPage').addEventListener('click', () => {
+    const totalPages = Math.max(1, Math.ceil(AuditLogState.total / AuditLogState.pageSize));
+    if (AuditLogState.page < totalPages) {
+      AuditLogState.page++;
+      loadAuditLog();
+    }
+  });
+
+  $('storageQuotaForm').addEventListener('submit', handleStorageQuotaSubmit);
+
   settingsListenersInitialized = true;
 }
 
@@ -2094,6 +2148,183 @@ async function handleInviteUserSubmit(event) {
   } finally {
     submitBtn.disabled = false;
     submitBtn.textContent = 'Send Invite';
+  }
+}
+
+/* ════════════════════════════════════════════
+   SETTINGS / AUDIT LOG — GET /api/v1/admin/audit-logs
+   Every audit_logs row was already being written (logAuditAction
+   middleware for document actions, direct db.insertAuditLog calls for
+   case/invoice/invite/quota writes) — this is the first UI that reads any
+   of it back out. Paginated and filtered server-side (user/action/date),
+   not fetched-all-then-sliced client-side like the Billing page, since
+   this table can grow unbounded rather than staying a small seeded list.
+   ════════════════════════════════════════════ */
+
+const AUDIT_ACTIONS = [
+  'UPLOAD', 'VIEW', 'PREVIEW', 'DOWNLOAD', 'SHARE', 'UPDATE_METADATA', 'DELETE',
+  'FLAG', 'UNFLAG', 'CREATE_FOLDER', 'COPILOT_MOVE', 'COPILOT_RENAME', 'COPILOT_TAG',
+  'COPILOT_DELETE', 'COPILOT_UPDATE_CASE', 'COPILOT_CREATE_CASE', 'CREATE_CASE',
+  'ARCHIVE_CASE', 'CREATE_USER_INVITE', 'CREATE_INVOICE', 'UPDATE_INVOICE',
+  'MARK_INVOICE_PAID', 'UPDATE_STORAGE_QUOTA'
+];
+
+const AuditLogState = { page: 1, pageSize: 20, total: 0, filterOptionsLoaded: false };
+
+function formatAuditAction(action) {
+  return String(action || '').split('_').map(w => w.charAt(0) + w.slice(1).toLowerCase()).join(' ');
+}
+
+async function loadAuditLogFilterOptions() {
+  $('auditFilterAction').innerHTML = '<option value="">All Actions</option>' +
+    AUDIT_ACTIONS.map(a => `<option value="${a}">${formatAuditAction(a)}</option>`).join('');
+
+  try {
+    // Reuses the same roster endpoint the Team Members tab already calls —
+    // no new backend route needed just to populate a "filter by user" list.
+    const team = await ApiClient.get('/api/v1/admin/users');
+    $('auditFilterUser').innerHTML = '<option value="">All Users</option>' +
+      team.map(u => `<option value="${u.id}">${u.full_name}</option>`).join('');
+  } catch (err) {
+    // Non-fatal — the table still loads unfiltered, just without a user dropdown.
+  }
+
+  AuditLogState.filterOptionsLoaded = true;
+}
+
+async function loadAuditLog() {
+  const tbody = $('auditLogTableBody');
+  if (!tbody) return;
+
+  const params = new URLSearchParams();
+  params.set('page', AuditLogState.page);
+  params.set('page_size', AuditLogState.pageSize);
+  const userId = $('auditFilterUser').value;
+  const action = $('auditFilterAction').value;
+  const dateFrom = $('auditFilterFrom').value;
+  const dateTo = $('auditFilterTo').value;
+  if (userId) params.set('user_id', userId);
+  if (action) params.set('action', action);
+  if (dateFrom) params.set('date_from', dateFrom);
+  if (dateTo) params.set('date_to', dateTo);
+
+  tbody.innerHTML = `<tr><td colspan="5" style="text-align:center;color:var(--slate-400)">Loading…</td></tr>`;
+
+  try {
+    // A non-ADMIN gets a 403 here — expected, not an error state, same as loadTeam().
+    const data = await ApiClient.get(`/api/v1/admin/audit-logs?${params.toString()}`);
+    AuditLogState.total = data.total;
+    AuditLogState.page = data.page;
+    AuditLogState.pageSize = data.page_size;
+    renderAuditLogTable(data.logs);
+  } catch (err) {
+    tbody.innerHTML = `<tr><td colspan="5" style="text-align:center;color:var(--slate-400)">${Auth.getUser() && Auth.getUser().role === 'ADMIN' ? 'Error loading audit log' : 'Only firm administrators can view the audit log.'}</td></tr>`;
+    $('auditLogShowingText').textContent = 'Showing 0 of 0';
+    $('auditLogPrevPage').disabled = true;
+    $('auditLogNextPage').disabled = true;
+    $('auditLogPageNumbers').innerHTML = '';
+  }
+}
+
+// document_name covers document-scoped actions (UPLOAD/DELETE/COPILOT_*);
+// everything else (case/invoice/invite/quota writes) stores its own
+// reference in `details` instead, since audit_logs has no case_id/
+// invoice_id column of its own — same reasoning as db.listActivityForCase.
+function auditLogTargetLabel(log) {
+  if (log.document_name) return log.document_name;
+  const d = log.details || {};
+  return d.case_id || d.invoice_number || d.email || '—';
+}
+
+function renderAuditLogTable(logs) {
+  const tbody = $('auditLogTableBody');
+
+  if (!logs.length) {
+    tbody.innerHTML = `<tr><td colspan="5" style="text-align:center;color:var(--slate-400)">No audit log entries match these filters</td></tr>`;
+  } else {
+    tbody.innerHTML = logs.map(log => `
+      <tr>
+        <td class="activity-time">${new Date(log.created_at).toLocaleString('en-US', { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit' })}</td>
+        <td>${log.user_name || 'System'}</td>
+        <td>${formatAuditAction(log.action)}</td>
+        <td>${auditLogTargetLabel(log)}</td>
+        <td class="activity-time">${log.ip_address || '—'}</td>
+      </tr>
+    `).join('');
+  }
+
+  const { page, pageSize, total } = AuditLogState;
+  const totalPages = Math.max(1, Math.ceil(total / pageSize));
+  const start = total === 0 ? 0 : (page - 1) * pageSize + 1;
+  const end = Math.min(page * pageSize, total);
+  $('auditLogShowingText').textContent = total === 0 ? 'Showing 0 of 0' : `Showing ${start}–${end} of ${total}`;
+  $('auditLogPrevPage').disabled = page <= 1;
+  $('auditLogNextPage').disabled = page >= totalPages;
+
+  let pageNumbersHtml = '';
+  for (let i = 1; i <= totalPages; i++) {
+    pageNumbersHtml += `<button class="page-btn ${page === i ? 'active' : ''}" onclick="setAuditLogPage(${i})">${i}</button>`;
+  }
+  $('auditLogPageNumbers').innerHTML = pageNumbersHtml;
+}
+
+function setAuditLogPage(p) {
+  AuditLogState.page = p;
+  loadAuditLog();
+}
+
+/* ════════════════════════════════════════════
+   SETTINGS / STORAGE QUOTA — GET/PATCH /api/v1/admin/storage-quota
+   Quota is per-firm (server/services/storageQuotaService.js — the
+   storage_quotas table is keyed on firm_id alone, matching this app's
+   single-firm-per-deployment model, so there is no per-user breakdown to
+   show). Surfaces the same limit server/middleware/storageQuota.js
+   already enforces on every upload, and lets an ADMIN change it.
+   ════════════════════════════════════════════ */
+
+function bytesToGB(bytes) {
+  return bytes / (1024 * 1024 * 1024);
+}
+
+async function loadStorageQuota() {
+  try {
+    const quota = await ApiClient.get('/api/v1/admin/storage-quota');
+    const usedGB = bytesToGB(quota.storage_used_bytes);
+    const limitGB = bytesToGB(quota.storage_limit_bytes);
+    const pct = quota.storage_limit_bytes > 0
+      ? Math.min(100, Math.round((quota.storage_used_bytes / quota.storage_limit_bytes) * 100))
+      : 0;
+
+    $('storageUsedText').textContent = `${usedGB.toFixed(1)}GB / ${limitGB.toFixed(1)}GB used`;
+    $('storagePctText').textContent = `${pct}%`;
+    $('storageAdminBar').style.width = `${pct}%`;
+    $('storageQuotaLimitInput').value = Math.round(limitGB);
+  } catch (err) {
+    showToast(err.message || 'Failed to load storage quota.', 'error');
+  }
+}
+
+async function handleStorageQuotaSubmit(event) {
+  event.preventDefault();
+  const gb = parseInt($('storageQuotaLimitInput').value, 10);
+  if (!Number.isInteger(gb) || gb < 1) {
+    showToast('Enter a whole number of GB (at least 1).', 'error');
+    return;
+  }
+
+  const submitBtn = $('storageQuotaSaveBtn');
+  submitBtn.disabled = true;
+  submitBtn.textContent = 'Saving…';
+
+  try {
+    await ApiClient.patch('/api/v1/admin/storage-quota', { storage_limit_bytes: gb * 1024 * 1024 * 1024 });
+    showToast('Storage quota updated.', 'success');
+    loadStorageQuota();
+  } catch (err) {
+    showToast(err.message || 'Failed to update storage quota.', 'error');
+  } finally {
+    submitBtn.disabled = false;
+    submitBtn.textContent = 'Save Limit';
   }
 }
 

@@ -1128,7 +1128,7 @@
     <!-- SETTINGS / TEAM MEMBERS PAGE -->
     <main class="content hidden" id="settingsPage">
       <div class="page-header-row">
-        <h2 class="cases-page-title">Team Members</h2>
+        <h2 class="cases-page-title">Settings</h2>
         <button class="btn-primary hidden" id="inviteUserBtn">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
             style="width: 14px; height: 14px; vertical-align: middle; margin-right: 4px;">
@@ -1140,25 +1140,130 @@
       </div>
       <p id="settingsNonAdminNotice" class="hidden"
         style="color:var(--slate-400); font-size:13px; padding: 4px 0 16px;">
-        Only firm administrators can invite new users or view this roster's full detail.
+        Only firm administrators can invite new users, view the audit log, or manage the storage quota.
       </p>
 
-      <div class="panel table-panel edge-to-edge">
-        <div class="table-container">
-          <table class="cases-large-table" id="teamTable">
-            <thead>
-              <tr>
-                <th>Name</th>
-                <th>Email</th>
-                <th>Role</th>
-                <th>Status</th>
-                <th>Joined</th>
-              </tr>
-            </thead>
-            <tbody id="teamTableBody">
-              <!-- Rendered dynamically -->
-            </tbody>
-          </table>
+      <div class="billing-tabs" style="margin-bottom:16px;">
+        <button class="tab-btn active" data-settings-tab="team">Team Members</button>
+        <button class="tab-btn hidden" id="settingsAuditTabBtn" data-settings-tab="audit">Audit Log</button>
+        <button class="tab-btn hidden" id="settingsStorageTabBtn" data-settings-tab="storage">Storage</button>
+      </div>
+
+      <!-- TEAM MEMBERS TAB -->
+      <div id="settingsTeamTab">
+        <div class="panel table-panel edge-to-edge">
+          <div class="table-container">
+            <table class="cases-large-table" id="teamTable">
+              <thead>
+                <tr>
+                  <th>Name</th>
+                  <th>Email</th>
+                  <th>Role</th>
+                  <th>Status</th>
+                  <th>Joined</th>
+                </tr>
+              </thead>
+              <tbody id="teamTableBody">
+                <!-- Rendered dynamically -->
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <!-- AUDIT LOG TAB (ADMIN only — populated via GET /api/v1/admin/audit-logs) -->
+      <div id="settingsAuditTab" class="hidden">
+        <div class="command-bar">
+          <div class="filter-row">
+            <div class="filter-group">
+              <span class="filter-label">User:</span>
+              <select id="auditFilterUser" class="select-filter">
+                <option value="">All Users</option>
+              </select>
+            </div>
+            <div class="filter-group">
+              <span class="filter-label">Action:</span>
+              <select id="auditFilterAction" class="select-filter">
+                <option value="">All Actions</option>
+              </select>
+            </div>
+            <div class="filter-group">
+              <span class="filter-label">From:</span>
+              <input type="date" id="auditFilterFrom" class="select-filter" />
+            </div>
+            <div class="filter-group">
+              <span class="filter-label">To:</span>
+              <input type="date" id="auditFilterTo" class="select-filter" />
+            </div>
+            <button class="btn-ghost" id="auditFilterClearBtn" type="button">Clear Filters</button>
+          </div>
+        </div>
+
+        <div class="panel table-panel edge-to-edge">
+          <div class="table-container">
+            <table class="cases-large-table" id="auditLogTable">
+              <thead>
+                <tr>
+                  <th>Timestamp</th>
+                  <th>User</th>
+                  <th>Action</th>
+                  <th>Target</th>
+                  <th>IP Address</th>
+                </tr>
+              </thead>
+              <tbody id="auditLogTableBody">
+                <!-- Rendered dynamically -->
+              </tbody>
+            </table>
+          </div>
+
+          <div class="table-footer">
+            <span class="showing-text" id="auditLogShowingText">Showing 0 of 0</span>
+            <div class="pagination">
+              <button class="page-btn" id="auditLogPrevPage" disabled>
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <path d="M15 18l-6-6 6-6" />
+                </svg>
+              </button>
+              <div id="auditLogPageNumbers" class="page-numbers-container" style="display: flex; gap: 4px;">
+                <!-- Dynamic page numbers -->
+              </div>
+              <button class="page-btn" id="auditLogNextPage">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <path d="M9 18l6-6-6-6" />
+                </svg>
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- STORAGE TAB (ADMIN only — GET/PATCH /api/v1/admin/storage-quota) -->
+      <div id="settingsStorageTab" class="hidden">
+        <div class="panel" style="padding:24px; max-width:520px;">
+          <h3 style="margin:0 0 4px; font-size:15px;">Firm Storage Quota</h3>
+          <p style="color:var(--slate-400); font-size:13px; margin:0 0 16px;">
+            Usage across the entire firm's document vault. Raising or lowering the limit
+            is recorded in the audit log.
+          </p>
+
+          <div style="display:flex; justify-content:space-between; font-size:13px; color:var(--slate-300);">
+            <span id="storageUsedText">— / —</span>
+            <span id="storagePctText">—%</span>
+          </div>
+          <div class="storage-bar-wrap">
+            <div class="storage-bar-fill" id="storageAdminBar" style="width:0%"></div>
+          </div>
+
+          <form id="storageQuotaForm" style="margin-top:24px;">
+            <div class="form-group-modal">
+              <label for="storageQuotaLimitInput">Storage Limit (GB)</label>
+              <input type="number" id="storageQuotaLimitInput" min="1" step="1" required />
+            </div>
+            <button type="submit" class="btn-primary" id="storageQuotaSaveBtn" style="margin-top:12px;">
+              Save Limit
+            </button>
+          </form>
         </div>
       </div>
     </main>

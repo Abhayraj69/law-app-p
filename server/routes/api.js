@@ -22,6 +22,8 @@ const caseController = require('../controllers/caseController');
 const communicationsController = require('../controllers/communicationsController');
 const inviteController = require('../controllers/inviteController');
 const invoiceController = require('../controllers/invoiceController');
+const auditLogController = require('../controllers/auditLogController');
+const storageQuotaController = require('../controllers/storageQuotaController');
 
 // Apply Global Tenant Authentication & User Context
 router.use(authMiddleware);
@@ -165,6 +167,25 @@ router.post(
   logAuditAction('CREATE_USER_INVITE'),
   inviteController.createInvite
 );
+
+// ═════════════════════════════════════════════════════════════════════
+// H2. ADMIN — AUDIT LOG VIEWER
+// Read-only: audit_logs rows are written throughout the app already
+// (logAuditAction middleware for document actions, direct db.insertAuditLog
+// calls for case/invoice/invite writes) — this is just the first surface
+// that reads any of it back out. Paginated + filterable by user/action/date.
+// ═════════════════════════════════════════════════════════════════════
+router.get('/admin/audit-logs', requireRole('ADMIN'), auditLogController.listAuditLogs);
+
+// ═════════════════════════════════════════════════════════════════════
+// H3. ADMIN — STORAGE QUOTA
+// Quota is per-firm (storage_quotas is keyed on firm_id alone, matching
+// this app's single-firm-per-deployment model), not per-user. GET is
+// read-only usage vs. limit; PATCH is the only way to change the limit
+// server/middleware/storageQuota.js enforces on every upload.
+// ═════════════════════════════════════════════════════════════════════
+router.get('/admin/storage-quota', requireRole('ADMIN'), storageQuotaController.getQuota);
+router.patch('/admin/storage-quota', requireRole('ADMIN'), storageQuotaController.updateQuota);
 
 // I. AI COPILOT TOOLS
 router.post('/copilot/search', copilotController.validateToolInput('searchVault'), copilotController.searchVault);
