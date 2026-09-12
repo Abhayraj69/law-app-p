@@ -8,16 +8,14 @@
 // ══════════════════════════════════════
 // DATA LAYER
 //
-// STATUS: Dashboard, Active Cases and Client Communications now talk to
-// the real backend (server/services/{dashboardService,caseService,
-// communicationsService}.js) the same way the Document Vault page always
-// has. CASES and CONVERSATIONS below start empty and are populated by
-// loadCases()/loadConversations() (ApiClient calls), not literals.
-//
-// SEARCH_DATA (the global omnibox search) is the one exception: it is
-// still hardcoded and does NOT hit the backend. It was out of scope for
-// this pass (only the Dashboard/Cases/Communications pages were in
-// scope) — flagged here rather than silently left pretending to be real.
+// STATUS: Dashboard, Active Cases, Client Communications, and the global
+// omnibox search now all talk to the real backend
+// (server/services/{dashboardService,caseService,communicationsService,
+// searchService}.js) the same way the Document Vault page always has.
+// CASES and CONVERSATIONS below start empty and are populated by
+// loadCases()/loadConversations() (ApiClient calls), not literals; the
+// omnibox search has no equivalent module-level array at all any more —
+// see initSearch() below, which calls GET /api/v1/search directly.
 // See README.md for the current real-vs-mock breakdown.
 // ══════════════════════════════════════
 
@@ -28,15 +26,6 @@ let BILLING_DATA = [];
 let ACTIVITIES = [];
 let NOTIFICATIONS = [];
 let INVOICES = [];
-
-const SEARCH_DATA = [
-  { type: 'case', icon: 'case', name: 'Anderson v. Meridian Corp.', meta: 'Active · Commercial Litigation' },
-  { type: 'case', icon: 'case', name: 'Davies v. State', meta: 'Pending · Criminal Defense' },
-  { type: 'client', icon: 'client', name: 'Emily Davies', meta: 'Client · 3 active cases' },
-  { type: 'doc', icon: 'doc', name: 'Pre-Trial Brief – Davies', meta: 'Document · Uploaded today' },
-  { type: 'doc', icon: 'doc', name: 'NDA Agreement – Kimura', meta: 'Document · Approved' },
-  { type: 'client', icon: 'client', name: 'Liam Johnson', meta: 'Client · 1 active case' },
-];
 
 // ══════════════════════════════════════
 // HELPERS
@@ -111,6 +100,16 @@ function canMarkInvoicesPaid() {
   return role === 'PARTNER' || role === 'SENIOR_PARTNER' || role === 'ADMIN';
 }
 
+// Mirrors the server's requireRole('PARTNER') floor on every /api/v1/trust/*
+// route (server/routes/api.js) — trust accounting is restricted to the
+// roles who bear bar-discipline responsibility for client funds, not
+// opened to every staff role the way billing is. Same three roles as
+// canMarkInvoicesPaid above, just named for its own gate.
+function canManageTrust() {
+  const role = Auth.getUser() && Auth.getUser().role;
+  return role === 'PARTNER' || role === 'SENIOR_PARTNER' || role === 'ADMIN';
+}
+
 function showAuthOverlay(message) {
   document.body.classList.add('auth-locked');
   const errBox = $('authError');
@@ -165,6 +164,12 @@ function applyRolePermissionsToChrome(user) {
   if (ctxDeleteDivider && ctxDeleteDivider.classList.contains('ctx-divider')) {
     ctxDeleteDivider.classList.toggle('hidden', restricted);
   }
+
+  // Trust Accounting nav item starts hidden in the markup (only
+  // PARTNER/SENIOR_PARTNER/ADMIN should even know the nav entry exists) —
+  // see canManageTrust()'s comment on why this floor is stricter than
+  // billing's.
+  if ($('navTrustItem')) $('navTrustItem').classList.toggle('hidden', !canManageTrust());
 }
 
 // Called once at startup: trust a stored token only after the server
@@ -309,6 +314,7 @@ function navigateToPage(page) {
     communications: 'Client Communications',
     documents:      'Document Vault',
     billing:        'Billing & Invoices',
+    trust:          'Trust Accounting',
     settings:       'Settings',
   };
   $('pageTitle').textContent = pageTitles[page] || 'Document Vault';
@@ -318,6 +324,7 @@ function navigateToPage(page) {
   const commsPage = $('commsPage');
   const documentsPage = $('documentsPage');
   const billingPage = $('billingPage');
+  const trustPage = $('trustPage');
   const settingsPage = $('settingsPage');
   const placeholder = $('placeholderPage');
 
@@ -327,6 +334,7 @@ function navigateToPage(page) {
   if (commsPage) commsPage.classList.add('hidden');
   if (documentsPage) documentsPage.classList.add('hidden');
   if (billingPage) billingPage.classList.add('hidden');
+  if (trustPage) trustPage.classList.add('hidden');
   if (settingsPage) settingsPage.classList.add('hidden');
   if (placeholder) placeholder.classList.add('hidden');
 
@@ -354,6 +362,11 @@ function navigateToPage(page) {
     if (billingPage) {
       billingPage.classList.remove('hidden');
       initBillingPage();
+    }
+  } else if (page === 'trust') {
+    if (trustPage) {
+      trustPage.classList.remove('hidden');
+      initTrustPage();
     }
   } else if (page === 'settings') {
     if (settingsPage) {
@@ -483,32 +496,38 @@ function initNotifications() {
 // GLOBAL SEARCH
 // ══════════════════════════════════════
 
+// Debounced, cancellation-aware: a fast typist firing several keystrokes
+// in a row must never have an earlier (slower) response clobber a later
+// one — requestSeq tags each call and a response is only rendered if it's
+// still the most recent one in flight by the time it resolves.
 function initSearch() {
   const input = $('globalSearch');
   const results = $('searchResults');
+  if (!input || !results) return;
 
   const iconMap = {
-    case:   '<path d="M20 7H4a2 2 0 00-2 2v10a2 2 0 002 2h16a2 2 0 002-2V9a2 2 0 00-2-2z"/><path d="M16 7V5a2 2 0 00-2-2h-4a2 2 0 00-2 2v2"/>',
-    client: '<path d="M20 21v-2a4 4 0 00-4-4H8a4 4 0 00-4 4v2"/><circle cx="12" cy="7" r="4"/>',
-    doc:    '<path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><path d="M14 2v6h6"/>',
+    case:     '<path d="M20 7H4a2 2 0 00-2 2v10a2 2 0 002 2h16a2 2 0 002-2V9a2 2 0 00-2-2z"/><path d="M16 7V5a2 2 0 00-2-2h-4a2 2 0 00-2 2v2"/>',
+    client:   '<path d="M20 21v-2a4 4 0 00-4-4H8a4 4 0 00-4 4v2"/><circle cx="12" cy="7" r="4"/>',
+    document: '<path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><path d="M14 2v6h6"/>',
   };
-  const colorMap = { case: '#C9A84C', client: '#3B82F6', doc: '#2DC8B0' };
-  const bgMap    = { case: 'rgba(201,168,76,0.15)', client: 'rgba(59,130,246,0.15)', doc: 'rgba(45,200,176,0.15)' };
+  const colorMap = { case: '#C9A84C', client: '#3B82F6', document: '#2DC8B0' };
+  const bgMap    = { case: 'rgba(201,168,76,0.15)', client: 'rgba(59,130,246,0.15)', document: 'rgba(45,200,176,0.15)' };
 
-  input.addEventListener('input', () => {
-    const q = input.value.trim().toLowerCase();
-    if (!q) { results.classList.remove('visible'); return; }
+  let debounceTimer = null;
+  let requestSeq = 0;
 
-    const filtered = SEARCH_DATA.filter(d =>
-      d.name.toLowerCase().includes(q) || d.meta.toLowerCase().includes(q)
-    ).slice(0, 6);
+  function showMessage(text, color) {
+    results.innerHTML = `<div style="padding:16px;text-align:center;color:${color || 'var(--slate-400)'};font-size:13px">${text}</div>`;
+    results.classList.add('visible');
+  }
 
-    if (!filtered.length) { results.classList.remove('visible'); return; }
+  function renderResults(items) {
+    if (!items.length) { showMessage('No results found.'); return; }
 
-    results.innerHTML = filtered.map(d => `
+    results.innerHTML = items.map(d => `
       <div class="search-result-item">
         <div class="search-result-icon" style="background:${bgMap[d.type]}; color:${colorMap[d.type]}">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">${iconMap[d.icon]}</svg>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">${iconMap[d.type] || ''}</svg>
         </div>
         <div>
           <div class="result-name">${d.name}</div>
@@ -518,6 +537,31 @@ function initSearch() {
     `).join('');
 
     results.classList.add('visible');
+  }
+
+  async function runSearch(q) {
+    const seq = ++requestSeq;
+    showMessage('Searching…');
+    try {
+      const data = await ApiClient.get(`/api/v1/search?q=${encodeURIComponent(q)}&limit=6`);
+      if (seq !== requestSeq) return; // superseded by a newer keystroke
+      renderResults(data.results || []);
+    } catch (err) {
+      if (seq !== requestSeq) return;
+      console.error('Search error:', err);
+      showMessage(`Search failed: ${err.message}`, '#E74C3C');
+    }
+  }
+
+  input.addEventListener('input', () => {
+    const q = input.value.trim();
+    clearTimeout(debounceTimer);
+    if (!q) {
+      requestSeq++; // invalidate any response still in flight
+      results.classList.remove('visible');
+      return;
+    }
+    debounceTimer = setTimeout(() => runSearch(q), 250);
   });
 
   input.addEventListener('blur', () => {
@@ -985,6 +1029,10 @@ let casesSortDirection = "asc";
 let casesListenersInitialized = false;
 
 function initCasesPage() {
+  // Same requireRole('ASSOCIATE') floor as Archive Case / POST
+  // /api/v1/cases/intake (server/routes/api.js) — PARALEGAL is the only
+  // staff role below it.
+  if ($('casesPageStartIntakeBtn')) $('casesPageStartIntakeBtn').classList.toggle('hidden', isParalegal());
   renderCasesList();
   setupCasesPageListeners();
   loadCases(); // re-fetch on every visit, same pattern as initDocumentVault
@@ -1121,6 +1169,10 @@ function renderCasesList() {
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" style="width:14px;height:14px;stroke:currentColor;margin-right:2px"><path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/></svg>
               Message via Client Portal
             </button>
+            <button class="actions-dropdown-item" onclick="handleCaseAction('intake', '${c.id}', '${c.name}')">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" style="width:14px;height:14px;stroke:currentColor;margin-right:2px"><path d="M12 2l8 4v6c0 5-3.5 8.5-8 10-4.5-1.5-8-5-8-10V6l8-4z"/><path d="M9 12l2 2 4-4"/></svg>
+              Matter Intake
+            </button>
             ${canArchive ? `
             <div style="height:1px; background:rgba(255,255,255,0.06); margin:4px 0;"></div>
             <button class="actions-dropdown-item danger-item" onclick="handleCaseAction('archive', '${c.id}', '${c.name}')">
@@ -1215,6 +1267,12 @@ function setupCasesPageListeners() {
     }
   });
 
+  if ($('casesPageStartIntakeBtn')) {
+    $('casesPageStartIntakeBtn').addEventListener('click', openStartIntakeModal);
+  }
+  setupMatterIntakeListeners();
+  setupCaseDetailListeners();
+
   $$('.sortable-cases').forEach(th => {
     th.addEventListener('click', () => {
       const col = th.dataset.col;
@@ -1291,7 +1349,42 @@ function closeNewCaseModal() {
     modal.classList.remove('active');
     setTimeout(() => modal.classList.add('hidden'), 300);
     $('newCaseForm').reset();
+    resetConflictWarningPanel();
   }
+}
+
+// Hides the conflict-warning panel and clears its acknowledgment state —
+// called on modal close and after a successful create, so a stale warning
+// from a previous attempt never carries into the next one.
+function resetConflictWarningPanel() {
+  const panel = $('conflictWarningPanel');
+  if (panel) panel.classList.add('hidden');
+  const list = $('conflictWarningList');
+  if (list) list.innerHTML = '';
+  const ack = $('conflictAckCheckbox');
+  if (ack) ack.checked = false;
+  const reason = $('conflictOverrideReason');
+  if (reason) reason.value = '';
+  const submitBtn = $('newCaseSubmitBtn');
+  if (submitBtn) submitBtn.textContent = 'Create Case Record';
+}
+
+// Renders ConflictCheckService's matches (see CaseService.createCase's 409
+// response) into the warning panel. Built with textContent, not innerHTML —
+// every value here (case names, party names) is free-text the user or a
+// prior case entry supplied, so it must never be interpreted as markup.
+function renderConflictWarning(matches) {
+  const list = $('conflictWarningList');
+  if (!list) return;
+  list.innerHTML = '';
+  for (const m of matches) {
+    const li = document.createElement('li');
+    li.textContent = `"${m.newValue}" (${m.newFieldLabel}) matches ${m.existingFieldLabel} "${m.existingValue}" on case ${m.caseId} (${m.caseName})`;
+    list.appendChild(li);
+  }
+  $('conflictWarningPanel').classList.remove('hidden');
+  const submitBtn = $('newCaseSubmitBtn');
+  if (submitBtn) submitBtn.textContent = 'Create Anyway';
 }
 
 async function handleNewCaseSubmit(e) {
@@ -1305,16 +1398,39 @@ async function handleNewCaseSubmit(e) {
   const attorney = $('newCaseAttorney').value; // e.g. "Sarah J." — matched server-side to a real user
   const status = $('newCaseStatus').value;
   const hearing = $('newCaseHearing').value || 'None';
+  const relatedEntities = $('newCaseRelatedEntities').value
+    .split(',').map(s => s.trim()).filter(Boolean);
+
+  const conflictPanelVisible = !$('conflictWarningPanel').classList.contains('hidden');
+  if (conflictPanelVisible) {
+    if (!$('conflictAckCheckbox').checked) {
+      showToast('Please acknowledge the conflict check results before proceeding.', 'error');
+      return;
+    }
+    if (!$('conflictOverrideReason').value.trim()) {
+      showToast('Please provide a reason for proceeding despite the potential conflict.', 'error');
+      return;
+    }
+  }
 
   const submitBtn = e.target.querySelector('button[type="submit"]');
   if (submitBtn) { submitBtn.disabled = true; submitBtn.textContent = 'Creating…'; }
 
   try {
-    const { ok, json } = await ApiClient.post('/api/v1/cases', {
+    const { status: httpStatus, json } = await ApiClient.post('/api/v1/cases', {
       title, client, opposingParty: opposing, opposingCounsel: counsel,
-      area, attorney, status, hearing
+      area, attorney, status, hearing, relatedEntities,
+      ...(conflictPanelVisible ? {
+        conflictOverride: true,
+        conflictOverrideReason: $('conflictOverrideReason').value.trim()
+      } : {})
     });
-    if (!ok) throw new Error(json.error || 'Failed to create case.');
+
+    if (httpStatus === 409 && json.conflicts) {
+      renderConflictWarning(json.conflicts);
+      return;
+    }
+    if (!json.success) throw new Error(json.error || 'Failed to create case.');
 
     closeNewCaseModal();
     showToast(`Case ${json.data.id} created successfully.`, 'success');
@@ -1322,7 +1438,7 @@ async function handleNewCaseSubmit(e) {
   } catch (err) {
     showToast(err.message || 'Failed to create case.', 'error');
   } finally {
-    if (submitBtn) { submitBtn.disabled = false; submitBtn.textContent = 'Create Case Record'; }
+    if (submitBtn) { submitBtn.disabled = false; submitBtn.textContent = $('conflictWarningPanel').classList.contains('hidden') ? 'Create Case Record' : 'Create Anyway'; }
   }
 }
 
@@ -1346,11 +1462,29 @@ function closeAllActionsDropdowns() {
 async function handleCaseAction(action, caseId, caseName) {
   closeAllActionsDropdowns();
   if (action === 'open') {
-    showToast(`Accessing secure repository for ${caseName} (${caseId}).`, 'info');
+    await openCaseDetailModal(caseId, caseName);
   } else if (action === 'upload') {
-    showToast(`Initializing secure document ingest upload for ${caseId}.`, 'success');
+    // Reuses the Document Vault's existing upload modal/component
+    // (openUploadModal) and its already-case_id-aware backend
+    // (VaultService.initiateUpload) — just pre-scopes it to this case
+    // instead of opening a new uploader.
+    navigateToPage('documents');
+    await initDocumentVault(); // ensure vault stats are loaded before the modal reads VaultState.stats for its quota bar
+    openUploadModal(caseId);
   } else if (action === 'message') {
-    showToast(`Opening client communications panel for ${caseName}.`, 'info');
+    // Reuses the Communications page's existing conversation list +
+    // composer (selectConversation) — finds this case's thread by caseId
+    // and opens it, rather than building a new composer.
+    navigateToPage('communications');
+    await loadConversations();
+    const conv = CONVERSATIONS.find(cv => cv.caseId === caseId);
+    if (conv) {
+      await selectConversation(conv.id);
+    } else {
+      showToast(`No client portal conversation exists yet for ${caseName}.`, 'warning');
+    }
+  } else if (action === 'intake') {
+    await openMatterIntakeModal(caseId, caseName);
   } else if (action === 'archive') {
     const confirmArchive = confirm(`Are you sure you want to archive case: ${caseName}?`);
     if (!confirmArchive) return;
@@ -1362,6 +1496,462 @@ async function handleCaseAction(action, caseId, caseName) {
     } catch (err) {
       showToast(err.message || 'Failed to archive case.', 'error');
     }
+  }
+}
+
+/* ════════════════════════════════════════════
+   CASE FILE (DETAIL) MODAL — "Open Case File" row action
+   Read-only drill-down for one case: overview, its documents, deadlines,
+   and activity feed. Reuses the same GET endpoints the client portal
+   already reads (CaseService.getCase/getCaseDocuments/getCaseDeadlines/
+   getCaseActivity) — those apply no CLIENT-only restriction to a staff
+   caller (scopeCasesToUser only filters for role === 'CLIENT'), so no new
+   backend route was needed, just a staff-facing view of the same data.
+   ════════════════════════════════════════════ */
+
+const CASE_DETAIL_STATUS_LABEL = { active: 'Active', pending: 'Awaiting Docs', urgent: 'Urgent Deadline', closed: 'Closed' };
+
+async function openCaseDetailModal(caseId, caseName) {
+  $('caseDetailCaseLabel').textContent = `${caseName} (${caseId})`;
+  $('caseDetailOverview').innerHTML = '<p style="color:var(--slate-400)">Loading…</p>';
+  $('caseDetailDocuments').innerHTML = '';
+  $('caseDetailDeadlines').innerHTML = '';
+  $('caseDetailActivity').innerHTML = '';
+
+  const modal = $('caseDetailModal');
+  modal.classList.remove('hidden');
+  setTimeout(() => modal.classList.add('active'), 10);
+
+  try {
+    const [caseRow, documents, deadlines, activity] = await Promise.all([
+      ApiClient.get(`/api/v1/cases/${caseId}`),
+      ApiClient.get(`/api/v1/cases/${caseId}/documents`),
+      ApiClient.get(`/api/v1/cases/${caseId}/deadlines`),
+      ApiClient.get(`/api/v1/cases/${caseId}/activity`)
+    ]);
+    renderCaseDetailOverview(caseRow);
+    renderCaseDetailDocuments(documents);
+    renderCaseDetailDeadlines(deadlines);
+    renderCaseDetailActivity(activity);
+  } catch (err) {
+    $('caseDetailOverview').innerHTML = `<p style="color:#E74C3C">Failed to load case file: ${err.message}</p>`;
+  }
+}
+
+function closeCaseDetailModal() {
+  const modal = $('caseDetailModal');
+  modal.classList.remove('active');
+  setTimeout(() => modal.classList.add('hidden'), 300);
+}
+
+function renderCaseDetailOverview(c) {
+  $('caseDetailOverview').innerHTML = `
+    <div class="form-row-two">
+      <div><strong>Client</strong><div>${c.client}</div></div>
+      <div><strong>Status</strong><div><span class="status-badge ${c.status}">${CASE_DETAIL_STATUS_LABEL[c.status] || c.status}</span></div></div>
+    </div>
+    <div class="form-row-two" style="margin-top:10px;">
+      <div><strong>Opposing Party</strong><div>${c.opposingParty || '—'}</div></div>
+      <div><strong>Opposing Counsel</strong><div>${c.opposingCounsel || '—'}</div></div>
+    </div>
+    <div class="form-row-two" style="margin-top:10px;">
+      <div><strong>Practice Area</strong><div>${c.type || '—'}</div></div>
+      <div><strong>Lead Attorney</strong><div>${c.attorney || 'Unassigned'}</div></div>
+    </div>
+    <div style="margin-top:10px;"><strong>Next Hearing</strong><div>${c.nextHearing || 'None'}</div></div>
+    ${c.description ? `<div style="margin-top:10px;"><strong>Description</strong><div>${c.description}</div></div>` : ''}
+  `;
+}
+
+function renderCaseDetailDocuments(docs) {
+  const el = $('caseDetailDocuments');
+  if (!docs.length) { el.innerHTML = '<p style="color:var(--slate-400)">No documents on file.</p>'; return; }
+  el.innerHTML = `
+    <table class="cases-large-table">
+      <thead><tr><th>File</th><th>Category</th><th>Uploaded By</th><th>Uploaded</th><th></th></tr></thead>
+      <tbody>
+        ${docs.map(d => `
+          <tr>
+            <td>${d.file_name}</td>
+            <td>${d.category || '—'}</td>
+            <td>${d.author_name || '—'}</td>
+            <td class="activity-time">${new Date(d.created_at).toLocaleDateString('en-US', { month: 'short', day: '2-digit', year: 'numeric' })}</td>
+            <td><button class="btn-ghost" style="padding:2px 8px; font-size:12px;" onclick="openDocumentDetailModal('${d.id}', '${(d.file_name || '').replace(/'/g, "\\'")}')">Version History</button></td>
+          </tr>
+        `).join('')}
+      </tbody>
+    </table>
+  `;
+}
+
+function renderCaseDetailDeadlines(items) {
+  const el = $('caseDetailDeadlines');
+  if (!items.length) { el.innerHTML = '<p style="color:var(--slate-400)">No deadlines on file.</p>'; return; }
+  el.innerHTML = items.map(d => `
+    <div style="display:flex; justify-content:space-between; padding:6px 0; border-bottom:1px solid rgba(255,255,255,0.06);">
+      <span>${d.title}${d.location ? ' — ' + d.location : ''}</span>
+      <span class="activity-time">${d.dateFormatted}</span>
+    </div>
+  `).join('');
+}
+
+function renderCaseDetailActivity(items) {
+  const el = $('caseDetailActivity');
+  if (!items.length) { el.innerHTML = '<p style="color:var(--slate-400)">No activity recorded yet.</p>'; return; }
+  el.innerHTML = items.map(a => `
+    <div style="display:flex; justify-content:space-between; padding:6px 0; border-bottom:1px solid rgba(255,255,255,0.06);">
+      <span>${a.label}${a.actorName ? ' — ' + a.actorName : ''}</span>
+      <span class="activity-time">${new Date(a.date).toLocaleDateString('en-US', { month: 'short', day: '2-digit', year: 'numeric' })}</span>
+    </div>
+  `).join('');
+}
+
+function setupCaseDetailListeners() {
+  $('caseDetailModalCloseBtn').addEventListener('click', closeCaseDetailModal);
+  $('caseDetailModal').addEventListener('click', (e) => { if (e.target === $('caseDetailModal')) closeCaseDetailModal(); });
+}
+
+/* ════════════════════════════════════════════
+   MATTER INTAKE (conflict check -> engagement letter -> signed ->
+   retainer received -> activated)
+   A separate flow from the quick "New Case" modal above — see
+   server/services/matterIntakeService.js. Two modals: startIntakeModal
+   (creates the case + its intake row together) and matterIntakeModal
+   (the checklist/stepper, re-rendered from whatever state the server
+   reports rather than tracked as separate client-side flags).
+   ════════════════════════════════════════════ */
+
+let intakeCurrentCaseId = null;
+
+// Same PARTNER+ floor as the server's requireRole('PARTNER') on
+// conflict-override/retainer-waive/activate (server/routes/api.js) —
+// reuses canManageTrust() since it's the identical role set, just named
+// for this call site.
+function canOverrideIntakeCompliance() {
+  return canManageTrust();
+}
+
+function setupMatterIntakeListeners() {
+  if ($('startIntakeModalCloseBtn')) $('startIntakeModalCloseBtn').addEventListener('click', closeStartIntakeModal);
+  if ($('startIntakeModalCancelBtn')) $('startIntakeModalCancelBtn').addEventListener('click', closeStartIntakeModal);
+  if ($('startIntakeModal')) $('startIntakeModal').addEventListener('click', (e) => { if (e.target === $('startIntakeModal')) closeStartIntakeModal(); });
+
+  if ($('intakeModalCloseBtn')) $('intakeModalCloseBtn').addEventListener('click', closeMatterIntakeModal);
+  if ($('intakeModalCloseBtn2')) $('intakeModalCloseBtn2').addEventListener('click', closeMatterIntakeModal);
+  if ($('matterIntakeModal')) $('matterIntakeModal').addEventListener('click', (e) => { if (e.target === $('matterIntakeModal')) closeMatterIntakeModal(); });
+
+  if ($('intakeConflictOverrideBtn')) $('intakeConflictOverrideBtn').addEventListener('click', handleIntakeConflictOverride);
+  if ($('intakeLetterUploadBtn')) $('intakeLetterUploadBtn').addEventListener('click', handleIntakeLetterUpload);
+  if ($('intakeLetterSentBtn')) $('intakeLetterSentBtn').addEventListener('click', handleIntakeLetterSent);
+  if ($('intakeSignedUploadBtn')) $('intakeSignedUploadBtn').addEventListener('click', handleIntakeSignedUpload);
+  if ($('intakeRetainerAccount')) $('intakeRetainerAccount').addEventListener('change', loadIntakeRetainerLedgers);
+  if ($('intakeRetainerRecordBtn')) $('intakeRetainerRecordBtn').addEventListener('click', handleIntakeRetainerRecord);
+  if ($('intakeRetainerWaiveBtn')) $('intakeRetainerWaiveBtn').addEventListener('click', handleIntakeRetainerWaive);
+  if ($('intakeActivateBtn')) $('intakeActivateBtn').addEventListener('click', handleIntakeActivate);
+  if ($('intakeDeclineBtn')) $('intakeDeclineBtn').addEventListener('click', handleIntakeDecline);
+}
+
+// ── Start Matter Intake ───────────────────────────────────────────────────
+function openStartIntakeModal() {
+  $('startIntakeForm').reset();
+  const modal = $('startIntakeModal');
+  modal.classList.remove('hidden');
+  setTimeout(() => modal.classList.add('active'), 10);
+}
+
+function closeStartIntakeModal() {
+  const modal = $('startIntakeModal');
+  modal.classList.remove('active');
+  setTimeout(() => modal.classList.add('hidden'), 300);
+}
+
+async function handleStartIntakeSubmit(e) {
+  e.preventDefault();
+  const title = $('intakeNewTitle').value.trim();
+  const client = $('intakeNewClient').value.trim();
+  if (!title || !client) return;
+
+  const relatedEntities = $('intakeNewRelatedEntities').value
+    .split(',').map(s => s.trim()).filter(Boolean);
+
+  const submitBtn = $('startIntakeSubmitBtn');
+  submitBtn.disabled = true;
+  try {
+    const { ok, json } = await ApiClient.post('/api/v1/cases/intake', {
+      title, client,
+      opposingParty: $('intakeNewOpposing').value.trim() || undefined,
+      opposingCounsel: $('intakeNewCounsel').value.trim() || undefined,
+      area: $('intakeNewArea').value || undefined,
+      attorney: $('intakeNewAttorney').value || undefined,
+      relatedEntities
+    });
+    if (!ok) throw new Error(json.error || 'Failed to start matter intake.');
+    closeStartIntakeModal();
+    showToast(`Matter intake started for ${json.data.case_id}.`, 'success');
+    await loadCases();
+    await openMatterIntakeModal(json.data.case_id, title);
+  } catch (err) {
+    showToast(err.message || 'Failed to start matter intake.', 'error');
+  } finally {
+    submitBtn.disabled = false;
+  }
+}
+
+// ── Matter Intake Checklist ───────────────────────────────────────────────
+const INTAKE_STATE_LABEL = {
+  CONFLICT_PENDING: 'Conflict check pending',
+  CONFLICT_HOLD: 'On hold — potential conflict of interest',
+  CONFLICT_CLEARED: 'Conflict cleared',
+  ENGAGEMENT_LETTER_DRAFTED: 'Engagement letter drafted',
+  ENGAGEMENT_LETTER_SENT: 'Engagement letter sent to client',
+  SIGNED: 'Engagement letter signed',
+  RETAINER_RECEIVED: 'Retainer settled',
+  ACTIVATED: 'Matter activated',
+  DECLINED: 'Matter declined'
+};
+
+async function openMatterIntakeModal(caseId, caseName) {
+  intakeCurrentCaseId = caseId;
+  $('intakeCaseLabel').textContent = `${caseName} (${caseId})`;
+
+  const modal = $('matterIntakeModal');
+  modal.classList.remove('hidden');
+  setTimeout(() => modal.classList.add('active'), 10);
+
+  await refreshMatterIntake();
+}
+
+function closeMatterIntakeModal() {
+  const modal = $('matterIntakeModal');
+  modal.classList.remove('active');
+  setTimeout(() => modal.classList.add('hidden'), 300);
+  intakeCurrentCaseId = null;
+}
+
+async function refreshMatterIntake() {
+  if (!intakeCurrentCaseId) return;
+  try {
+    const intake = await ApiClient.get(`/api/v1/cases/${intakeCurrentCaseId}/intake`);
+    renderMatterIntake(intake);
+  } catch (err) {
+    // A case with no case_intake row (created via the plain "New Case"
+    // flow, or any case that predates this workflow) 404s here — that's
+    // not an error, it just means this case was never opened through
+    // Matter Intake.
+    closeMatterIntakeModal();
+    showToast('This case was not opened through the Matter Intake workflow.', 'info');
+  }
+}
+
+function renderMatterIntake(intake) {
+  const s = intake.state;
+  const c = intake.checklist;
+
+  const banner = $('intakeStateBanner');
+  banner.textContent = INTAKE_STATE_LABEL[s] || s;
+  banner.style.color = (s === 'CONFLICT_HOLD' || s === 'DECLINED') ? '#E74C3C' : (s === 'ACTIVATED' ? '#2DC8B0' : 'inherit');
+
+  const canOverride = canOverrideIntakeCompliance();
+
+  // 1. Conflict
+  if (s === 'CONFLICT_HOLD') {
+    const matches = intake.conflict_check_matches || [];
+    $('intakeConflictSummary').innerHTML = `<strong style="color:#E74C3C">${matches.length} potential conflict${matches.length === 1 ? '' : 's'} found:</strong><br>` +
+      matches.map(m => `${(m.newValue || '').replace(/</g, '&lt;')} (${m.newFieldLabel}) matches "${(m.existingValue || '').replace(/</g, '&lt;')}" (${m.existingFieldLabel}) on case ${m.caseName}`).join('<br>');
+    $('intakeConflictOverrideSection').classList.toggle('hidden', !canOverride);
+    if (!canOverride) {
+      $('intakeConflictSummary').innerHTML += '<br><em style="color:var(--slate-400)">Only a Partner can override a conflict hold.</em>';
+    }
+  } else {
+    $('intakeConflictSummary').textContent = '✓ Cleared';
+    $('intakeConflictOverrideSection').classList.add('hidden');
+  }
+
+  // 2. Engagement letter
+  $('intakeLetterUploadSection').classList.toggle('hidden', s !== 'CONFLICT_CLEARED');
+  $('intakeLetterSentSection').classList.toggle('hidden', s !== 'ENGAGEMENT_LETTER_DRAFTED');
+  if (c.engagement_letter_sent) {
+    $('intakeLetterSummary').textContent = '✓ Drafted and sent to client';
+  } else if (c.engagement_letter_drafted) {
+    $('intakeLetterSummary').textContent = 'Drafted — not yet marked sent';
+  } else {
+    $('intakeLetterSummary').textContent = 'Awaiting upload';
+  }
+
+  // 3. Signed
+  $('intakeSignedUploadSection').classList.toggle('hidden', s !== 'ENGAGEMENT_LETTER_SENT');
+  $('intakeSignedSummary').textContent = c.signed ? '✓ Countersigned copy on file' : 'Awaiting signature';
+
+  // 4. Retainer
+  $('intakeRetainerFormSection').classList.toggle('hidden', s !== 'SIGNED');
+  if (s === 'SIGNED' && !$('intakeRetainerAccount').dataset.loaded) loadIntakeRetainerAccounts();
+  if (c.retainer_settled) {
+    $('intakeRetainerSummary').textContent = intake.retainer_waived
+      ? `Waived — ${intake.retainer_waived_reason || ''}`
+      : '✓ Retainer received';
+  } else {
+    $('intakeRetainerSummary').textContent = 'Awaiting retainer deposit or waiver';
+  }
+  if (s === 'SIGNED' && !canOverride) {
+    $('intakeRetainerWaiveBtn').classList.add('hidden');
+  } else if ($('intakeRetainerWaiveBtn')) {
+    $('intakeRetainerWaiveBtn').classList.remove('hidden');
+  }
+
+  // 5. Activate
+  $('intakeActivateBtn').classList.toggle('hidden', s !== 'RETAINER_RECEIVED' || !canOverride);
+  if (s === 'ACTIVATED') {
+    $('intakeActivateSummary').textContent = `✓ Activated ${intake.activated_at ? formatInvoiceDate(intake.activated_at.slice(0, 10)) : ''}`;
+  } else if (s === 'RETAINER_RECEIVED' && !canOverride) {
+    $('intakeActivateSummary').textContent = 'Ready to activate — requires a Partner.';
+  } else if (s === 'RETAINER_RECEIVED') {
+    $('intakeActivateSummary').textContent = 'All steps complete — ready to activate.';
+  } else {
+    $('intakeActivateSummary').textContent = 'Complete the steps above first.';
+  }
+
+  $('intakeDeclineBtn').classList.toggle('hidden', s === 'ACTIVATED' || s === 'DECLINED');
+}
+
+async function handleIntakeConflictOverride() {
+  const reason = $('intakeConflictOverrideReason').value.trim();
+  if (!reason) return showToast('An override reason is required.', 'error');
+  try {
+    await ApiClient.post(`/api/v1/cases/${intakeCurrentCaseId}/intake/conflict-override`, { reason });
+    showToast('Conflict hold overridden.', 'success');
+    await refreshMatterIntake();
+  } catch (err) {
+    showToast(err.message || 'Failed to override conflict hold.', 'error');
+  }
+}
+
+async function handleIntakeLetterUpload() {
+  const fileInput = $('intakeLetterFile');
+  const file = fileInput.files[0];
+  if (!file) return showToast('Choose a file to upload.', 'error');
+
+  const formData = new FormData();
+  formData.append('file', file);
+  try {
+    const { ok, json } = await ApiClient.postForm(`/api/v1/cases/${intakeCurrentCaseId}/intake/engagement-letter`, formData);
+    if (!ok) throw new Error(json.error || 'Failed to upload engagement letter.');
+    showToast('Engagement letter uploaded.', 'success');
+    fileInput.value = '';
+    await refreshMatterIntake();
+  } catch (err) {
+    showToast(err.message || 'Failed to upload engagement letter.', 'error');
+  }
+}
+
+async function handleIntakeLetterSent() {
+  try {
+    await ApiClient.post(`/api/v1/cases/${intakeCurrentCaseId}/intake/engagement-letter/sent`, {});
+    showToast('Marked as sent to client.', 'success');
+    await refreshMatterIntake();
+  } catch (err) {
+    showToast(err.message || 'Failed to update.', 'error');
+  }
+}
+
+async function handleIntakeSignedUpload() {
+  const fileInput = $('intakeSignedFile');
+  const file = fileInput.files[0];
+  if (!file) return showToast('Choose a file to upload.', 'error');
+
+  const formData = new FormData();
+  formData.append('file', file);
+  try {
+    const { ok, json } = await ApiClient.postForm(`/api/v1/cases/${intakeCurrentCaseId}/intake/signed`, formData);
+    if (!ok) throw new Error(json.error || 'Failed to upload signed copy.');
+    showToast('Signed copy uploaded.', 'success');
+    fileInput.value = '';
+    await refreshMatterIntake();
+  } catch (err) {
+    showToast(err.message || 'Failed to upload signed copy.', 'error');
+  }
+}
+
+async function loadIntakeRetainerAccounts() {
+  const select = $('intakeRetainerAccount');
+  select.dataset.loaded = '1';
+  try {
+    const accounts = await ApiClient.get('/api/v1/trust/accounts');
+    select.innerHTML = accounts.map(a => `<option value="${a.id}">${a.account_name}</option>`).join('') || '<option value="">No trust accounts configured</option>';
+    await loadIntakeRetainerLedgers();
+  } catch (err) {
+    select.innerHTML = '<option value="">Error loading trust accounts</option>';
+  }
+}
+
+async function loadIntakeRetainerLedgers() {
+  const accountId = $('intakeRetainerAccount').value;
+  const ledgerSelect = $('intakeRetainerLedger');
+  if (!accountId) { ledgerSelect.innerHTML = ''; return; }
+  ledgerSelect.innerHTML = '<option value="">Loading…</option>';
+  try {
+    const ledgers = await ApiClient.get(`/api/v1/trust/client-ledgers?trust_account_id=${accountId}`);
+    ledgerSelect.innerHTML = ledgers.length
+      ? ledgers.map(l => `<option value="${l.id}">${l.client_display_name} (${formatMoney(l.balance_cents)})</option>`).join('')
+      : '<option value="">No client ledgers — open one on the Trust Accounting page first</option>';
+  } catch (err) {
+    ledgerSelect.innerHTML = '<option value="">Error loading client ledgers</option>';
+  }
+}
+
+async function handleIntakeRetainerRecord() {
+  const ledgerId = $('intakeRetainerLedger').value;
+  const amountDollars = parseFloat($('intakeRetainerAmount').value);
+  const memo = $('intakeRetainerMemo').value.trim() || 'Initial retainer';
+  if (!ledgerId) return showToast('Select a client ledger.', 'error');
+  if (!amountDollars || amountDollars <= 0) return showToast('Enter a valid, positive amount.', 'error');
+
+  try {
+    const { ok, json } = await ApiClient.post(`/api/v1/cases/${intakeCurrentCaseId}/intake/retainer`, {
+      client_ledger_id: ledgerId, amount_cents: Math.round(amountDollars * 100), memo
+    });
+    if (!ok) throw new Error(json.error || 'Failed to record retainer.');
+    showToast('Retainer recorded.', 'success');
+    await refreshMatterIntake();
+  } catch (err) {
+    showToast(err.message || 'Failed to record retainer.', 'error');
+  }
+}
+
+async function handleIntakeRetainerWaive() {
+  const reason = $('intakeRetainerWaiveReason').value.trim();
+  if (!reason) return showToast('A reason is required to waive the retainer.', 'error');
+  try {
+    await ApiClient.post(`/api/v1/cases/${intakeCurrentCaseId}/intake/retainer/waive`, { reason });
+    showToast('Retainer waived.', 'success');
+    await refreshMatterIntake();
+  } catch (err) {
+    showToast(err.message || 'Failed to waive retainer.', 'error');
+  }
+}
+
+async function handleIntakeActivate() {
+  const confirmed = confirm('Activate this matter? This makes it a normal active case, visible everywhere an active case is.');
+  if (!confirmed) return;
+  try {
+    await ApiClient.post(`/api/v1/cases/${intakeCurrentCaseId}/intake/activate`, {});
+    showToast('Matter activated.', 'success');
+    await refreshMatterIntake();
+    await loadCases();
+  } catch (err) {
+    showToast(err.message || 'Failed to activate matter.', 'error');
+  }
+}
+
+async function handleIntakeDecline() {
+  const reason = prompt('Reason for declining this matter (required):');
+  if (!reason || !reason.trim()) return;
+  try {
+    await ApiClient.post(`/api/v1/cases/${intakeCurrentCaseId}/intake/decline`, { reason: reason.trim() });
+    showToast('Matter declined.', 'info');
+    closeMatterIntakeModal();
+    await loadCases();
+  } catch (err) {
+    showToast(err.message || 'Failed to decline matter.', 'error');
   }
 }
 
@@ -1697,6 +2287,421 @@ async function handleInvoiceMarkPaid(invoiceId, invoiceNumber) {
   }
 }
 
+/* ════════════════════════════════════════════
+   TRUST ACCOUNTING PAGE
+   Client trust funds, deliberately kept out of the INVOICES array and
+   every billing helper above — see server/services/trustService.js for
+   why they're segregated at the data-model level too, not just in this
+   UI. Re-fetches on every visit (initTrustPage), matching
+   initBillingPage/initCasesPage.
+   ════════════════════════════════════════════ */
+
+let TRUST_ACCOUNTS = [];
+let TRUST_LEDGERS = [];
+let trustListenersInitialized = false;
+let trustCurrentLedgerId = null; // ledger the open Deposit/Disbursement/Transfer/History modal refers to
+
+function initTrustPage() {
+  if (!canManageTrust()) {
+    // Belt-and-suspenders: the nav item is already hidden for anyone who
+    // isn't PARTNER+ (applyRolePermissionsToChrome), but a direct
+    // navigateToPage('trust') call shouldn't render financial data either.
+    $('trustPage').innerHTML = '<p style="padding:40px;color:var(--slate-400)">You do not have access to Trust Accounting.</p>';
+    return;
+  }
+  setupTrustPageListeners();
+  loadTrustAccounts();
+}
+
+async function loadTrustAccounts() {
+  try {
+    TRUST_ACCOUNTS = await ApiClient.get('/api/v1/trust/accounts');
+    const select = $('trustAccountSelect');
+    select.innerHTML = TRUST_ACCOUNTS.map(a => `<option value="${a.id}">${a.account_name}</option>`).join('')
+      || '<option value="">No trust accounts configured</option>';
+    await loadTrustLedgers();
+    await loadTrustReconciliationHistory();
+  } catch (err) {
+    showToast(err.message || 'Failed to load trust accounts.', 'error');
+  }
+}
+
+function selectedTrustAccountId() {
+  return $('trustAccountSelect').value || null;
+}
+
+async function loadTrustLedgers() {
+  const accountId = selectedTrustAccountId();
+  const tbody = $('trustLedgersTableBody');
+  try {
+    TRUST_LEDGERS = accountId ? await ApiClient.get(`/api/v1/trust/client-ledgers?trust_account_id=${accountId}`) : [];
+    renderTrustLedgers();
+  } catch (err) {
+    if (tbody) tbody.innerHTML = `<tr><td colspan="5" style="text-align:center;color:var(--slate-400)">Error loading client ledgers</td></tr>`;
+  }
+}
+
+function renderTrustLedgers() {
+  const tbody = $('trustLedgersTableBody');
+  const emptyState = $('trustLedgersEmptyState');
+  const table = $('trustLedgersTable');
+  if (!tbody) return;
+
+  if (TRUST_LEDGERS.length === 0) {
+    table.classList.add('hidden');
+    emptyState.classList.remove('hidden');
+    return;
+  }
+  table.classList.remove('hidden');
+  emptyState.classList.add('hidden');
+
+  tbody.innerHTML = TRUST_LEDGERS.map(l => `
+    <tr>
+      <td>${l.client_display_name}</td>
+      <td>${l.trust_account_name}</td>
+      <td style="font-weight:600">${formatMoney(l.balance_cents)}</td>
+      <td class="activity-time">${l.last_activity_at ? formatInvoiceDate(l.last_activity_at.slice(0, 10)) : '—'}</td>
+      <td>
+        <div style="display:flex; gap:6px; flex-wrap:wrap;">
+          <button class="btn-ghost" style="padding:4px 8px; font-size:12px;" onclick="openTrustEntryModal('${l.id}', 'DEPOSIT')">Deposit</button>
+          <button class="btn-ghost" style="padding:4px 8px; font-size:12px;" onclick="openTrustEntryModal('${l.id}', 'DISBURSEMENT')">Disburse</button>
+          <button class="btn-ghost" style="padding:4px 8px; font-size:12px;" onclick="openTrustTransferModal('${l.id}')">Pay Invoice</button>
+          <button class="btn-ghost" style="padding:4px 8px; font-size:12px;" onclick="openTrustHistoryModal('${l.id}')">History</button>
+        </div>
+      </td>
+    </tr>
+  `).join('');
+}
+
+function trustLedgerById(ledgerId) {
+  return TRUST_LEDGERS.find(l => l.id === ledgerId);
+}
+
+function setupTrustPageListeners() {
+  if (trustListenersInitialized) return;
+  trustListenersInitialized = true;
+
+  $('trustAccountSelect').addEventListener('change', () => { loadTrustLedgers(); loadTrustReconciliationHistory(); });
+
+  // New Client Ledger modal
+  $('trustNewLedgerBtn').addEventListener('click', openTrustLedgerModal);
+  $('trustLedgerModalCloseBtn').addEventListener('click', closeTrustLedgerModal);
+  $('trustLedgerModalCancelBtn').addEventListener('click', closeTrustLedgerModal);
+  $('trustLedgerModal').addEventListener('click', (e) => { if (e.target === $('trustLedgerModal')) closeTrustLedgerModal(); });
+
+  // Deposit/Disbursement modal
+  $('trustEntryModalCloseBtn').addEventListener('click', closeTrustEntryModal);
+  $('trustEntryModalCancelBtn').addEventListener('click', closeTrustEntryModal);
+  $('trustEntryModal').addEventListener('click', (e) => { if (e.target === $('trustEntryModal')) closeTrustEntryModal(); });
+
+  // Transfer-to-operating modal
+  $('trustTransferModalCloseBtn').addEventListener('click', closeTrustTransferModal);
+  $('trustTransferModalCancelBtn').addEventListener('click', closeTrustTransferModal);
+  $('trustTransferModal').addEventListener('click', (e) => { if (e.target === $('trustTransferModal')) closeTrustTransferModal(); });
+
+  // History modal
+  $('trustHistoryModalCloseBtn').addEventListener('click', closeTrustHistoryModal);
+  $('trustHistoryModal').addEventListener('click', (e) => { if (e.target === $('trustHistoryModal')) closeTrustHistoryModal(); });
+
+  // Reconciliation
+  $('trustReconComputeBtn').addEventListener('click', computeTrustReconciliation);
+  $('trustReconSaveBtn').addEventListener('click', saveTrustReconciliation);
+  $('trustReconAsOf').valueAsDate = new Date();
+}
+
+// ── New Client Ledger ────────────────────────────────────────────────────
+function openTrustLedgerModal() {
+  $('trustLedgerForm').reset();
+  const accountSelect = $('trustLedgerAccount');
+  accountSelect.innerHTML = TRUST_ACCOUNTS.map(a => `<option value="${a.id}">${a.account_name}</option>`).join('');
+  accountSelect.value = selectedTrustAccountId() || '';
+  const modal = $('trustLedgerModal');
+  modal.classList.remove('hidden');
+  setTimeout(() => modal.classList.add('active'), 10);
+}
+
+function closeTrustLedgerModal() {
+  const modal = $('trustLedgerModal');
+  modal.classList.remove('active');
+  setTimeout(() => modal.classList.add('hidden'), 300);
+}
+
+async function handleTrustLedgerSubmit(e) {
+  e.preventDefault();
+  const trustAccountId = $('trustLedgerAccount').value;
+  const clientName = $('trustLedgerClientName').value.trim();
+  if (!trustAccountId || !clientName) return;
+
+  const submitBtn = $('trustLedgerSubmitBtn');
+  submitBtn.disabled = true;
+  try {
+    const { ok, json } = await ApiClient.post('/api/v1/trust/client-ledgers', {
+      trust_account_id: trustAccountId, client_display_name: clientName
+    });
+    if (!ok) throw new Error(json.error || 'Failed to create client ledger.');
+    showToast(`Trust ledger opened for ${clientName}.`, 'success');
+    closeTrustLedgerModal();
+    if (trustAccountId === selectedTrustAccountId()) await loadTrustLedgers();
+  } catch (err) {
+    showToast(err.message || 'Failed to create client ledger.', 'error');
+  } finally {
+    submitBtn.disabled = false;
+  }
+}
+
+// ── Deposit / Disbursement ───────────────────────────────────────────────
+function openTrustEntryModal(ledgerId, type) {
+  const ledger = trustLedgerById(ledgerId);
+  if (!ledger) return;
+  trustCurrentLedgerId = ledgerId;
+
+  $('trustEntryForm').reset();
+  $('trustEntryLedgerId').value = ledgerId;
+  $('trustEntryType').value = type;
+  $('trustEntryClientName').textContent = `${ledger.client_display_name} — current balance ${formatMoney(ledger.balance_cents)}`;
+
+  const isDeposit = type === 'DEPOSIT';
+  $('trustEntryModalTitle').textContent = isDeposit ? 'Record Deposit' : 'Record Disbursement';
+  $('trustEntrySubmitBtn').textContent = isDeposit ? 'Record Deposit' : 'Record Disbursement';
+
+  const modal = $('trustEntryModal');
+  modal.classList.remove('hidden');
+  setTimeout(() => modal.classList.add('active'), 10);
+}
+
+function closeTrustEntryModal() {
+  const modal = $('trustEntryModal');
+  modal.classList.remove('active');
+  setTimeout(() => modal.classList.add('hidden'), 300);
+}
+
+async function handleTrustEntrySubmit(e) {
+  e.preventDefault();
+  const ledgerId = $('trustEntryLedgerId').value;
+  const type = $('trustEntryType').value;
+  const amountDollars = parseFloat($('trustEntryAmount').value);
+  const memo = $('trustEntryMemo').value.trim();
+  const checkNumber = $('trustEntryCheckNumber').value.trim();
+
+  if (!amountDollars || amountDollars <= 0) return showToast('Enter a valid, positive amount.', 'error');
+  // Money is transmitted in cents so it never touches a float on the wire —
+  // same convention as invoice amounts (see formatMoney's own comment).
+  const amountCents = Math.round(amountDollars * 100);
+
+  const submitBtn = $('trustEntrySubmitBtn');
+  submitBtn.disabled = true;
+  try {
+    const endpoint = type === 'DEPOSIT' ? '/api/v1/trust/deposits' : '/api/v1/trust/disbursements';
+    const { ok, json } = await ApiClient.post(endpoint, {
+      client_ledger_id: ledgerId, amount_cents: amountCents, memo, check_number: checkNumber || undefined
+    });
+    if (!ok) throw new Error(json.error || 'Failed to record transaction.');
+    showToast(type === 'DEPOSIT' ? 'Deposit recorded.' : 'Disbursement recorded.', 'success');
+    closeTrustEntryModal();
+    await loadTrustLedgers();
+  } catch (err) {
+    showToast(err.message || 'Failed to record transaction.', 'error');
+  } finally {
+    submitBtn.disabled = false;
+  }
+}
+
+// ── Pay Invoice From Trust (transfer to operating) ───────────────────────
+async function openTrustTransferModal(ledgerId) {
+  const ledger = trustLedgerById(ledgerId);
+  if (!ledger) return;
+  trustCurrentLedgerId = ledgerId;
+
+  $('trustTransferForm').reset();
+  $('trustTransferLedgerId').value = ledgerId;
+  $('trustTransferClientName').textContent = `${ledger.client_display_name} — current balance ${formatMoney(ledger.balance_cents)}`;
+
+  const select = $('trustTransferInvoice');
+  select.innerHTML = '<option value="">Loading invoices…</option>';
+  const modal = $('trustTransferModal');
+  modal.classList.remove('hidden');
+  setTimeout(() => modal.classList.add('active'), 10);
+
+  try {
+    // INVOICES is populated by loadInvoices() (Billing page) — re-fetch
+    // here too so this modal works even if Billing hasn't been visited yet
+    // this session.
+    const invoices = await ApiClient.get('/api/v1/invoices');
+    const unpaid = invoices.filter(inv => inv.status !== 'paid' && inv.status !== 'void');
+    select.innerHTML = unpaid.length
+      ? unpaid.map(inv => `<option value="${inv.id}" data-amount-cents="${inv.amount_cents}">${inv.invoice_number} — ${formatMoney(inv.amount_cents)}${inv.case_name ? ' — ' + inv.case_name : ''}</option>`).join('')
+      : '<option value="">No unpaid invoices</option>';
+  } catch (err) {
+    select.innerHTML = '<option value="">Error loading invoices</option>';
+  }
+}
+
+function closeTrustTransferModal() {
+  const modal = $('trustTransferModal');
+  modal.classList.remove('active');
+  setTimeout(() => modal.classList.add('hidden'), 300);
+}
+
+async function handleTrustTransferSubmit(e) {
+  e.preventDefault();
+  const ledgerId = $('trustTransferLedgerId').value;
+  const select = $('trustTransferInvoice');
+  const invoiceId = select.value;
+  const memo = $('trustTransferMemo').value.trim();
+  if (!invoiceId) return showToast('Select an unpaid invoice.', 'error');
+
+  const amountCents = parseInt(select.selectedOptions[0]?.dataset.amountCents || '0', 10);
+
+  const submitBtn = $('trustTransferSubmitBtn');
+  submitBtn.disabled = true;
+  try {
+    const { ok, json } = await ApiClient.post('/api/v1/trust/transfers', {
+      client_ledger_id: ledgerId, invoice_id: invoiceId, amount_cents: amountCents, memo
+    });
+    if (!ok) throw new Error(json.error || 'Failed to transfer trust funds.');
+    showToast('Invoice paid from trust and marked paid.', 'success');
+    closeTrustTransferModal();
+    await loadTrustLedgers();
+    if (typeof loadInvoices === 'function') await loadInvoices();
+  } catch (err) {
+    showToast(err.message || 'Failed to transfer trust funds.', 'error');
+  } finally {
+    submitBtn.disabled = false;
+  }
+}
+
+// ── Transaction History (+ reverse) ──────────────────────────────────────
+const TRUST_TXN_TYPE_LABEL = {
+  DEPOSIT: 'Deposit', DISBURSEMENT: 'Disbursement',
+  TRANSFER_TO_OPERATING: 'Transfer to Operating', ADJUSTMENT_REVERSAL: 'Reversal'
+};
+
+async function openTrustHistoryModal(ledgerId) {
+  const ledger = trustLedgerById(ledgerId);
+  if (!ledger) return;
+  trustCurrentLedgerId = ledgerId;
+  $('trustHistoryModalTitle').textContent = `Transaction History — ${ledger.client_display_name}`;
+
+  const modal = $('trustHistoryModal');
+  modal.classList.remove('hidden');
+  setTimeout(() => modal.classList.add('active'), 10);
+
+  const tbody = $('trustHistoryTableBody');
+  tbody.innerHTML = `<tr><td colspan="6" style="text-align:center;color:var(--slate-400)">Loading…</td></tr>`;
+  try {
+    const rows = await ApiClient.get(`/api/v1/trust/client-ledgers/${ledgerId}/transactions`);
+    tbody.innerHTML = rows.length ? rows.map(t => `
+      <tr>
+        <td class="activity-time">${formatInvoiceDate(t.created_at.slice(0, 10))}</td>
+        <td>${TRUST_TXN_TYPE_LABEL[t.type] || t.type}</td>
+        <td>${formatMoney(t.amount_cents)}</td>
+        <td>${(t.memo || '').replace(/</g, '&lt;')}</td>
+        <td>${t.created_by_name || '—'}</td>
+        <td>${t.type !== 'ADJUSTMENT_REVERSAL' ? `<button class="btn-ghost" style="padding:2px 8px; font-size:12px;" onclick="handleTrustReverse('${t.id}', '${ledgerId}')">Reverse</button>` : ''}</td>
+      </tr>
+    `).join('') : `<tr><td colspan="6" style="text-align:center;color:var(--slate-400)">No transactions yet</td></tr>`;
+  } catch (err) {
+    tbody.innerHTML = `<tr><td colspan="6" style="text-align:center;color:var(--slate-400)">Error loading history</td></tr>`;
+  }
+}
+
+function closeTrustHistoryModal() {
+  const modal = $('trustHistoryModal');
+  modal.classList.remove('active');
+  setTimeout(() => modal.classList.add('hidden'), 300);
+}
+
+async function handleTrustReverse(transactionId, ledgerId) {
+  const reason = prompt('Reason for reversing this transaction (required — becomes part of the trust ledger\'s record):');
+  if (!reason || !reason.trim()) return;
+
+  try {
+    const { ok, json } = await ApiClient.post(`/api/v1/trust/transactions/${transactionId}/reverse`, { reason: reason.trim() });
+    if (!ok) throw new Error(json.error || 'Failed to reverse transaction.');
+    showToast('Transaction reversed.', 'success');
+    await loadTrustLedgers();
+    await openTrustHistoryModal(ledgerId);
+  } catch (err) {
+    showToast(err.message || 'Failed to reverse transaction.', 'error');
+  }
+}
+
+// ── Three-Way Reconciliation ──────────────────────────────────────────────
+async function computeTrustReconciliation() {
+  const accountId = selectedTrustAccountId();
+  if (!accountId) return showToast('Select a trust account first.', 'error');
+
+  const asOf = $('trustReconAsOf').value;
+  const bankDollars = parseFloat($('trustReconBankBalance').value);
+  if (isNaN(bankDollars) || bankDollars < 0) return showToast('Enter the bank statement balance.', 'error');
+  const bankCents = Math.round(bankDollars * 100);
+
+  try {
+    const params = new URLSearchParams({ trust_account_id: accountId, bank_balance_cents: bankCents });
+    if (asOf) params.set('as_of', asOf);
+    const result = await ApiClient.get(`/api/v1/trust/reconciliation?${params.toString()}`);
+
+    $('trustReconBank').textContent = formatMoney(result.bank_statement_balance_cents);
+    $('trustReconLedger').textContent = formatMoney(result.ledger_balance_cents);
+    $('trustReconClientTotal').textContent = formatMoney(result.client_ledgers_total_cents);
+    const badge = $('trustReconStatusBadge');
+    badge.textContent = result.is_balanced ? 'Balanced' : `Out of balance (${formatMoney(Math.abs(result.discrepancy_cents))})`;
+    badge.className = 'status-badge ' + (result.is_balanced ? 'active' : 'urgent');
+    $('trustReconResult').classList.remove('hidden');
+    $('trustReconResult').dataset.computed = JSON.stringify(result);
+  } catch (err) {
+    showToast(err.message || 'Failed to compute reconciliation.', 'error');
+  }
+}
+
+async function saveTrustReconciliation() {
+  const accountId = selectedTrustAccountId();
+  const computed = $('trustReconResult').dataset.computed ? JSON.parse($('trustReconResult').dataset.computed) : null;
+  if (!accountId || !computed) return showToast('Compute the reconciliation before saving.', 'error');
+
+  const saveBtn = $('trustReconSaveBtn');
+  saveBtn.disabled = true;
+  try {
+    const { ok, json } = await ApiClient.post('/api/v1/trust/reconciliation', {
+      trust_account_id: accountId,
+      as_of_date: computed.as_of_date,
+      bank_statement_balance_cents: computed.bank_statement_balance_cents,
+      notes: $('trustReconNotes').value.trim() || undefined
+    });
+    if (!ok) throw new Error(json.error || 'Failed to save reconciliation.');
+    showToast('Reconciliation saved.', 'success');
+    await loadTrustReconciliationHistory();
+  } catch (err) {
+    showToast(err.message || 'Failed to save reconciliation.', 'error');
+  } finally {
+    saveBtn.disabled = false;
+  }
+}
+
+async function loadTrustReconciliationHistory() {
+  const accountId = selectedTrustAccountId();
+  const tbody = $('trustReconHistoryTableBody');
+  if (!accountId) {
+    tbody.innerHTML = `<tr><td colspan="6" style="text-align:center;color:var(--slate-400)">Select a trust account</td></tr>`;
+    return;
+  }
+  try {
+    const rows = await ApiClient.get(`/api/v1/trust/reconciliation/history?trust_account_id=${accountId}`);
+    tbody.innerHTML = rows.length ? rows.map(r => `
+      <tr>
+        <td class="activity-time">${formatInvoiceDate(r.as_of_date)}</td>
+        <td>${formatMoney(r.bank_statement_balance_cents)}</td>
+        <td>${formatMoney(r.ledger_balance_cents)}</td>
+        <td>${formatMoney(r.client_ledgers_total_cents)}</td>
+        <td><span class="status-badge ${r.is_balanced ? 'active' : 'urgent'}">${r.is_balanced ? 'Balanced' : 'Out of balance'}</span></td>
+        <td>${r.performed_by_name || '—'}</td>
+      </tr>
+    `).join('') : `<tr><td colspan="6" style="text-align:center;color:var(--slate-400)">No reconciliations recorded yet</td></tr>`;
+  } catch (err) {
+    tbody.innerHTML = `<tr><td colspan="6" style="text-align:center;color:var(--slate-400)">Error loading reconciliation history</td></tr>`;
+  }
+}
+
 // ══════════════════════════════════════
 // TOAST NOTIFICATION
 // ══════════════════════════════════════
@@ -1835,6 +2840,13 @@ function renderActiveChat() {
   };
   const statusLabel = statusLabels[conv.status] || conv.status;
   
+  // No "View Full Client Portal" button here: it used to fire a toast
+  // claiming to load one, but there is nothing in this app for it to load
+  // — the client portal (client-portal.js/client-portal.html) is a
+  // separate, independently-authenticated app for CLIENT-role users, not
+  // something a staff session can open. Removed rather than left as a
+  // dead button, per the header's own real content (this conversation's
+  // messages, rendered below) being the actual substitute.
   header.innerHTML = `
     <div class="chat-header-left">
       <div class="chat-header-title">${conv.clientName}</div>
@@ -1844,9 +2856,6 @@ function renderActiveChat() {
         <span class="status-badge ${conv.status}" style="font-size:10px; padding: 1px 6px;">${statusLabel}</span>
       </div>
     </div>
-    <button class="comms-view-portal-btn" onclick="showToast('Loading Secure Client Portal...', 'info')">
-      View Full Client Portal
-    </button>
   `;
 
   // conv.messages is only populated once loadConversationDetail(id) has
@@ -1978,14 +2987,128 @@ async function handleSendCommsMessage(event) {
   }
 }
 
-function handleInputQuickAction(action) {
+// `event` is only used by the 'template' action, to position its dropdown
+// under the button that opened it — the HTML's onclick for that button
+// passes it explicitly (see index.html); 'attach' doesn't need it.
+function handleInputQuickAction(action, event) {
   if (action === 'attach') {
-    showToast('Loading Document Vault attachment picker...', 'info');
-  } else if (action === 'signature') {
-    showToast('Generating secure Signature Request template...', 'success');
+    handleCommsAttachClick();
   } else if (action === 'template') {
-    showToast('Loading Quick Replies and legal templates...', 'info');
+    toggleCommsTemplateMenu(event.currentTarget);
   }
+  // 'signature' has no handler at all — that button is now disabled in
+  // the markup (title="Coming soon...") rather than firing a toast that
+  // implied a real e-signature request was sent. Wiring it for real is a
+  // separate follow-up once an e-signature provider is chosen.
+}
+
+// ── Attach (quick action) ─────────────────────────────────────────────────
+// Reuses the exact same upload path the Document Vault and Cases pages
+// already use (ApiClient.postForm -> POST /api/v1/vault/upload ->
+// VaultService.initiateUpload) — no new storage/upload code. The file is
+// really uploaded and really stored; what's NOT built is a structured
+// "attachment" on the message itself, because conversation_messages has
+// no such column (only body/sender/is_read — see db/schema.sql +
+// migration 0006_message_encryption.sql) and this task explicitly says
+// not to touch the messages schema or its encryption. So the upload is
+// real, and it's referenced in the message as plain text the sender can
+// edit before sending, same as anything else typed into the box.
+function handleCommsAttachClick() {
+  const conv = CONVERSATIONS.find(c => c.id === activeConvId);
+  if (!conv) return showToast('Select a conversation first.', 'error');
+
+  const input = document.createElement('input');
+  input.type = 'file';
+  input.accept = '.pdf,.doc,.docx,.xls,.xlsx,.png,.jpg,.jpeg';
+  input.addEventListener('change', () => {
+    const file = input.files[0];
+    if (file) uploadCommsAttachment(file, conv);
+  });
+  input.click();
+}
+
+async function uploadCommsAttachment(file, conv) {
+  showToast(`Uploading ${file.name}…`, 'info');
+  try {
+    const formData = new FormData();
+    formData.append('file', file);
+    if (conv.caseId) formData.append('case_id', conv.caseId);
+    formData.append('tags', JSON.stringify([]));
+
+    const res = await ApiClient.postForm('/api/v1/vault/upload', formData);
+    if (!res.ok) throw new Error(res.json?.error || `Upload failed for ${file.name}.`);
+
+    const textarea = $('commsMessageInput');
+    const mention = `📎 Attached: ${file.name} (uploaded to Document Vault${conv.caseId ? ` — ${conv.caseId}` : ''})`;
+    textarea.value = textarea.value ? `${textarea.value}\n${mention}` : mention;
+    textarea.dispatchEvent(new Event('input')); // reuses the existing auto-grow-height listener
+    showToast(`${file.name} uploaded — reference added to your message.`, 'success');
+  } catch (err) {
+    showToast(err.message || 'Failed to upload attachment.', 'error');
+  }
+}
+
+// ── Template (quick action) ───────────────────────────────────────────────
+// Plain string substitution only, per this task's scope — no dynamic
+// merge fields (client name, case number, etc.).
+const COMMS_MESSAGE_TEMPLATES = [
+  { label: 'Case update', text: 'Hi, I wanted to share a quick update on your case. ' },
+  { label: 'Document request', text: 'Hi, could you please provide the following document(s) at your earliest convenience: ' },
+  { label: 'Hearing reminder', text: 'Hi, this is a reminder that your upcoming hearing is scheduled soon — please reach out if you have any questions preparing for it.' }
+];
+
+let commsTemplateMenuEl = null;
+
+function toggleCommsTemplateMenu(anchorBtn) {
+  if (commsTemplateMenuEl) { closeCommsTemplateMenu(); return; }
+
+  const menu = document.createElement('div');
+  menu.style.cssText = `
+    position:absolute; z-index:1000; background:var(--navy-700); color:#fff;
+    border:1px solid rgba(255,255,255,0.1); border-radius:8px;
+    box-shadow:0 8px 24px rgba(0,0,0,0.4); min-width:190px; padding:4px; font-size:13px;
+  `;
+  menu.innerHTML = COMMS_MESSAGE_TEMPLATES.map((t, i) =>
+    `<div class="comms-template-item" data-index="${i}" style="padding:8px 10px; border-radius:6px; cursor:pointer;">${t.label}</div>`
+  ).join('');
+  document.body.appendChild(menu);
+  commsTemplateMenuEl = menu;
+
+  const rect = anchorBtn.getBoundingClientRect();
+  menu.style.top = `${rect.bottom + window.scrollY + 6}px`;
+  menu.style.left = `${rect.left + window.scrollX}px`;
+
+  menu.querySelectorAll('.comms-template-item').forEach(item => {
+    item.addEventListener('mouseenter', () => { item.style.background = 'rgba(255,255,255,0.08)'; });
+    item.addEventListener('mouseleave', () => { item.style.background = ''; });
+    item.addEventListener('click', () => {
+      insertCommsTemplate(COMMS_MESSAGE_TEMPLATES[Number(item.dataset.index)].text);
+      closeCommsTemplateMenu();
+    });
+  });
+
+  // Deferred so the click that just opened the menu doesn't immediately
+  // bubble into this listener and close it again.
+  setTimeout(() => document.addEventListener('click', handleCommsTemplateOutsideClick), 0);
+}
+
+function handleCommsTemplateOutsideClick(e) {
+  if (commsTemplateMenuEl && !commsTemplateMenuEl.contains(e.target)) closeCommsTemplateMenu();
+}
+
+function closeCommsTemplateMenu() {
+  if (commsTemplateMenuEl) {
+    commsTemplateMenuEl.remove();
+    commsTemplateMenuEl = null;
+  }
+  document.removeEventListener('click', handleCommsTemplateOutsideClick);
+}
+
+function insertCommsTemplate(text) {
+  const textarea = $('commsMessageInput');
+  textarea.value = textarea.value ? `${textarea.value}\n${text}` : text;
+  textarea.dispatchEvent(new Event('input'));
+  textarea.focus();
 }
 
 /* ════════════════════════════════════════════
@@ -2380,7 +3503,11 @@ const ApiClient = {
     });
     if (res.status === 401) { handleUnauthenticated(); throw new Error('Not signed in.'); }
     const json = await res.json();
-    if (!json.success && res.status !== 413) throw new Error(json.error || 'API Error');
+    // 413 (storage quota) and 409 (e.g. a conflict-check hit on case
+    // create — see CaseService.createCase) carry structured detail the
+    // caller needs to act on, not just an error string — let those through
+    // instead of throwing so callers can inspect `json`/`status` directly.
+    if (!json.success && res.status !== 413 && res.status !== 409) throw new Error(json.error || 'API Error');
     return { ok: res.ok, status: res.status, json };
   },
   async patch(url, data) {
@@ -2677,6 +3804,7 @@ function setupVaultEventListeners() {
   $('btnIntegrations').addEventListener('click', () => {
     $('integrationsDrawerOverlay').classList.remove('hidden');
   });
+  setupDocumentDetailListeners();
 
   // Context Menu Global Click away
   document.addEventListener('click', (e) => {
@@ -2777,6 +3905,165 @@ async function downloadDocument(docId) {
   }
 }
 
+/* ════════════════════════════════════════════
+   DOCUMENT DETAIL / VERSION HISTORY MODAL
+   Opened from the vault context menu's "Version History" item. Backed by
+   the real document_versions endpoints added alongside this UI
+   (GET/POST /api/v1/files/:id/versions, GET
+   /api/v1/files/:id/versions/:versionId/download) — re-upload here
+   creates a new version instead of overwriting the file, same as every
+   other re-upload path in this app. No diff/redline view in this pass.
+   ════════════════════════════════════════════ */
+
+let docDetailCurrentDocId = null;
+let docDetailListenersInitialized = false;
+
+// `fileName` is optional — the vault context menu (where VaultState.docs
+// is always populated) omits it and relies on the lookup below; the Case
+// File modal's document list passes it directly instead, since that
+// list's documents aren't necessarily part of VaultState.docs (the vault
+// page may never have been visited this session, or this doc may be off
+// the vault's current page/filter).
+function openDocumentDetailModal(docId, fileName) {
+  // Guarded by docDetailListenersInitialized (see setupDocumentDetailListeners
+  // itself) — safe to call every time this modal opens, not just from the
+  // vault page's own setup, since it can also be opened from the Case File
+  // modal without the vault page ever having been visited this session.
+  setupDocumentDetailListeners();
+
+  docDetailCurrentDocId = docId;
+  const doc = VaultState.docs.find(d => d.id === docId);
+  $('docDetailFileName').textContent = fileName || (doc ? doc.file_name : docId);
+
+  $('docDetailNewVersionFile').value = '';
+  $('docDetailVersionComment').value = '';
+  $('docDetailCommentGroup').classList.add('hidden');
+  $('docDetailUploadVersionBtn').disabled = true;
+  $('docDetailUploadVersionBtn').textContent = 'Upload New Version';
+
+  const modal = $('documentDetailModal');
+  modal.classList.remove('hidden');
+  setTimeout(() => modal.classList.add('active'), 10);
+
+  loadDocumentVersions(docId);
+}
+
+function closeDocumentDetailModal() {
+  const modal = $('documentDetailModal');
+  modal.classList.remove('active');
+  setTimeout(() => modal.classList.add('hidden'), 300);
+  docDetailCurrentDocId = null;
+}
+
+async function loadDocumentVersions(docId) {
+  const tbody = $('docDetailVersionsTableBody');
+  tbody.innerHTML = `<tr><td colspan="5" style="text-align:center;color:var(--slate-400)">Loading…</td></tr>`;
+  try {
+    const versions = await ApiClient.get(`/api/v1/files/${docId}/versions`);
+    renderDocumentVersions(versions);
+  } catch (err) {
+    tbody.innerHTML = `<tr><td colspan="5" style="text-align:center;color:var(--slate-400)">Error loading version history</td></tr>`;
+  }
+}
+
+function renderDocumentVersions(versions) {
+  const tbody = $('docDetailVersionsTableBody');
+  if (!versions.length) {
+    tbody.innerHTML = `<tr><td colspan="5" style="text-align:center;color:var(--slate-400)">No versions on file.</td></tr>`;
+    return;
+  }
+  tbody.innerHTML = versions.map(v => `
+    <tr>
+      <td>v${v.version_number}${v.is_current ? ' <span class="status-badge active" style="font-size:10px; padding:1px 6px; margin-left:6px;">Current</span>' : ''}</td>
+      <td>${v.uploaded_by_name || '—'}</td>
+      <td class="activity-time">${new Date(v.uploaded_at).toLocaleDateString('en-US', { month: 'short', day: '2-digit', year: 'numeric' })}</td>
+      <td>${v.comment || '—'}</td>
+      <td><button class="btn-ghost" style="padding:2px 8px; font-size:12px;" onclick="downloadDocumentVersion('${v.id}')">Download</button></td>
+    </tr>
+  `).join('');
+}
+
+// Same auth-aware blob-download approach as downloadDocument above (a
+// plain link/navigation can't attach the Authorization header).
+async function downloadDocumentVersion(versionId) {
+  try {
+    const res = await fetch(`/api/v1/files/${docDetailCurrentDocId}/versions/${versionId}/download`, { headers: { ...Auth.authHeader() } });
+    if (res.status === 401) { handleUnauthenticated(); return; }
+    if (!res.ok) {
+      const json = await res.json().catch(() => ({}));
+      showToast(json.error || 'Download failed.', 'error');
+      return;
+    }
+    const blob = await res.blob();
+    const disposition = res.headers.get('Content-Disposition') || '';
+    const match = /filename="?([^"]+)"?/.exec(disposition);
+    const filename = match ? decodeURIComponent(match[1]) : 'download';
+
+    const objectUrl = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = objectUrl;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(objectUrl);
+  } catch (e) {
+    showToast('Download failed.', 'error');
+  }
+}
+
+// `docDetailNewVersionFile`'s change listener reveals the comment field
+// once a file is chosen — the prompt for an (optional) version comment
+// happens right there, before the user ever clicks Upload, not as a
+// separate confirm() step blocking the actual submit.
+function setupDocumentDetailListeners() {
+  if (docDetailListenersInitialized) return;
+  docDetailListenersInitialized = true;
+
+  $('docDetailModalCloseBtn').addEventListener('click', closeDocumentDetailModal);
+  $('documentDetailModal').addEventListener('click', (e) => { if (e.target === $('documentDetailModal')) closeDocumentDetailModal(); });
+
+  $('docDetailNewVersionFile').addEventListener('change', () => {
+    const hasFile = $('docDetailNewVersionFile').files.length > 0;
+    $('docDetailUploadVersionBtn').disabled = !hasFile;
+    $('docDetailCommentGroup').classList.toggle('hidden', !hasFile);
+  });
+
+  $('docDetailUploadVersionBtn').addEventListener('click', handleUploadNewVersion);
+}
+
+async function handleUploadNewVersion() {
+  const fileInput = $('docDetailNewVersionFile');
+  const file = fileInput.files[0];
+  if (!file || !docDetailCurrentDocId) return;
+
+  const comment = $('docDetailVersionComment').value.trim();
+  const btn = $('docDetailUploadVersionBtn');
+  btn.disabled = true;
+  btn.textContent = 'Uploading…';
+
+  try {
+    const formData = new FormData();
+    formData.append('file', file);
+    if (comment) formData.append('comment', comment);
+
+    const res = await ApiClient.postForm(`/api/v1/files/${docDetailCurrentDocId}/versions`, formData);
+    if (!res.ok) throw new Error(res.json?.error || 'Failed to upload new version.');
+
+    showToast('New version uploaded.', 'success');
+    fileInput.value = '';
+    $('docDetailVersionComment').value = '';
+    $('docDetailCommentGroup').classList.add('hidden');
+    await loadDocumentVersions(docDetailCurrentDocId);
+    await loadVaultFiles(); // the file list's size/updated_at/etc. now reflect the new current version
+  } catch (err) {
+    showToast(err.message || 'Failed to upload new version.', 'error');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Upload New Version';
+  }
+}
+
 $('ctxPreview').addEventListener('click', () => { $('vaultContextMenu').classList.add('hidden'); handlePreview(currentCtxDocId); });
 $('ctxDownload').addEventListener('click', () => { $('vaultContextMenu').classList.add('hidden'); downloadDocument(currentCtxDocId); });
 $('ctxShare').addEventListener('click', () => { $('vaultContextMenu').classList.add('hidden'); openShareDrawer(currentCtxDocId); });
@@ -2787,6 +4074,10 @@ $('ctxFlag').addEventListener('click', async () => {
   loadVaultFiles();
   loadVaultStats();
   showToast('Flag status updated', 'success');
+});
+$('ctxVersions').addEventListener('click', () => {
+  $('vaultContextMenu').classList.add('hidden');
+  openDocumentDetailModal(currentCtxDocId);
 });
 $('ctxDelete').addEventListener('click', async () => {
   $('vaultContextMenu').classList.add('hidden');
@@ -2906,14 +4197,22 @@ async function handlePreview(docId) {
 // File Upload Logic
 let filesToUpload = [];
 
-function openUploadModal() {
+// `caseId` is optional — set (e.g. from the Cases page's "Upload to
+// Document Index" row action) to pre-scope the upload to that case, the
+// same way VaultService.initiateUpload already accepts a case_id server-
+// side. Left undefined, this is the plain Document Vault "Upload Files"
+// button's behavior, unchanged.
+function openUploadModal(caseId) {
   filesToUpload = [];
+  VaultState.presetCaseId = caseId || null;
   renderUploadList();
   if (VaultState.stats) {
     const pct = Math.round((VaultState.stats.storage_used_bytes / VaultState.stats.storage_limit_bytes) * 100);
     $('uploadQuotaFill').style.width = `${pct}%`;
     $('uploadQuotaLabel').textContent = `${VaultState.stats.storage_used_formatted} / ${VaultState.stats.storage_limit_formatted}`;
   }
+  const titleEl = document.querySelector('#uploadModal .vault-modal-title');
+  if (titleEl) titleEl.textContent = caseId ? `Upload Files — ${caseId}` : 'Upload Files';
   openVaultModal('uploadModal');
 }
 
@@ -2989,6 +4288,7 @@ $('uploadSubmitBtn').addEventListener('click', async () => {
       const formData = new FormData();
       formData.append('file', f.file);
       if (VaultState.selectedFolderId) formData.append('folder_id', VaultState.selectedFolderId);
+      if (VaultState.presetCaseId) formData.append('case_id', VaultState.presetCaseId);
       formData.append('tags', JSON.stringify([]));
 
       const res = await ApiClient.postForm('/api/v1/vault/upload', formData);

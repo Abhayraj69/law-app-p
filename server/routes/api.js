@@ -24,6 +24,9 @@ const inviteController = require('../controllers/inviteController');
 const invoiceController = require('../controllers/invoiceController');
 const auditLogController = require('../controllers/auditLogController');
 const storageQuotaController = require('../controllers/storageQuotaController');
+const searchController = require('../controllers/searchController');
+const trustController = require('../controllers/trustController');
+const matterIntakeController = require('../controllers/matterIntakeController');
 
 // Apply Global Tenant Authentication & User Context
 router.use(authMiddleware);
@@ -93,6 +96,33 @@ router.delete(
   vaultController.deleteFile
 );
 
+// C2. DOCUMENT VERSION HISTORY
+// The real re-upload path — until now a fresh upload always created a
+// whole new document row, and PATCH /files/:id only ever touched
+// metadata. Re-upload here creates a new document_versions row and
+// repoints the document at it (never overwrites); GET /files/:id/download
+// above needs no changes to keep serving the current version, since
+// documents.storage_path_url always mirrors the latest version. Same
+// middleware chain and no additional requireRole beyond auth, matching
+// POST /vault/upload's own posture.
+router.get(
+  '/files/:id/versions',
+  vaultController.getVersions
+);
+router.get(
+  '/files/:id/versions/:versionId/download',
+  logAuditAction('DOWNLOAD'),
+  vaultController.downloadVersion
+);
+router.post(
+  '/files/:id/versions',
+  upload.single('file'),
+  enforceStorageQuota,
+  validateAndScanUpload,
+  logAuditAction('UPLOAD_VERSION'),
+  vaultController.uploadVersion
+);
+
 // ═════════════════════════════════════════════════════════════════════
 // D. WIDGETS & INTEGRATIONS
 // ═════════════════════════════════════════════════════════════════════
@@ -134,6 +164,46 @@ router.post('/cases', caseController.createCase);
 router.patch('/cases/:id/archive', requireRole('ASSOCIATE'), caseController.archiveCase);
 
 // ═════════════════════════════════════════════════════════════════════
+// F2. MATTER INTAKE (conflict check -> engagement letter -> signed ->
+// retainer received -> activated)
+// A separate, opt-in path from the quick "New Case" flow above — see
+// server/services/matterIntakeService.js's header comment. Steps that
+// only re-confirm/record something already gated elsewhere (uploading a
+// document, marking a letter sent) sit at the same ASSOCIATE+ floor as
+// archiving a case; steps that override a compliance control (a conflict
+// hit, waiving a retainer) or actually activate the matter are PARTNER+,
+// matching the floor TrustService's own writes and invoice mark-paid use.
+// ═════════════════════════════════════════════════════════════════════
+router.post('/cases/intake', requireRole('ASSOCIATE'), matterIntakeController.startIntake);
+// ASSOCIATE+ only, even to read — conflict-check hit details and retainer
+// amounts are internal firm information a CLIENT has no reason to see,
+// unlike the case record itself (which a CLIENT can read via GET
+// /api/v1/cases/:id, ownership-scoped).
+router.get('/cases/:id/intake', requireRole('ASSOCIATE'), matterIntakeController.getIntake);
+router.post('/cases/:id/intake/conflict-override', requireRole('PARTNER'), matterIntakeController.overrideConflictHold);
+router.post(
+  '/cases/:id/intake/engagement-letter',
+  requireRole('ASSOCIATE'),
+  upload.single('file'),
+  enforceStorageQuota,
+  validateAndScanUpload,
+  matterIntakeController.attachEngagementLetter
+);
+router.post('/cases/:id/intake/engagement-letter/sent', requireRole('ASSOCIATE'), matterIntakeController.markEngagementLetterSent);
+router.post(
+  '/cases/:id/intake/signed',
+  requireRole('ASSOCIATE'),
+  upload.single('file'),
+  enforceStorageQuota,
+  validateAndScanUpload,
+  matterIntakeController.attachSignedDocument
+);
+router.post('/cases/:id/intake/retainer', requireRole('PARTNER'), matterIntakeController.linkRetainer);
+router.post('/cases/:id/intake/retainer/waive', requireRole('PARTNER'), matterIntakeController.waiveRetainer);
+router.post('/cases/:id/intake/activate', requireRole('PARTNER'), matterIntakeController.activate);
+router.post('/cases/:id/intake/decline', requireRole('ASSOCIATE'), matterIntakeController.decline);
+
+// ═════════════════════════════════════════════════════════════════════
 // G. CLIENT COMMUNICATIONS
 // ═════════════════════════════════════════════════════════════════════
 router.get('/conversations', communicationsController.listConversations);
@@ -152,6 +222,30 @@ router.get('/invoices', invoiceController.listInvoices);
 router.post('/invoices', requireRole('ASSOCIATE'), invoiceController.createInvoice);
 router.patch('/invoices/:id', requireRole('ASSOCIATE'), invoiceController.updateInvoice);
 router.patch('/invoices/:id/mark-paid', requireRole('PARTNER'), invoiceController.markInvoicePaid);
+
+// ═════════════════════════════════════════════════════════════════════
+// G3. TRUST ACCOUNTING
+// Client trust funds (retainers) held on a client's behalf, segregated
+// from invoices/operating revenue — see server/services/trustService.js
+// for why. Every route here, reads included, is gated to PARTNER+: unlike
+// billing (ASSOCIATE+ can create/edit invoices), trust ledgers are
+// restricted to the roles who bear bar-discipline responsibility for
+// them, not opened to every staff role by default. TrustService itself
+// does its own audit logging (TRUST_DEPOSIT/DISBURSEMENT/etc.), so no
+// logAuditAction middleware is layered on here.
+// ═════════════════════════════════════════════════════════════════════
+router.get('/trust/accounts', requireRole('PARTNER'), trustController.listAccounts);
+router.post('/trust/accounts', requireRole('PARTNER'), trustController.createAccount);
+router.get('/trust/client-ledgers', requireRole('PARTNER'), trustController.listClientLedgers);
+router.post('/trust/client-ledgers', requireRole('PARTNER'), trustController.createClientLedger);
+router.get('/trust/client-ledgers/:id/transactions', requireRole('PARTNER'), trustController.listTransactions);
+router.post('/trust/deposits', requireRole('PARTNER'), trustController.recordDeposit);
+router.post('/trust/disbursements', requireRole('PARTNER'), trustController.recordDisbursement);
+router.post('/trust/transfers', requireRole('PARTNER'), trustController.transferToOperating);
+router.post('/trust/transactions/:id/reverse', requireRole('PARTNER'), trustController.reverseTransaction);
+router.get('/trust/reconciliation', requireRole('PARTNER'), trustController.getReconciliation);
+router.post('/trust/reconciliation', requireRole('PARTNER'), trustController.saveReconciliation);
+router.get('/trust/reconciliation/history', requireRole('PARTNER'), trustController.listReconciliationHistory);
 
 // ═════════════════════════════════════════════════════════════════════
 // H. ADMIN — TEAM / USER PROVISIONING
@@ -187,10 +281,33 @@ router.get('/admin/audit-logs', requireRole('ADMIN'), auditLogController.listAud
 router.get('/admin/storage-quota', requireRole('ADMIN'), storageQuotaController.getQuota);
 router.patch('/admin/storage-quota', requireRole('ADMIN'), storageQuotaController.updateQuota);
 
+// ═════════════════════════════════════════════════════════════════════
 // I. AI COPILOT TOOLS
+// No requireRole() here on purpose: manageFiles and createOrUpdateCase
+// each share one route across several actions/fields with different
+// privilege floors (manageFiles' delete vs. move/rename/tag;
+// createOrUpdateCase's lead_attorney/closing-status vs. everything else),
+// so a single route-level requireRole() would either block actions that
+// should stay open to any authenticated staff role, or (worse) leave a
+// privileged action unguarded. The equivalent checks live inside
+// copilotController.js itself, per action/field, and are enforced
+// regardless of the HITL `approved` flag — see the SECURITY NOTE at the
+// top of that file.
+// ═════════════════════════════════════════════════════════════════════
 router.post('/copilot/search', copilotController.validateToolInput('searchVault'), copilotController.searchVault);
 router.post('/copilot/summarize', copilotController.validateToolInput('summarizeDocument'), copilotController.summarizeDocument);
 router.post('/copilot/manage-files', copilotController.validateToolInput('manageFiles'), copilotController.manageFiles);
 router.post('/copilot/cases', copilotController.validateToolInput('createOrUpdateCase'), copilotController.createOrUpdateCase);
+
+// ═════════════════════════════════════════════════════════════════════
+// J. GLOBAL SEARCH (OMNIBOX)
+// Read-only, open to any authenticated staff role (no requireRole) —
+// same floor GET /api/v1/cases and GET /api/v1/invoices already use.
+// Role/ownership scoping is enforced inside SearchService itself, by
+// reusing the same role-scoped reads the Active Cases and Document
+// Vault pages use, not by gating the route — see
+// server/services/searchService.js.
+// ═════════════════════════════════════════════════════════════════════
+router.get('/search', searchController.search);
 
 module.exports = router;

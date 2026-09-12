@@ -66,7 +66,11 @@ app.use((err, req, res, next) => {
   const status = err.status || err.statusCode || 500;
   res.status(status).json({
     error: err.message || 'Internal Server Error',
-    code: err.code || 'SERVER_ERROR'
+    code: err.code || 'SERVER_ERROR',
+    // Only CONFLICT_CHECK_HIT (see CaseService.createCase) sets this —
+    // structured match detail the New Case modal needs to render the
+    // conflict-warning step, not just a generic error string.
+    ...(err.conflicts ? { conflicts: err.conflicts } : {})
   });
 });
 

@@ -1,5 +1,6 @@
 const db = require('../db');
 const VaultService = require('./vaultService');
+const ConflictCheckService = require('./conflictCheckService');
 
 /**
  * Case Service
@@ -88,6 +89,7 @@ function toCaseView(row) {
     client: row.client_name,
     opposingParty: row.opposing_party,
     opposingCounsel: row.opposing_counsel,
+    relatedEntities: row.related_entities || [],
     status: row.status,
     attorney: shorthandName(row.lead_attorney_name),
     lead_attorney_id: row.lead_attorney_id,
@@ -457,9 +459,24 @@ class CaseService {
    * `auditAction` lets a caller other than the plain case-create API
    * (namely the Copilot) attribute the audit log entry accurately —
    * defaults to the human-UI action name.
+   *
+   * Before the case is inserted, ConflictCheckService compares its parties
+   * (client, opposing party/counsel, related entities) against the firm's
+   * existing case history. A hit does NOT silently block creation —
+   * simple normalized-name matching produces false positives — but it does
+   * stop this call short of inserting anything: the caller gets a 409 with
+   * the matches attached (see err.conflicts) so the UI can show them, and
+   * must resubmit with `conflictOverride: true` plus a non-empty
+   * `conflictOverrideReason` to actually create the case. Every check
+   * (clear, hit, or override) is logged via the audit log, per the
+   * existing convention of stashing case-scoped info in `details` JSONB
+   * rather than a `case_id` column (audit_logs has none).
    */
   static async createCase(tenantId, actingUser, payload = {}, auditAction = 'CREATE_CASE') {
-    const { title, client, opposingParty, opposingCounsel, area, attorney, status, hearing, description } = payload;
+    const {
+      title, client, opposingParty, opposingCounsel, area, attorney, status, hearing, description,
+      relatedEntities, conflictOverride, conflictOverrideReason
+    } = payload;
 
     if (!title || !title.trim() || !client || !client.trim()) {
       const err = new Error('Case title and client name are required.');
@@ -473,11 +490,63 @@ class CaseService {
       throw err;
     }
 
+    const cleanRelatedEntities = Array.isArray(relatedEntities)
+      ? relatedEntities.map(e => (e || '').trim()).filter(Boolean)
+      : [];
+
     const matchedAttorney = await this.resolveAttorneyByShorthand(tenantId, attorney);
 
     const year = new Date().getFullYear();
     const maxNum = await db.getMaxCaseNumber(tenantId);
     const id = `LC-${year}-${String(maxNum + 1).padStart(3, '0')}`;
+
+    const { matches } = await ConflictCheckService.checkConflicts(tenantId, {
+      client: client.trim(),
+      opposingParty: opposingParty || null,
+      opposingCounsel: opposingCounsel || null,
+      relatedEntities: cleanRelatedEntities
+    });
+
+    if (matches.length && !conflictOverride) {
+      await db.insertAuditLog({
+        firmId: tenantId,
+        userId: actingUser ? actingUser.id : null,
+        action: 'CONFLICT_CHECK_HIT',
+        details: { case_id: id, case_name: title.trim(), matches }
+      });
+
+      const err = new Error(
+        `Potential conflict of interest found against ${matches.length} existing case${matches.length === 1 ? '' : 's'}. ` +
+        'Review the matches and resubmit with an explicit override to proceed.'
+      );
+      err.status = 409;
+      err.code = 'CONFLICT_CHECK_HIT';
+      err.conflicts = matches;
+      throw err;
+    }
+
+    if (matches.length && conflictOverride) {
+      if (!conflictOverrideReason || !conflictOverrideReason.trim()) {
+        const err = new Error('An override reason is required to proceed past a conflict check hit.');
+        err.status = 400;
+        throw err;
+      }
+      await db.insertAuditLog({
+        firmId: tenantId,
+        userId: actingUser ? actingUser.id : null,
+        action: 'CONFLICT_CHECK_OVERRIDE',
+        details: { case_id: id, case_name: title.trim(), matches, overrideReason: conflictOverrideReason.trim() }
+      });
+    }
+
+    if (!matches.length) {
+      await db.insertAuditLog({
+        firmId: tenantId,
+        userId: actingUser ? actingUser.id : null,
+        action: 'CONFLICT_CHECK_CLEAR',
+        details: { case_id: id, case_name: title.trim() }
+      });
+    }
 
     await db.insertCase({
       id,
@@ -489,7 +558,8 @@ class CaseService {
       status: status || 'active',
       leadAttorneyId: matchedAttorney ? matchedAttorney.id : null,
       caseType: area || null,
-      description: description || null
+      description: description || null,
+      relatedEntities: cleanRelatedEntities
     });
 
     if (hearing && hearing.trim() && hearing.trim().toLowerCase() !== 'none') {

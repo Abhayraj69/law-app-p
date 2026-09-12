@@ -611,6 +611,9 @@ const MessagesView = {
   },
 
   renderThreadList() {
+    // c.unread is already viewer-relative from the server (unread messages
+    // FROM STAFF, for this CLIENT viewer) — see listConversationsForUser
+    // in server/db.js. Don't reinterpret it here; just render the count.
     $('threadList').innerHTML = this.conversations.map(c => `
       <button class="portal-thread-item ${c.id === this.selectedId ? 'active' : ''}" data-id="${escapeHtml(c.id)}">
         <div class="portal-thread-item-top">

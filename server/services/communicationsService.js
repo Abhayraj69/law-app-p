@@ -129,7 +129,7 @@ class CommunicationsService {
     const viewerIsStaff = isStaff(user);
     const conv = await db.getConversationWithMessages(tenantId, conversationId, user, viewerIsStaff);
     if (!conv) throw notFound();
-    await db.markConversationRead(conversationId);
+    await db.markConversationRead(conversationId, viewerIsStaff);
     return toConversationDetailView(conv, viewerIsStaff);
   }
 

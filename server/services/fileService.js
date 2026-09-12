@@ -33,12 +33,19 @@ function tenantDir(tenantId) {
 /**
  * Persist an uploaded file buffer to disk for a given (already-created)
  * document id. Returns the path stored on the document record.
+ *
+ * `versionNumber` is baked into the stored filename (not just the docId)
+ * so that re-uploading the same original filename for the same document
+ * never collides on disk with an earlier version's bytes — each version
+ * is a real, independently-downloadable file, never overwritten. Always
+ * required now (fresh uploads pass 1) rather than optional, so this can't
+ * silently regress back to the old docId-only scheme.
  */
-async function saveUploadedFile(tenantId, docId, originalName, buffer) {
+async function saveUploadedFile(tenantId, docId, versionNumber, originalName, buffer) {
   const dir = tenantDir(tenantId);
   await fs.promises.mkdir(dir, { recursive: true });
 
-  const storedName = `${docId}_${safeFileName(originalName)}`;
+  const storedName = `${docId}_v${versionNumber}_${safeFileName(originalName)}`;
   const absolutePath = path.join(dir, storedName);
   await fs.promises.writeFile(absolutePath, buffer);
 
@@ -135,6 +142,126 @@ class FileService {
       },
       stream: fs.createReadStream(absolutePath)
     };
+  }
+
+  /**
+   * GET /api/v1/files/:id/versions
+   * Lists every version of a document, newest first. Ownership is checked
+   * the same way getPreview/getDownloadStream check it (passing `user`
+   * scopes a CLIENT caller to only their own cases' documents).
+   */
+  static async getVersions(tenantId, docId, user) {
+    const doc = await db.getDocumentById(tenantId, docId, user);
+    if (!doc) {
+      const err = new Error(`Document '${docId}' not found.`);
+      err.status = 404;
+      throw err;
+    }
+
+    const versions = await db.listDocumentVersions(tenantId, docId);
+    return versions.map(v => ({
+      id: v.id,
+      version_number: v.version_number,
+      original_name: v.original_name,
+      file_type: v.file_type,
+      file_size_bytes: v.file_size_bytes,
+      uploaded_by: v.uploaded_by,
+      uploaded_by_name: v.uploaded_by_name,
+      uploaded_at: v.uploaded_at,
+      comment: v.comment,
+      is_current: v.version_number === doc.version
+    }));
+  }
+
+  /**
+   * GET /api/v1/files/:id/versions/:versionId/download
+   * Streams one specific past version's bytes — everything about this
+   * mirrors getDownloadStream above except the row/path it resolves from.
+   * `versionId` addresses a document_versions.id (its own UUID), not a
+   * version_number, so it's an unambiguous single-resource lookup.
+   */
+  static async getVersionDownloadStream(tenantId, docId, versionId, user) {
+    const doc = await db.getDocumentById(tenantId, docId, user);
+    if (!doc) {
+      const err = new Error(`Document '${docId}' not found.`);
+      err.status = 404;
+      throw err;
+    }
+
+    const version = await db.getDocumentVersionById(tenantId, docId, versionId);
+    if (!version) {
+      const err = new Error(`Version '${versionId}' not found for document '${docId}'.`);
+      err.status = 404;
+      throw err;
+    }
+
+    let absolutePath;
+    try {
+      absolutePath = resolveStoragePath(version.storage_path_url);
+    } catch {
+      absolutePath = null;
+    }
+
+    if (!absolutePath || !fs.existsSync(absolutePath)) {
+      const err = new Error(
+        `'${version.original_name}' (version ${version.version_number}) has no real file content on disk — ` +
+        `it may be a seed/demo record that was never actually uploaded, or its stored file is missing.`
+      );
+      err.status = 404;
+      err.code = 'NO_FILE_CONTENT';
+      throw err;
+    }
+
+    return {
+      version,
+      headers: {
+        'Content-Type': version.file_type || 'application/octet-stream',
+        'Content-Length': version.file_size_bytes,
+        'Content-Disposition': `attachment; filename="${encodeURIComponent(version.original_name)}"`
+      },
+      stream: fs.createReadStream(absolutePath)
+    };
+  }
+
+  /**
+   * POST /api/v1/files/:id/versions
+   * Re-upload: the actual replace-the-file path that never existed before
+   * this — a fresh upload always inserted a whole new document row, and
+   * PATCH /api/v1/files/:id only ever touched metadata. This adds a new
+   * document_versions row and repoints the document at it (see
+   * db.insertDocumentVersionAndPromote) rather than overwriting anything.
+   */
+  static async uploadNewVersion(tenantId, userId, docId, file, comment, user) {
+    if (!file || !file.buffer) {
+      const err = new Error('No file content received.');
+      err.status = 400;
+      throw err;
+    }
+
+    const doc = await db.getDocumentById(tenantId, docId, user);
+    if (!doc) {
+      const err = new Error(`Document '${docId}' not found.`);
+      err.status = 404;
+      throw err;
+    }
+
+    const nextVersion = doc.version + 1;
+    const fileName = file.originalname;
+    const { storage_path_url } = await saveUploadedFile(tenantId, docId, nextVersion, fileName, file.buffer);
+
+    const version = await db.insertDocumentVersionAndPromote({
+      firmId: tenantId,
+      documentId: docId,
+      versionNumber: nextVersion,
+      storagePathUrl: storage_path_url,
+      originalName: fileName,
+      fileType: file.mimetype || 'application/octet-stream',
+      fileSizeBytes: file.size,
+      uploadedBy: userId,
+      comment: comment || null
+    });
+
+    return { ...version, is_current: true };
   }
 
   /**

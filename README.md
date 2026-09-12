@@ -27,6 +27,20 @@ section before assuming a feature is wired up.
   response before a `CLIENT` ever sees them, not just hidden in the UI. See
   `server/test/roleScoping.test.js` for tests that actively attempt the
   forbidden reads.
+- **Client Portal** — a separate, simplified app for `CLIENT`-role users at
+  `/portal` (`client-portal.html`, `client-portal.js`, `client-portal.css`),
+  routed explicitly in `server/server.js` ahead of the staff SPA's catch-all.
+  It is not the staff SPA with filtered responses — it's its own small
+  script with its own routes (My Cases, case detail, Documents, Messages,
+  Invoices) calling the same role-scoped API the staff app calls. Real
+  access control is server-side on every API call the page makes; the
+  client-side guard is a UX redirect only. See "Client Portal" below for
+  what it does and doesn't support yet.
+- **`GET /api/v1/invoices`** — a real, role-scoped, read-only endpoint
+  listing invoices (`server/routes/api.js`, invoice controller/service).
+  Write endpoints also exist (`POST /api/v1/invoices`,
+  `PATCH /api/v1/invoices/:id`, `PATCH /api/v1/invoices/:id/mark-paid`,
+  gated by role) and back the staff Billing page.
 - **AI Copilot drawer** — search, summarize, manage-files, and case-update
   tools under `/api/v1/copilot/*` (`server/controllers/copilotController.js`).
   Mutative tools (`manageFiles`, `createOrUpdateCase`) use a human-in-the-loop
@@ -69,26 +83,115 @@ section before assuming a feature is wired up.
   `server/db.js` (see `server/db/pool.js` for the connection pool and
   `server/db/migrate.js` for the migration runner). Nothing resets on
   restart; the server refuses to boot at all if it can't reach Postgres.
+  `db/migrations/0009_case_description.sql` adds a nullable free-text
+  `description` column to `cases` — surfaced on the Client Portal's case
+  detail view, and editable by staff or the AI Copilot via the same
+  `updateCaseFields` path already used for status/opposing-party edits.
 - **Message encryption at rest** — `conversation_messages.body` is
   encrypted with AES-256-GCM under a KMS-managed key (envelope
   encryption), required outside `NODE_ENV=development` the same way
   ClamAV is. See "Message encryption" below for the full design, key
   management approach, and the migration plan for pre-existing plaintext
   messages.
+- **The global omnibox search** — real and role-scoped
+  (`GET /api/v1/search`, `server/services/searchService.js`), matching
+  against the same already-role-scoped case and document reads the Active
+  Cases and Document Vault pages use (`CaseService.listCases`,
+  `db.listActiveDocuments`), plus a client-name facet derived from that
+  same case list. A `CLIENT`-role caller can't discover another client's
+  case, document, or name through it. This replaces what used to be a
+  hardcoded `SEARCH_DATA` array in `app.js`.
+- **Trust Accounting** — client trust funds (retainers), deliberately kept
+  structurally separate from `invoices`/operating revenue rather than
+  just a column on the same table: `trust_accounts`,
+  `trust_client_ledgers`, and an append-only `trust_transactions` ledger
+  (`db/migrations/0014_trust_ledger.sql`,
+  `server/services/trustService.js`, `/api/v1/trust/*`). Deposits and
+  disbursements are rejected if they'd take a client's ledger negative; a
+  correction is always a new reversing entry, never an edit or delete of
+  an existing one. The only path from trust into firm revenue is
+  "transfer to operating," which atomically marks the linked invoice paid
+  in the same database transaction as the trust withdrawal — a client's
+  retainer can never be shown as drawn down while the invoice it paid
+  stays unpaid, or vice versa. A three-way reconciliation
+  (bank-statement balance vs. ledger balance vs. sum of client ledger
+  balances) can be computed live and saved as a dated snapshot. Every
+  route, reads included, is gated to `PARTNER`+ — stricter than billing's
+  `ASSOCIATE`+ floor — and none of it is reachable from the AI Copilot.
+- **Matter Intake workflow** — an opt-in alternative to the plain "New
+  Case" button that walks a new matter through
+  `CONFLICT_PENDING → (CONFLICT_HOLD → CONFLICT_CLEARED) →
+  ENGAGEMENT_LETTER_DRAFTED → ENGAGEMENT_LETTER_SENT → SIGNED →
+  RETAINER_RECEIVED → ACTIVATED` before it can ever reach
+  `cases.status = 'active'` (`db/migrations/0015_case_intake.sql`,
+  `server/services/matterIntakeService.js`,
+  `POST /api/v1/cases/intake` and `/api/v1/cases/:id/intake/*`). A
+  conflict-check hit lands the matter in `CONFLICT_HOLD`, which blocks
+  every later step until a `PARTNER`+ clears it as its own explicit,
+  reasoned action — never as a side effect of the same request that
+  created the case. The retainer step reuses Trust Accounting's real
+  deposit endpoint rather than a separate mechanism (or can be explicitly
+  waived, for contingency/pro bono matters). Activation itself
+  (`CaseService`'s case row and `case_intake`'s state flip together in
+  one transaction) hard-refuses unless every prior step is satisfied.
+  Cases created through the ordinary "New Case" modal are untouched by
+  any of this — they still activate immediately, exactly as before.
+- **Document version history** — re-uploading a file creates a new
+  version instead of overwriting it (`document_versions` table,
+  `db/migrations/0016_document_versions.sql`,
+  `POST/GET /api/v1/files/:id/versions`,
+  `GET /api/v1/files/:id/versions/:versionId/download`). Every existing
+  document was backfilled as its own version 1 on migration, and
+  `GET /api/v1/files/:id/download` needed no code changes to keep serving
+  whichever version is current. A "Version History" panel (uploader,
+  timestamp, optional comment, a "Current" badge, and a per-version
+  download link) is reachable from the Document Vault's file context menu
+  and from a document's row in the Case File detail view's document list.
+  No diff/redline view yet — see "What's still mock/static" below.
+- **"Open Case File," "Upload to Document Index," and "Message via
+  Client Portal"** (Active Cases page row actions) all do something real
+  now, reusing existing views rather than each getting its own: "Open
+  Case File" opens a read-only Case File modal (overview, documents,
+  deadlines, activity — the same endpoints the Client Portal already
+  reads); "Upload to Document Index" opens the Document Vault's own
+  upload modal pre-scoped to that case; "Message via Client Portal" opens
+  that case's real conversation in Communications (or says plainly that
+  no thread exists yet, if one doesn't).
+- **Two of the Communications composer's three quick-action buttons** —
+  "Attach" really uploads through the same vault upload pipeline
+  (`POST /api/v1/vault/upload`) and references the result in the message
+  as editable text (`conversation_messages` has no attachment column, so
+  this stops short of a structured attachment — see "What's still
+  mock/static" if you want that built properly); "Template" inserts one
+  of a small fixed set of canned messages (plain string substitution, no
+  merge fields). The third, "Request Signature," is intentionally still
+  decorative — see below.
 
 ## What's still mock/static
 
-- **The global omnibox search** (`SEARCH_DATA` near the top of `app.js`) is
-  hardcoded and does not hit the backend. It was out of scope for the
-  Dashboard/Cases/Communications pass — flagged here rather than silently
-  left pretending to be real.
+- **E-signature is not integrated anywhere in the app.** The message
+  composer's "Request Signature" quick action is a disabled button
+  labeled "Coming soon" (`index.html`) rather than a toast that implied a
+  real request was sent. Matter Intake's "signed" step (see above) is
+  satisfied by a staff member manually uploading a countersigned
+  document, not a real e-signature flow — that upload's `signed_document_id`
+  is deliberately just a document id + timestamp so a future e-signature
+  provider integration (DocuSign, HelloSign, etc.) can slot in without a
+  schema change, but no such provider is wired up today.
+- **Document version history has no diff/redline view.** You can list and
+  download any past version (see above), but there's no side-by-side or
+  inline comparison between two versions.
+- **The message composer's "Attach" quick action doesn't produce a real,
+  structured message attachment** — see above. The file is genuinely
+  uploaded and stored; the message only carries a plain-text reference to
+  it, because `conversation_messages` has no attachment column.
 
-If you want the search page to become real, the pattern to copy is the
-same one the Document Vault, Dashboard, Cases, and Communications pages
-already follow: a service in `server/services/`, a controller in
-`server/controllers/`, a route in `server/routes/api.js`, and (for a
-frontend feature) replacing the hardcoded array/render function in
-`app.js` with an `ApiClient` call.
+If you want any of the above to become fully real, the pattern to copy is
+the same one every other real feature in this app already follows: a
+service in `server/services/`, a controller in `server/controllers/`, a
+route in `server/routes/api.js`, and (for a frontend feature) replacing
+the hardcoded/decorative markup in `app.js`/`index.html` with an
+`ApiClient` call against it.
 
 ## Running it locally
 
@@ -123,11 +226,10 @@ one of the seed accounts:
 
 The two `CLIENT`-role accounts exist specifically to demonstrate/exercise
 role scoping — each can only see their own case and conversation, never the
-other's (see `server/test/roleScoping.test.js`). The app's UI itself isn't
-built as a client-facing portal yet (no page hides staff-only controls from
-a `CLIENT` session), so logging in as one of these accounts shows the same
-staff UI with API responses quietly filtered — the enforcement is real, the
-tailored client experience isn't built yet.
+other's (see `server/test/roleScoping.test.js`). Logging in as one of these
+accounts lands on the real Client Portal at `/portal` (`client-portal.html`
+/ `client-portal.js`), not the staff SPA — see "Client Portal" below for
+what it covers.
 
 Each account gets its **own** password, generated and printed once by
 `npm run seed` (or set in advance via `SEED_MORGAN_PASSWORD` /
@@ -159,6 +261,30 @@ curl -s -X POST http://localhost:3000/api/v1/admin/invites \
   -d '{"email":"new.hire@slf.law","fullName":"New Hire","role":"ASSOCIATE"}'
 # -> { "data": { "invite_path": "/accept-invite.html?token=..." , ... } }
 ```
+
+### Client Portal
+
+`CLIENT`-role users sign in at the same login screen and land on `/portal`
+(`client-portal.html`, `client-portal.js`, `client-portal.css`) — a separate,
+simplified app from the staff SPA, routed explicitly in `server/server.js`
+ahead of the staff catch-all. It has its own small router with its own
+views: **My Cases** (a card grid of the client's own cases), a **case
+detail** view (status, opposing party/counsel, and the free-text
+`description` field added by `db/migrations/0009_case_description.sql`),
+**Documents**, **Messages**, and **Invoices**. All of it calls the same
+role-scoped API the staff app calls — the client-side route guard is a UX
+convenience only; the real enforcement is server-side on every request
+(see `server/test/roleScoping.test.js`).
+
+What it does **not** support yet:
+
+- **No account self-service** — a client cannot sign up, reset their own
+  password, or change their profile from the portal. Accounts are
+  provisioned the same admin-invite way as staff accounts (see "Adding a
+  user" above); a client's password is set once via that invite link.
+- **No notifications** — there's no email/push/in-app alert when a new
+  document, message, or invoice appears. The portal only shows current
+  state when a client happens to load a page.
 
 ### Getting a Postgres without Docker or admin rights
 
@@ -361,11 +487,15 @@ work end to end.
 - **No email/SMTP integration** — an ADMIN's invite link (see "Adding a
   user" below) is shown once in the UI for them to relay however they
   currently reach new hires; nothing is emailed automatically.
-- **The global omnibox search is still mock/absent**, as described in
-  "What's still mock/static" above.
-- **The dashboard's hearings widget (`case_deadlines`) and client-messages
-  widget (`client_messages`) are firm-wide, not client-scoped** — those two
-  tables have no per-client ownership column in the schema. This app is
-  built for firm staff, not as a client-facing portal (see the note on the
-  `CLIENT` demo accounts above); the case and conversation APIs that a
-  client-portal experience would actually depend on ARE fully role-scoped.
+- **No e-signature provider is integrated** — see "What's still
+  mock/static" above for exactly what that leaves decorative or
+  manual-upload-only.
+- **The staff Dashboard's hearings widget (`case_deadlines`) and
+  client-messages widget (`client_messages`) are firm-wide, not
+  client-scoped** — those two tables have no per-client ownership column
+  in the schema. This doesn't affect the Client Portal (`/portal`, see
+  "Client Portal" above), which doesn't use the staff dashboard or these
+  two widgets at all — the case and conversation APIs it actually depends
+  on ARE fully role-scoped.
+- **Client Portal has no account self-service or notifications** — see
+  "Client Portal" above for exactly what's covered.

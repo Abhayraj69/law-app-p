@@ -107,6 +107,42 @@ async function deleteFile(req, res, next) {
   }
 }
 
+async function getVersions(req, res, next) {
+  try {
+    const versions = await FileService.getVersions(req.tenantId, req.params.id, req.user);
+    res.json({ success: true, data: versions });
+  } catch (err) {
+    next(err);
+  }
+}
+
+async function downloadVersion(req, res, next) {
+  try {
+    const download = await FileService.getVersionDownloadStream(req.tenantId, req.params.id, req.params.versionId, req.user);
+    res.setHeader('Content-Type', download.headers['Content-Type']);
+    res.setHeader('Content-Disposition', download.headers['Content-Disposition']);
+    res.setHeader('Content-Length', download.headers['Content-Length']);
+    download.stream.on('error', next);
+    download.stream.pipe(res);
+  } catch (err) {
+    next(err);
+  }
+}
+
+async function uploadVersion(req, res, next) {
+  try {
+    if (!req.file) {
+      const err = new Error('No file content received.');
+      err.status = 400;
+      throw err;
+    }
+    const version = await FileService.uploadNewVersion(req.tenantId, req.user.id, req.params.id, req.file, req.body?.comment, req.user);
+    res.status(201).json({ success: true, data: version });
+  } catch (err) {
+    next(err);
+  }
+}
+
 // D. Widgets & Integrations
 async function getQuickAccess(req, res, next) {
   try {
@@ -166,6 +202,9 @@ module.exports = {
   shareFile,
   patchFile,
   deleteFile,
+  getVersions,
+  downloadVersion,
+  uploadVersion,
   getQuickAccess,
   getFlaggedMessages,
   getDeadlines,

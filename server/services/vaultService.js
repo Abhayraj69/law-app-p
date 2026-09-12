@@ -202,7 +202,10 @@ class VaultService {
     // arbitrary string, or the insert below fails.
     const docId = crypto.randomUUID();
 
-    const { storage_path_url, sha256 } = await FileService.saveUploadedFile(tenantId, docId, fileName, file.buffer);
+    // A brand-new document's first (and, until re-uploaded, only) file is
+    // always version 1 — matches the `version` column's own default on
+    // the documents row inserted below.
+    const { storage_path_url, sha256 } = await FileService.saveUploadedFile(tenantId, docId, 1, fileName, file.buffer);
 
     if (case_id) {
       await db.ensureCase(tenantId, case_id, null, null);
@@ -226,6 +229,18 @@ class VaultService {
       is_flagged: false,
       is_deleted: false,
       tags: parsedTags
+    });
+
+    // So this document has a complete version history from the moment it
+    // exists (see db.insertInitialDocumentVersion's own comment) rather
+    // than only gaining one on its first re-upload.
+    await db.insertInitialDocumentVersion({
+      documentId: docId,
+      storagePathUrl: storage_path_url,
+      originalName: fileName,
+      fileType: file.mimetype || 'application/octet-stream',
+      fileSizeBytes: file.size,
+      uploadedBy: userId
     });
 
     return { document: { ...newDoc, is_real_upload: true } };

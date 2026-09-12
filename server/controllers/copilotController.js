@@ -15,9 +15,13 @@
  * `approved: true` is a value the caller supplies in the request body, so
  * treating it as proof of authorization would let anyone self-certify their
  * own mutation. The actual authorization boundary is the role checks below
- * (hasMinRole / requireCaseChangeRole), which mirror the requireRole()
- * floors already enforced on the equivalent direct routes (e.g. DELETE
- * /api/v1/files/:id -> ASSOCIATE, see server/routes/api.js) and are applied
+ * (hasMinRole / requireCaseChangeRole). manageFiles' delete floor mirrors
+ * the requireRole() floor already enforced on the equivalent direct route
+ * (DELETE /api/v1/files/:id -> ASSOCIATE, see server/routes/api.js).
+ * createOrUpdateCase's floor for lead-attorney reassignment or closing a
+ * case (PARTNER+) is deliberately stricter than any single direct route,
+ * since no other route change reaches both of those at once — see
+ * requireCaseChangeRole below for the exact rule. Both are applied
  * regardless of `approved`, so a caller can't reach a privileged mutation
  * just by skipping straight to the commit call with approved:true.
  */
@@ -57,29 +61,48 @@ function hasMinRole(user, minRole) {
   return userLevel >= requiredLevel;
 }
 
-function forbiddenError(message) {
-  const err = new Error(message);
+// Same wording requireRole() (server/middleware/auth.js) already returns
+// for a route-level 403, so a role failure looks identical to the caller
+// whether it came from a direct route or from one of these per-action
+// checks inside a Copilot tool.
+function roleErrorMessage(user, minRole) {
+  return `Forbidden: Role '${user && user.role}' lacks sufficient privilege. Required: '${minRole}'.`;
+}
+
+function forbiddenError(user, minRole, detail) {
+  const err = new Error(roleErrorMessage(user, minRole) + (detail ? ` (${detail})` : ''));
   err.status = 403;
   err.code = 'INSUFFICIENT_ROLE';
   return err;
 }
 
-// Status changes and lead-attorney reassignment are the two case fields
-// with real seniority consequences (closing/reopening a matter, handing it
-// to a different attorney) — opposing-party/case-type edits are left
-// ungated, same as before. Checked against whatever payload governs the
-// call it's guarding (the proposal payload for the HITL preview, the
-// executable payload for the commit) since the two can legitimately
-// differ, and `approved: true` alone must never be enough to bypass this
-// (see the SECURITY NOTE at the top of this file).
+// Lead-attorney reassignment and closing a case (the only terminal status
+// — see VALID_STATUSES in caseService.js) are the two case changes with
+// real seniority consequences: handing a matter to a different attorney,
+// or ending it outright. Those require PARTNER or higher. Any other
+// status transition (e.g. active -> pending -> urgent) keeps the lower
+// ASSOCIATE floor it already had; opposing-party/case-type/description
+// edits stay fully ungated, same as before — this function must never
+// tighten those. Checked against whatever payload governs the call it's
+// guarding (the proposal payload for the HITL preview, the executable
+// payload for the commit) since the two can legitimately differ, and
+// `approved: true` alone must never be enough to bypass this (see the
+// SECURITY NOTE at the top of this file).
 function requireCaseChangeRole(user, payload) {
-  const changesStatus = Object.prototype.hasOwnProperty.call(payload || {}, 'status');
   const changesAttorney = Object.prototype.hasOwnProperty.call(payload || {}, 'lead_attorney');
-  if (!changesStatus && !changesAttorney) return;
-  if (hasMinRole(user, 'ASSOCIATE')) return;
+  const changesStatus = Object.prototype.hasOwnProperty.call(payload || {}, 'status');
+  const closesCase = changesStatus && payload.status === 'closed';
 
-  const fields = [changesStatus && 'status', changesAttorney && 'lead_attorney'].filter(Boolean).join(' and ');
-  throw forbiddenError(`Forbidden: changing a case's ${fields} requires role 'ASSOCIATE' or higher.`);
+  if (changesAttorney || closesCase) {
+    if (hasMinRole(user, 'PARTNER')) return;
+    const fields = [changesAttorney && 'lead_attorney', closesCase && 'status'].filter(Boolean).join(' and ');
+    throw forbiddenError(user, 'PARTNER', `changing a case's ${fields}`);
+  }
+
+  if (changesStatus) {
+    if (hasMinRole(user, 'ASSOCIATE')) return;
+    throw forbiddenError(user, 'ASSOCIATE', `changing a case's status`);
+  }
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -308,7 +331,7 @@ async function manageFiles(req, res, next) {
     if (action === 'delete' && !hasMinRole(req.user, 'ASSOCIATE')) {
       return res.status(403).json(ManageFilesError.parse({
         success: false,
-        error: `Forbidden: deleting files/folders requires role 'ASSOCIATE' or higher.`
+        error: roleErrorMessage(req.user, 'ASSOCIATE') + ' (deleting files/folders)'
       }));
     }
 
@@ -438,11 +461,13 @@ async function createOrUpdateCase(req, res, next) {
     const firmId = req.tenantId;
 
     // No seniority floor previously existed here at all: any authenticated
-    // caller could reassign a case's lead attorney or change/close its
-    // status through the Copilot. Gated to ASSOCIATE+ — same floor as
-    // PATCH /api/v1/cases/:id/archive (server/routes/api.js) — checked
-    // against the proposal payload before any work happens, so an
-    // under-privileged caller is refused even at the HITL preview step.
+    // caller could reassign a case's lead attorney or close it out through
+    // the Copilot. Reassigning the attorney or closing the case now
+    // requires PARTNER+; any other status change keeps the lower
+    // ASSOCIATE+ floor — see requireCaseChangeRole above for the exact
+    // rule. Checked against the proposal payload before any work happens,
+    // so an under-privileged caller is refused even at the HITL preview
+    // step.
     requireCaseChangeRole(req.user, payload);
 
     // Resolved once here (for the approval preview) and again inside

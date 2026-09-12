@@ -437,6 +437,95 @@ async function softDeleteDocument(firmId, docId) {
   );
 }
 
+// ── Document versions ────────────────────────────────────────────────────
+// Deliberately append-only from this module's own perspective too — there
+// is no updateDocumentVersion/deleteDocumentVersion here, matching
+// FileService: a document's version history can only ever grow via
+// insertDocumentVersionAndPromote below.
+async function listDocumentVersions(firmId, docId) {
+  const { rows } = await pool.query(
+    `SELECT v.*, u.full_name AS uploaded_by_name
+     FROM document_versions v
+     JOIN documents d ON d.id = v.document_id
+     LEFT JOIN users u ON u.id = v.uploaded_by
+     WHERE d.firm_id = $1 AND v.document_id = $2
+     ORDER BY v.version_number DESC`,
+    [firmId, docId]
+  );
+  return rows.map(r => ({ ...r, file_size_bytes: Number(r.file_size_bytes) }));
+}
+
+// A brand-new document's first version row — plain insert, no side
+// effects on `documents`/quota needed (insertDocument's own INSERT already
+// set the right file_size_bytes/storage_path_url and already tripped the
+// quota trigger). Called once, right after insertDocument, so every
+// document has a complete version history from the moment it exists
+// rather than only gaining one on its first re-upload.
+async function insertInitialDocumentVersion({ documentId, storagePathUrl, originalName, fileType, fileSizeBytes, uploadedBy }) {
+  await pool.query(
+    `INSERT INTO document_versions (document_id, version_number, storage_path_url, original_name, file_type, file_size_bytes, uploaded_by)
+     VALUES ($1, 1, $2, $3, $4, $5, $6)
+     ON CONFLICT (document_id, version_number) DO NOTHING`,
+    [documentId, storagePathUrl, originalName, fileType, fileSizeBytes, uploadedBy || null]
+  );
+}
+
+async function getDocumentVersionById(firmId, docId, versionId) {
+  const { rows } = await pool.query(
+    `SELECT v.* FROM document_versions v
+     JOIN documents d ON d.id = v.document_id
+     WHERE d.firm_id = $1 AND v.document_id = $2 AND v.id = $3`,
+    [firmId, docId, versionId]
+  );
+  if (!rows[0]) return null;
+  return { ...rows[0], file_size_bytes: Number(rows[0].file_size_bytes) };
+}
+
+// Inserts the new version row, repoints `documents` at it (so every
+// existing read path — preview, download, listing — keeps serving "the
+// current version" with no changes of its own), and bumps the firm's
+// storage quota by the new version's size, all in one transaction. See
+// migration 0016's header comment on why the quota bump has to be done
+// here explicitly rather than left to trigger_document_storage_quota.
+async function insertDocumentVersionAndPromote({
+  firmId, documentId, versionNumber, storagePathUrl, originalName, fileType, fileSizeBytes, uploadedBy, comment
+}) {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const versionResult = await client.query(
+      `INSERT INTO document_versions (document_id, version_number, storage_path_url, original_name, file_type, file_size_bytes, uploaded_by, comment)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+       RETURNING *`,
+      [documentId, versionNumber, storagePathUrl, originalName, fileType, fileSizeBytes, uploadedBy || null, comment || null]
+    );
+    await client.query(
+      `UPDATE documents SET
+          file_name = $1, original_name = $1, file_type = $2,
+          extension = $3, file_size_bytes = $4, storage_path_url = $5,
+          version = $6, updated_at = CURRENT_TIMESTAMP
+       WHERE firm_id = $7 AND id = $8`,
+      [
+        originalName, fileType, (originalName.split('.').pop() || '').toLowerCase(),
+        fileSizeBytes, storagePathUrl, versionNumber, firmId, documentId
+      ]
+    );
+    await client.query(
+      `UPDATE storage_quotas SET storage_used_bytes = storage_used_bytes + $1, updated_at = CURRENT_TIMESTAMP
+       WHERE firm_id = $2`,
+      [fileSizeBytes, firmId]
+    );
+    await client.query('COMMIT');
+    const v = versionResult.rows[0];
+    return { ...v, file_size_bytes: Number(v.file_size_bytes) };
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
 // ── Document shares ──────────────────────────────────────────────────────
 async function insertShare({ documentId, sharedBy, recipientEmail, shareToken, permission, expiresAt }) {
   const { rows } = await pool.query(
@@ -597,12 +686,12 @@ async function getCaseByIdForUser(firmId, caseId, user) {
   return rows[0] || null;
 }
 
-async function insertCase({ id, firmId, caseName, clientName, opposingParty, opposingCounsel, status, leadAttorneyId, caseType, clientUserId, description }) {
+async function insertCase({ id, firmId, caseName, clientName, opposingParty, opposingCounsel, status, leadAttorneyId, caseType, clientUserId, description, relatedEntities }) {
   const { rows } = await pool.query(
-    `INSERT INTO cases (id, firm_id, case_name, client_name, opposing_party, opposing_counsel, status, lead_attorney_id, case_type, client_user_id, description)
-     VALUES ($1, $2, $3, $4, $5, $6, COALESCE($7, 'active'), $8, $9, $10, $11)
+    `INSERT INTO cases (id, firm_id, case_name, client_name, opposing_party, opposing_counsel, status, lead_attorney_id, case_type, client_user_id, description, related_entities)
+     VALUES ($1, $2, $3, $4, $5, $6, COALESCE($7, 'active'), $8, $9, $10, $11, COALESCE($12::text[], '{}'))
      RETURNING *`,
-    [id, firmId, caseName, clientName, opposingParty || null, opposingCounsel || null, status || null, leadAttorneyId || null, caseType || null, clientUserId || null, description || null]
+    [id, firmId, caseName, clientName, opposingParty || null, opposingCounsel || null, status || null, leadAttorneyId || null, caseType || null, clientUserId || null, description || null, relatedEntities || null]
   );
   return rows[0];
 }
@@ -669,6 +758,19 @@ async function findCasesByExactName(firmId, name) {
   return rows;
 }
 
+// Every case's party-name fields for a firm, across ALL statuses (including
+// closed) — conflict-of-interest history doesn't expire just because a case
+// closed. Deliberately narrow (no joins, no CASE_SELECT) since
+// ConflictCheckService only ever reads these four columns per case.
+async function listCasePartiesForFirm(firmId) {
+  const { rows } = await pool.query(
+    `SELECT id, case_name, client_name, opposing_party, opposing_counsel, related_entities
+     FROM cases WHERE firm_id = $1`,
+    [firmId]
+  );
+  return rows;
+}
+
 // Highest existing numeric suffix of a case id like 'LC-2026-014', used to
 // generate the next id when creating a case from the UI.
 async function getMaxCaseNumber(firmId) {
@@ -682,6 +784,130 @@ async function getMaxCaseNumber(firmId) {
     if (n > max) max = n;
   }
   return max;
+}
+
+// ── Case Intake (matter-opening workflow) ────────────────────────────────
+// Deliberately separate from the case functions above — see migration
+// 0015's header comment for why this lives in its own table rather than
+// new columns on `cases`. A case with no case_intake row (every case that
+// existed before this migration, and any created without the "Start
+// Matter Intake" flow) is simply outside this workflow entirely.
+
+async function insertCaseIntake({ caseId, firmId, state, conflictMatches }) {
+  const { rows } = await pool.query(
+    `INSERT INTO case_intake (case_id, firm_id, state, conflict_check_matches)
+     VALUES ($1, $2, $3, $4)
+     RETURNING *`,
+    [caseId, firmId, state, JSON.stringify(conflictMatches || [])]
+  );
+  return rows[0];
+}
+
+async function getCaseIntake(firmId, caseId) {
+  const { rows } = await pool.query(
+    `SELECT * FROM case_intake WHERE firm_id = $1 AND case_id = $2`,
+    [firmId, caseId]
+  );
+  return rows[0] || null;
+}
+
+// General field update, same pattern as updateCaseFields — only keys
+// actually present in `updates` are changed. `state` is always included
+// by callers (every intake transition changes state); the rest are
+// per-transition payload (conflict override reason, document ids, etc).
+async function updateCaseIntake(firmId, caseId, updates = {}) {
+  const fieldMap = {
+    state: 'state',
+    conflictOverrideBy: 'conflict_override_by',
+    conflictOverrideReason: 'conflict_override_reason',
+    engagementLetterDocumentId: 'engagement_letter_document_id',
+    engagementLetterSentAt: 'engagement_letter_sent_at',
+    signedDocumentId: 'signed_document_id',
+    signedAt: 'signed_at',
+    retainerTransactionId: 'retainer_transaction_id',
+    retainerWaived: 'retainer_waived',
+    retainerWaivedReason: 'retainer_waived_reason',
+    activatedAt: 'activated_at',
+    activatedBy: 'activated_by',
+    declinedAt: 'declined_at',
+    declinedReason: 'declined_reason'
+  };
+
+  const setClauses = [];
+  const values = [];
+  let i = 1;
+  for (const [key, column] of Object.entries(fieldMap)) {
+    if (updates[key] !== undefined) {
+      setClauses.push(`${column} = $${i}`);
+      values.push(updates[key]);
+      i += 1;
+    }
+  }
+  if (!setClauses.length) return getCaseIntake(firmId, caseId);
+
+  setClauses.push('updated_at = CURRENT_TIMESTAMP');
+  values.push(firmId, caseId);
+  const { rows } = await pool.query(
+    `UPDATE case_intake SET ${setClauses.join(', ')} WHERE firm_id = $${i} AND case_id = $${i + 1} RETURNING *`,
+    values
+  );
+  return rows[0] || null;
+}
+
+async function insertCaseIntakeEvent({ caseId, fromState, toState, actorId, note }) {
+  const { rows } = await pool.query(
+    `INSERT INTO case_intake_events (case_id, from_state, to_state, actor_id, note)
+     VALUES ($1, $2, $3, $4, $5)
+     RETURNING *`,
+    [caseId, fromState || null, toState, actorId || null, note || null]
+  );
+  return rows[0];
+}
+
+async function listCaseIntakeEvents(caseId) {
+  const { rows } = await pool.query(
+    `SELECT e.*, u.full_name AS actor_name
+     FROM case_intake_events e
+     LEFT JOIN users u ON u.id = e.actor_id
+     WHERE e.case_id = $1
+     ORDER BY e.created_at ASC`,
+    [caseId]
+  );
+  return rows;
+}
+
+// Activation flips both case_intake.state and cases.status together —
+// they must never disagree (an "ACTIVATED" intake with a case still
+// 'pending', or vice versa, would be exactly the kind of silent
+// inconsistency this whole workflow exists to prevent). Same
+// two-tables-in-one-transaction pattern as
+// insertTrustTransferAndMarkInvoicePaid.
+async function activateCaseIntake(firmId, caseId, actorId) {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const intakeResult = await client.query(
+      `UPDATE case_intake SET state = 'ACTIVATED', activated_at = CURRENT_TIMESTAMP, activated_by = $1, updated_at = CURRENT_TIMESTAMP
+       WHERE firm_id = $2 AND case_id = $3 AND state = 'RETAINER_RECEIVED'
+       RETURNING *`,
+      [actorId, firmId, caseId]
+    );
+    if (intakeResult.rowCount === 0) {
+      await client.query('ROLLBACK');
+      return null;
+    }
+    await client.query(
+      `UPDATE cases SET status = 'active', updated_at = CURRENT_TIMESTAMP WHERE firm_id = $1 AND id = $2`,
+      [firmId, caseId]
+    );
+    await client.query('COMMIT');
+    return intakeResult.rows[0];
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
 }
 
 // ── Invoices ─────────────────────────────────────────────────────────────
@@ -853,6 +1079,16 @@ function scopeConversationsToUser(query, values, user) {
 
 async function listConversationsForUser(firmId, user) {
   const values = [firmId];
+  // "Unread" is relative to who's looking, not an absolute property of a
+  // message: a staff viewer (Client Communications page) wants to know
+  // about unread messages FROM THE CLIENT, while a client viewer (Client
+  // Portal) wants to know about unread messages FROM STAFF. So the sender
+  // to count is always "the other party" relative to the current viewer —
+  // never hardcoded to one side — or a staff reply reads as already-read
+  // to the client, and the client's own outgoing messages read as unread
+  // to the client, which is exactly backwards.
+  const otherPartySender = user && user.role === 'CLIENT' ? 'staff' : 'client';
+  values.push(otherPartySender);
   // The last message's encrypted fields (not just its plaintext `body`,
   // which may not even be populated any more — see
   // db/migrations/0006_message_encryption.sql) come along so the service
@@ -869,7 +1105,7 @@ async function listConversationsForUser(firmId, user) {
                       lm.body_auth_tag AS last_message_body_auth_tag,
                       lm.encryption_key_id AS last_message_encryption_key_id,
                       (SELECT COUNT(*) FROM conversation_messages cm WHERE cm.conversation_id = conversations.id
-                        AND cm.is_read = FALSE AND cm.sender != 'staff') AS unread_count
+                        AND cm.is_read = FALSE AND cm.sender = $2) AS unread_count
                FROM conversations
                LEFT JOIN cases ON cases.id = conversations.case_id
                LEFT JOIN LATERAL (
@@ -944,10 +1180,18 @@ async function insertConversationMessage({ id, conversationId, sender, senderUse
   return rows[0];
 }
 
-async function markConversationRead(conversationId) {
+// Marks read the messages sent by "the other party" relative to who just
+// opened the thread — same viewer-relative semantics as the unread_count
+// in listConversationsForUser above. A staff viewer clears the client's
+// unread messages; a client viewer (Client Portal) clears staff's unread
+// messages. Never hardcode one side here independent of viewerIsStaff, or
+// opening the thread as a client will never clear the client's own unread
+// badge (it'll keep clearing the client's own outgoing messages instead).
+async function markConversationRead(conversationId, viewerIsStaff) {
+  const otherPartySender = viewerIsStaff ? 'client' : 'staff';
   await pool.query(
-    `UPDATE conversation_messages SET is_read = TRUE WHERE conversation_id = $1 AND sender != 'staff'`,
-    [conversationId]
+    `UPDATE conversation_messages SET is_read = TRUE WHERE conversation_id = $1 AND sender = $2`,
+    [conversationId, otherPartySender]
   );
 }
 
@@ -1115,6 +1359,283 @@ async function listRecentAuditActivity(firmId, limit = 6) {
   return rows;
 }
 
+// ── Trust Accounting ─────────────────────────────────────────────────────
+// Deliberately separate from the invoices functions above: nothing here is
+// ever summed into invoice/revenue totals, and the only function that
+// touches both trust_transactions and invoices in one transaction is
+// insertTrustTransferToOperating below — the sole bridge between trust and
+// operating money, gated behind TrustService.transferToOperating. None of
+// this is reachable from copilotController; trust writes are staff-form
+// endpoints only, never exposed as an AI tool.
+
+// trust_transactions is append-only (see migration 0014's comment) so a
+// client ledger's balance is always recomputed from it, never read off a
+// stored running total. An ADJUSTMENT_REVERSAL row reverses whatever
+// transaction it points to via reverses_transaction_id — its direction is
+// the opposite of that original row's type, not of its own — hence the
+// join to `orig` below rather than a fixed sign per type.
+const TRUST_SIGNED_TXN_CTE = `
+  WITH signed AS (
+    SELECT t.*,
+      CASE
+        WHEN t.type = 'DEPOSIT' THEN t.amount_cents
+        WHEN t.type IN ('DISBURSEMENT', 'TRANSFER_TO_OPERATING') THEN -t.amount_cents
+        WHEN t.type = 'ADJUSTMENT_REVERSAL' THEN
+          CASE orig.type
+            WHEN 'DEPOSIT' THEN -t.amount_cents
+            WHEN 'DISBURSEMENT' THEN t.amount_cents
+            WHEN 'TRANSFER_TO_OPERATING' THEN t.amount_cents
+            ELSE 0
+          END
+        ELSE 0
+      END AS signed_amount_cents
+    FROM trust_transactions t
+    LEFT JOIN trust_transactions orig ON orig.id = t.reverses_transaction_id
+  )
+`;
+
+async function listTrustAccounts(firmId) {
+  const { rows } = await pool.query(
+    `SELECT * FROM trust_accounts WHERE firm_id = $1 AND is_active = TRUE ORDER BY created_at ASC`,
+    [firmId]
+  );
+  return rows;
+}
+
+async function getTrustAccountById(firmId, accountId) {
+  const { rows } = await pool.query(
+    `SELECT * FROM trust_accounts WHERE firm_id = $1 AND id = $2`,
+    [firmId, accountId]
+  );
+  return rows[0] || null;
+}
+
+async function insertTrustAccount({ firmId, accountName, bankName, accountNumberLast4 }) {
+  const { rows } = await pool.query(
+    `INSERT INTO trust_accounts (firm_id, account_name, bank_name, account_number_last4)
+     VALUES ($1, $2, $3, $4) RETURNING *`,
+    [firmId, accountName, bankName, accountNumberLast4]
+  );
+  return rows[0];
+}
+
+// Every client ledger for a firm (optionally scoped to one trust account),
+// each with its live balance and last-activity timestamp — backs the Trust
+// Accounting page's main table.
+async function listClientLedgersWithBalances(firmId, trustAccountId) {
+  const values = [firmId];
+  let where = 'l.firm_id = $1';
+  if (trustAccountId) {
+    values.push(trustAccountId);
+    where += ` AND l.trust_account_id = $${values.length}`;
+  }
+  const { rows } = await pool.query(
+    `${TRUST_SIGNED_TXN_CTE}
+     SELECT l.*,
+        a.account_name AS trust_account_name,
+        COALESCE(s.balance_cents, 0)::bigint AS balance_cents,
+        s.last_activity_at
+     FROM trust_client_ledgers l
+     JOIN trust_accounts a ON a.id = l.trust_account_id
+     LEFT JOIN (
+       SELECT client_ledger_id, SUM(signed_amount_cents) AS balance_cents, MAX(created_at) AS last_activity_at
+       FROM signed GROUP BY client_ledger_id
+     ) s ON s.client_ledger_id = l.id
+     WHERE ${where} AND l.is_active = TRUE
+     ORDER BY l.client_display_name ASC`,
+    values
+  );
+  return rows.map(r => ({ ...r, balance_cents: Number(r.balance_cents) }));
+}
+
+async function getClientLedgerById(firmId, ledgerId) {
+  const { rows } = await pool.query(
+    `SELECT l.*, a.account_name AS trust_account_name
+     FROM trust_client_ledgers l
+     JOIN trust_accounts a ON a.id = l.trust_account_id
+     WHERE l.firm_id = $1 AND l.id = $2`,
+    [firmId, ledgerId]
+  );
+  return rows[0] || null;
+}
+
+// Balance as of right now (no asOfDate) or as of the end of a given
+// calendar day — the latter is what a saved reconciliation snapshot
+// recomputes against, so a reconciliation stays reproducible even as new
+// transactions are posted afterward.
+async function getClientLedgerBalance(ledgerId, asOfDate) {
+  const values = [ledgerId];
+  let dateFilter = '';
+  if (asOfDate) {
+    values.push(asOfDate);
+    dateFilter = `AND created_at < $${values.length}::date + interval '1 day'`;
+  }
+  const { rows } = await pool.query(
+    `${TRUST_SIGNED_TXN_CTE}
+     SELECT COALESCE(SUM(signed_amount_cents), 0)::bigint AS balance_cents
+     FROM signed WHERE client_ledger_id = $1 ${dateFilter}`,
+    values
+  );
+  return Number(rows[0].balance_cents);
+}
+
+// Sum of every client ledger's balance under one trust account — the
+// "sum of client ledger balances" leg of the three-way reconciliation.
+async function getTrustAccountClientLedgersTotal(trustAccountId, asOfDate) {
+  const values = [trustAccountId];
+  let dateFilter = '';
+  if (asOfDate) {
+    values.push(asOfDate);
+    dateFilter = `AND created_at < $${values.length}::date + interval '1 day'`;
+  }
+  const { rows } = await pool.query(
+    `${TRUST_SIGNED_TXN_CTE}
+     SELECT COALESCE(SUM(signed_amount_cents), 0)::bigint AS total_cents
+     FROM signed WHERE trust_account_id = $1 ${dateFilter}`,
+    values
+  );
+  return Number(rows[0].total_cents);
+}
+
+// The "ledger balance" leg — same total as above, just named for what it
+// represents in the reconciliation (they're computed the same way because
+// every trust_transactions row always belongs to exactly one client
+// ledger; a pooled-account-level entry with no client ledger isn't a
+// concept this schema allows, by design).
+async function getTrustAccountLedgerBalance(trustAccountId, asOfDate) {
+  return getTrustAccountClientLedgersTotal(trustAccountId, asOfDate);
+}
+
+async function insertClientLedger({ firmId, trustAccountId, clientDisplayName, clientUserId }) {
+  const { rows } = await pool.query(
+    `INSERT INTO trust_client_ledgers (firm_id, trust_account_id, client_display_name, client_user_id)
+     VALUES ($1, $2, $3, $4)
+     ON CONFLICT (firm_id, trust_account_id, client_display_name) DO UPDATE SET is_active = TRUE
+     RETURNING *`,
+    [firmId, trustAccountId, clientDisplayName, clientUserId || null]
+  );
+  return rows[0];
+}
+
+async function insertTrustTransaction({
+  firmId, trustAccountId, clientLedgerId, caseId, type, amountCents,
+  memo, checkNumber, relatedInvoiceId, reversesTransactionId, createdBy
+}) {
+  const { rows } = await pool.query(
+    `INSERT INTO trust_transactions (
+        firm_id, trust_account_id, client_ledger_id, case_id, type, amount_cents,
+        memo, check_number, related_invoice_id, reverses_transaction_id, created_by
+     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+     RETURNING *`,
+    [
+      firmId, trustAccountId, clientLedgerId, caseId || null, type, amountCents,
+      memo, checkNumber || null, relatedInvoiceId || null, reversesTransactionId || null, createdBy
+    ]
+  );
+  return { ...rows[0], amount_cents: Number(rows[0].amount_cents) };
+}
+
+// Transfer-to-operating and marking the source invoice paid must succeed
+// or fail together — a client's retainer must never be shown as debited
+// while the invoice it paid stays unpaid, or vice versa.
+async function insertTrustTransferAndMarkInvoicePaid({
+  firmId, trustAccountId, clientLedgerId, caseId, amountCents, memo, invoiceId, createdBy, paidDate
+}) {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const txnResult = await client.query(
+      `INSERT INTO trust_transactions (
+          firm_id, trust_account_id, client_ledger_id, case_id, type, amount_cents,
+          memo, related_invoice_id, created_by
+       ) VALUES ($1, $2, $3, $4, 'TRANSFER_TO_OPERATING', $5, $6, $7, $8)
+       RETURNING *`,
+      [firmId, trustAccountId, clientLedgerId, caseId || null, amountCents, memo, invoiceId, createdBy]
+    );
+    const invoiceResult = await client.query(
+      `UPDATE invoices SET status = 'paid', paid_date = COALESCE($1, CURRENT_DATE), updated_at = CURRENT_TIMESTAMP
+       WHERE firm_id = $2 AND id = $3
+       RETURNING id`,
+      [paidDate || null, firmId, invoiceId]
+    );
+    if (invoiceResult.rowCount === 0) {
+      await client.query('ROLLBACK');
+      return null;
+    }
+    await client.query('COMMIT');
+    return { ...txnResult.rows[0], amount_cents: Number(txnResult.rows[0].amount_cents) };
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+async function listTrustTransactionsForLedger(firmId, ledgerId) {
+  const { rows } = await pool.query(
+    `SELECT t.*, u.full_name AS created_by_name
+     FROM trust_transactions t
+     LEFT JOIN users u ON u.id = t.created_by
+     WHERE t.firm_id = $1 AND t.client_ledger_id = $2
+     ORDER BY t.created_at DESC`,
+    [firmId, ledgerId]
+  );
+  return rows.map(r => ({ ...r, amount_cents: Number(r.amount_cents) }));
+}
+
+async function getTrustTransactionById(firmId, transactionId) {
+  const { rows } = await pool.query(
+    `SELECT * FROM trust_transactions WHERE firm_id = $1 AND id = $2`,
+    [firmId, transactionId]
+  );
+  if (!rows[0]) return null;
+  return { ...rows[0], amount_cents: Number(rows[0].amount_cents) };
+}
+
+async function insertTrustReconciliation({
+  firmId, trustAccountId, asOfDate, bankStatementBalanceCents, ledgerBalanceCents,
+  clientLedgersTotalCents, isBalanced, discrepancyCents, notes, performedBy
+}) {
+  const { rows } = await pool.query(
+    `INSERT INTO trust_reconciliations (
+        firm_id, trust_account_id, as_of_date, bank_statement_balance_cents, ledger_balance_cents,
+        client_ledgers_total_cents, is_balanced, discrepancy_cents, notes, performed_by
+     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+     RETURNING *`,
+    [
+      firmId, trustAccountId, asOfDate, bankStatementBalanceCents, ledgerBalanceCents,
+      clientLedgersTotalCents, isBalanced, discrepancyCents, notes || null, performedBy
+    ]
+  );
+  const r = rows[0];
+  return {
+    ...r,
+    bank_statement_balance_cents: Number(r.bank_statement_balance_cents),
+    ledger_balance_cents: Number(r.ledger_balance_cents),
+    client_ledgers_total_cents: Number(r.client_ledgers_total_cents),
+    discrepancy_cents: Number(r.discrepancy_cents)
+  };
+}
+
+async function listTrustReconciliations(firmId, trustAccountId) {
+  const { rows } = await pool.query(
+    `SELECT r.*, u.full_name AS performed_by_name
+     FROM trust_reconciliations r
+     LEFT JOIN users u ON u.id = r.performed_by
+     WHERE r.firm_id = $1 AND r.trust_account_id = $2
+     ORDER BY r.as_of_date DESC, r.created_at DESC`,
+    [firmId, trustAccountId]
+  );
+  return rows.map(r => ({
+    ...r,
+    bank_statement_balance_cents: Number(r.bank_statement_balance_cents),
+    ledger_balance_cents: Number(r.ledger_balance_cents),
+    client_ledgers_total_cents: Number(r.client_ledgers_total_cents),
+    discrepancy_cents: Number(r.discrepancy_cents)
+  }));
+}
+
 module.exports = {
   pool,
   DEFAULT_FIRM_ID,
@@ -1140,6 +1661,10 @@ module.exports = {
   insertDocument,
   updateDocument,
   softDeleteDocument,
+  listDocumentVersions,
+  getDocumentVersionById,
+  insertInitialDocumentVersion,
+  insertDocumentVersionAndPromote,
   insertShare,
   insertAuditLog,
   listAuditLogsForFirm,
@@ -1154,6 +1679,7 @@ module.exports = {
   updateCaseStatus,
   updateCaseFields,
   findCasesByExactName,
+  listCasePartiesForFirm,
   getMaxCaseNumber,
   listInvoicesByFirm,
   listInvoicesForUser,
@@ -1181,5 +1707,26 @@ module.exports = {
   createUserInvite,
   getUsableInviteByTokenHash,
   acceptUserInvite,
-  listUsersWithInviteStatus
+  listUsersWithInviteStatus,
+  listTrustAccounts,
+  getTrustAccountById,
+  insertTrustAccount,
+  listClientLedgersWithBalances,
+  getClientLedgerById,
+  getClientLedgerBalance,
+  getTrustAccountClientLedgersTotal,
+  getTrustAccountLedgerBalance,
+  insertClientLedger,
+  insertTrustTransaction,
+  insertTrustTransferAndMarkInvoicePaid,
+  listTrustTransactionsForLedger,
+  getTrustTransactionById,
+  insertTrustReconciliation,
+  listTrustReconciliations,
+  insertCaseIntake,
+  getCaseIntake,
+  updateCaseIntake,
+  insertCaseIntakeEvent,
+  listCaseIntakeEvents,
+  activateCaseIntake
 };

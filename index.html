@@ -147,6 +147,17 @@
               <span class="nav-text">Billing</span>
             </a>
           </li>
+          <li class="nav-item hidden" data-page="trust" id="navTrustItem">
+            <a href="#" class="nav-link" id="nav-trust">
+              <span class="nav-icon">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+                  <path d="M12 2l8 4v6c0 5-3.5 8.5-8 10-4.5-1.5-8-5-8-10V6l8-4z" />
+                  <path d="M9 12l2 2 4-4" />
+                </svg>
+              </span>
+              <span class="nav-text">Trust Accounting</span>
+            </a>
+          </li>
         </ul>
       </div>
 
@@ -895,14 +906,24 @@
       <!-- Header Area -->
       <div class="page-header-row">
         <h2 class="cases-page-title">Cases</h2>
-        <button class="btn-primary" id="casesPageNewBtn">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
-            style="width: 14px; height: 14px; vertical-align: middle; margin-right: 4px;">
-            <line x1="12" y1="5" x2="12" y2="19" />
-            <line x1="5" y1="12" x2="19" y2="12" />
-          </svg>
-          + New Case
-        </button>
+        <div style="display:flex; gap:10px;">
+          <button class="btn-ghost hidden" id="casesPageStartIntakeBtn">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+              style="width: 14px; height: 14px; vertical-align: middle; margin-right: 4px;">
+              <path d="M12 2l8 4v6c0 5-3.5 8.5-8 10-4.5-1.5-8-5-8-10V6l8-4z" />
+              <path d="M9 12l2 2 4-4" />
+            </svg>
+            + Start Matter Intake
+          </button>
+          <button class="btn-primary" id="casesPageNewBtn">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+              style="width: 14px; height: 14px; vertical-align: middle; margin-right: 4px;">
+              <line x1="12" y1="5" x2="12" y2="19" />
+              <line x1="5" y1="12" x2="19" y2="12" />
+            </svg>
+            + New Case
+          </button>
+        </div>
       </div>
 
       <!-- The Command Bar (Search & Filter) -->
@@ -1097,14 +1118,14 @@
                         d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48" />
                     </svg>
                   </button>
-                  <button type="button" class="quick-action-btn" title="Request Signature"
-                    onclick="handleInputQuickAction('signature')">
+                  <button type="button" class="quick-action-btn" title="Coming soon — e-signature integration not yet available"
+                    disabled style="opacity:0.4; cursor:not-allowed;">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                       <path d="M12 20h9M16.5 3.5a2.121 2.121 0 013 3L7 19l-4 1 1-4L16.5 3.5z" />
                     </svg>
                   </button>
-                  <button type="button" class="quick-action-btn" title="Insert Legal Template"
-                    onclick="handleInputQuickAction('template')">
+                  <button type="button" class="quick-action-btn" title="Insert Message Template"
+                    onclick="handleInputQuickAction('template', event)">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                       <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" />
                       <path d="M14 2v6h6M16 13H8M16 17H8M10 9H8" />
@@ -1380,6 +1401,115 @@
       </div>
     </main>
 
+    <!-- TRUST ACCOUNTING PAGE -->
+    <main class="content hidden" id="trustPage">
+      <div class="page-header-row">
+        <h2 class="cases-page-title">Trust Accounting</h2>
+        <div style="display:flex; gap:10px; align-items:center;">
+          <select id="trustAccountSelect" style="background:var(--navy-800); color:#fff; border:1px solid rgba(255,255,255,0.1); border-radius:6px; padding:8px 12px;"></select>
+          <button class="btn-primary" id="trustNewLedgerBtn">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+              style="width: 14px; height: 14px; vertical-align: middle; margin-right: 4px;">
+              <line x1="12" y1="5" x2="12" y2="19" />
+              <line x1="5" y1="12" x2="19" y2="12" />
+            </svg>
+            + New Client Ledger
+          </button>
+        </div>
+      </div>
+
+      <p style="color:var(--slate-400); font-size:13px; margin: -8px 0 16px;">
+        Client trust funds are tracked separately from firm revenue. Money moves into operating income only via
+        "Pay Invoice from Trust," which requires an invoice — never as a direct disbursement to the firm.
+      </p>
+
+      <!-- Client Ledgers -->
+      <div class="panel table-panel edge-to-edge">
+        <div class="table-container">
+          <table class="cases-large-table" id="trustLedgersTable">
+            <thead>
+              <tr>
+                <th>Client</th>
+                <th>Trust Account</th>
+                <th>Balance</th>
+                <th>Last Activity</th>
+                <th style="width: 260px;">Actions</th>
+              </tr>
+            </thead>
+            <tbody id="trustLedgersTableBody"></tbody>
+          </table>
+        </div>
+        <div class="empty-state-container hidden" id="trustLedgersEmptyState">
+          <h3 class="empty-state-title">No client trust ledgers yet</h3>
+          <p class="empty-state-description">Open a client ledger under a trust account to start recording deposits
+            and disbursements.</p>
+        </div>
+      </div>
+
+      <!-- Three-Way Reconciliation -->
+      <div class="panel" style="margin-top: 24px; padding: 20px;">
+        <h3 class="panel-title" style="margin-bottom: 16px;">Three-Way Reconciliation</h3>
+        <div class="form-row-two">
+          <div class="form-group-modal">
+            <label for="trustReconAsOf">As of date</label>
+            <input type="date" id="trustReconAsOf" />
+          </div>
+          <div class="form-group-modal">
+            <label for="trustReconBankBalance">Bank statement balance (USD)</label>
+            <input type="number" id="trustReconBankBalance" min="0" step="0.01" placeholder="e.g. 42500.00" />
+          </div>
+        </div>
+        <button class="btn-ghost" id="trustReconComputeBtn">Compute</button>
+
+        <div class="hidden" id="trustReconResult" style="margin-top: 20px;">
+          <div style="display:flex; gap:32px; flex-wrap:wrap; margin-bottom: 14px;">
+            <div>
+              <div style="color:var(--slate-400); font-size:12px;">Bank statement balance</div>
+              <div style="font-size:18px; font-weight:600;" id="trustReconBank">—</div>
+            </div>
+            <div>
+              <div style="color:var(--slate-400); font-size:12px;">Trust ledger balance</div>
+              <div style="font-size:18px; font-weight:600;" id="trustReconLedger">—</div>
+            </div>
+            <div>
+              <div style="color:var(--slate-400); font-size:12px;">Sum of client ledger balances</div>
+              <div style="font-size:18px; font-weight:600;" id="trustReconClientTotal">—</div>
+            </div>
+            <div>
+              <div style="color:var(--slate-400); font-size:12px;">Status</div>
+              <span class="status-badge" id="trustReconStatusBadge">—</span>
+            </div>
+          </div>
+          <div class="form-group-modal">
+            <label for="trustReconNotes">Notes (optional)</label>
+            <textarea id="trustReconNotes" rows="2" placeholder="Any explanation for a discrepancy, or context for this review."></textarea>
+          </div>
+          <button class="btn-primary" id="trustReconSaveBtn" style="margin-top: 10px;">Save Reconciliation</button>
+        </div>
+      </div>
+
+      <!-- Reconciliation History -->
+      <div class="panel table-panel edge-to-edge" style="margin-top: 24px;">
+        <div class="table-container">
+          <table class="cases-large-table" id="trustReconHistoryTable">
+            <thead>
+              <tr>
+                <th>As Of</th>
+                <th>Bank Balance</th>
+                <th>Ledger Balance</th>
+                <th>Client Ledgers Total</th>
+                <th>Status</th>
+                <th>Performed By</th>
+              </tr>
+            </thead>
+            <tbody id="trustReconHistoryTableBody">
+              <tr><td colspan="6" style="text-align:center;color:var(--slate-400)">No reconciliations recorded yet</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </main>
+
     <!-- NOTIFICATION PANEL -->
     <div class="notification-panel" id="notificationPanel">
       <div class="notif-header">
@@ -1392,6 +1522,34 @@
   </div>
 
   <div class="overlay" id="overlay"></div>
+
+  <!-- CASE FILE (DETAIL) MODAL -->
+  <div class="modal-overlay hidden" id="caseDetailModal">
+    <div class="modal-box" style="max-width: 720px;">
+      <div class="modal-header">
+        <h3 class="modal-title">Case File — <span id="caseDetailCaseLabel"></span></h3>
+        <button class="modal-close-btn" id="caseDetailModalCloseBtn">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div id="caseDetailOverview" style="margin-bottom:20px; font-size:13px;"></div>
+
+        <div style="margin-bottom:20px;">
+          <h4 style="margin:0 0 8px;">Documents</h4>
+          <div id="caseDetailDocuments" style="font-size:13px;"></div>
+        </div>
+
+        <div style="margin-bottom:20px;">
+          <h4 style="margin:0 0 8px;">Deadlines &amp; Hearings</h4>
+          <div id="caseDetailDeadlines" style="font-size:13px;"></div>
+        </div>
+
+        <div>
+          <h4 style="margin:0 0 8px;">Activity</h4>
+          <div id="caseDetailActivity" style="font-size:13px; max-height:220px; overflow-y:auto;"></div>
+        </div>
+      </div>
+    </div>
+  </div>
 
   <!-- NEW CASE MODAL -->
   <div class="modal-overlay hidden" id="newCaseModal">
@@ -1459,13 +1617,194 @@
               <input type="text" id="newCaseHearing" placeholder="e.g. Jul 31, 2026, or None" />
             </div>
           </div>
+          <div class="form-group-modal">
+            <label for="newCaseRelatedEntities">Related Entities (optional)</label>
+            <input type="text" id="newCaseRelatedEntities" placeholder="e.g. Meridian Holdings, Meridian Capital — comma separated" />
+          </div>
+
+          <!-- Populated by handleNewCaseSubmit when the server's conflict
+               check (CaseService.createCase / ConflictCheckService) comes
+               back with a 409 — hidden until then. -->
+          <div id="conflictWarningPanel" class="hidden" style="margin-top: 16px; padding: 12px 14px; border: 1px solid #E0A93A; background: #FFF8E8; border-radius: 6px;">
+            <p style="margin: 0 0 8px; font-weight: 600; color: #7A5A12;">⚠ Potential conflict of interest</p>
+            <ul id="conflictWarningList" style="margin: 0 0 10px; padding-left: 18px; font-size: 13px; color: #4A3A0E;"></ul>
+            <label style="display: flex; align-items: flex-start; gap: 6px; font-size: 13px; margin-bottom: 8px;">
+              <input type="checkbox" id="conflictAckCheckbox" style="margin-top: 3px;" />
+              <span>I have reviewed these results and confirm this case should proceed.</span>
+            </label>
+            <textarea id="conflictOverrideReason" rows="2" placeholder="Reason for proceeding despite the potential conflict (required)"
+              style="width: 100%; box-sizing: border-box; font: inherit; padding: 6px 8px;"></textarea>
+          </div>
+
           <div class="modal-footer">
             <button type="button" class="btn-ghost" id="modalCancelBtn">Cancel</button>
-            <button type="submit" class="btn-primary"
+            <button type="submit" class="btn-primary" id="newCaseSubmitBtn"
               style="background: var(--gold-500); color: var(--navy-950); font-weight: 600; border: none;">Create Case
               Record</button>
           </div>
         </form>
+      </div>
+    </div>
+  </div>
+
+  <!-- START MATTER INTAKE MODAL -->
+  <div class="modal-overlay hidden" id="startIntakeModal">
+    <div class="modal-box">
+      <div class="modal-header">
+        <h3 class="modal-title">Start Matter Intake</h3>
+        <button class="modal-close-btn" id="startIntakeModalCloseBtn">&times;</button>
+      </div>
+      <div class="modal-body">
+        <p style="color:var(--slate-400); font-size:13px; margin-top:0;">
+          Opens a new matter in "Awaiting Docs" status. It cannot become active until conflict check, engagement
+          letter, signature, and retainer are all handled (or explicitly waived) — see the Matter Intake panel after
+          creating it.
+        </p>
+        <form id="startIntakeForm" onsubmit="handleStartIntakeSubmit(event)">
+          <div class="form-row-two">
+            <div class="form-group-modal">
+              <label for="intakeNewTitle">Case Title</label>
+              <input type="text" id="intakeNewTitle" required placeholder="e.g. Whitfield v. Corvus Holdings" />
+            </div>
+            <div class="form-group-modal">
+              <label for="intakeNewClient">Client Name</label>
+              <input type="text" id="intakeNewClient" required placeholder="e.g. Renata Whitfield" />
+            </div>
+          </div>
+          <div class="form-row-two">
+            <div class="form-group-modal">
+              <label for="intakeNewOpposing">Opposing Party (optional)</label>
+              <input type="text" id="intakeNewOpposing" placeholder="e.g. Corvus Holdings LLC" />
+            </div>
+            <div class="form-group-modal">
+              <label for="intakeNewCounsel">Opposing Counsel (optional)</label>
+              <input type="text" id="intakeNewCounsel" placeholder="e.g. Barrow & Finch" />
+            </div>
+          </div>
+          <div class="form-row-two">
+            <div class="form-group-modal">
+              <label for="intakeNewArea">Practice Area (optional)</label>
+              <select id="intakeNewArea">
+                <option value="">—</option>
+                <option value="Commercial Litigation">Commercial Litigation</option>
+                <option value="Criminal Defense">Criminal Defense</option>
+                <option value="Family Law">Family Law</option>
+                <option value="Probate & Estate">Probate & Estate</option>
+                <option value="Intellectual Property">Intellectual Property</option>
+                <option value="Administrative Law">Administrative Law</option>
+                <option value="Employment Law">Employment Law</option>
+                <option value="Bankruptcy">Bankruptcy</option>
+              </select>
+            </div>
+            <div class="form-group-modal">
+              <label for="intakeNewAttorney">Lead Attorney (optional)</label>
+              <select id="intakeNewAttorney">
+                <option value="">—</option>
+                <option value="Sarah J.">Sarah Jennings</option>
+                <option value="Marcus R.">Marcus Ramirez</option>
+                <option value="Priya N.">Priya Nair</option>
+              </select>
+            </div>
+          </div>
+          <div class="form-group-modal">
+            <label for="intakeNewRelatedEntities">Related Entities (optional)</label>
+            <input type="text" id="intakeNewRelatedEntities" placeholder="e.g. Corvus Capital — comma separated" />
+          </div>
+          <div class="modal-footer">
+            <button type="button" class="btn-ghost" id="startIntakeModalCancelBtn">Cancel</button>
+            <button type="submit" class="btn-primary" id="startIntakeSubmitBtn"
+              style="background: var(--gold-500); color: var(--navy-950); font-weight: 600; border: none;">Start Intake</button>
+          </div>
+        </form>
+      </div>
+    </div>
+  </div>
+
+  <!-- MATTER INTAKE CHECKLIST MODAL -->
+  <div class="modal-overlay hidden" id="matterIntakeModal">
+    <div class="modal-box" style="max-width: 640px;">
+      <div class="modal-header">
+        <h3 class="modal-title">Matter Intake — <span id="intakeCaseLabel"></span></h3>
+        <button class="modal-close-btn" id="intakeModalCloseBtn">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div id="intakeStateBanner" style="margin-bottom:16px; padding:10px 14px; border-radius:6px; font-size:13px; background:rgba(255,255,255,0.04);"></div>
+
+        <div class="intake-step" style="margin-bottom:18px;">
+          <h4 style="margin:0 0 8px;">1. Conflict Check</h4>
+          <div id="intakeConflictSummary" style="font-size:13px; color:var(--slate-300);"></div>
+          <div id="intakeConflictOverrideSection" class="hidden" style="margin-top:8px;">
+            <textarea id="intakeConflictOverrideReason" rows="2" style="width:100%; box-sizing:border-box; font:inherit; padding:6px 8px;"
+              placeholder="Reason for overriding this conflict hold (required)"></textarea>
+            <button class="btn-primary" id="intakeConflictOverrideBtn" style="margin-top:6px;">Override &amp; Clear</button>
+          </div>
+        </div>
+
+        <div class="intake-step" style="margin-bottom:18px;">
+          <h4 style="margin:0 0 8px;">2. Engagement Letter</h4>
+          <div id="intakeLetterSummary" style="font-size:13px; color:var(--slate-300);"></div>
+          <div id="intakeLetterUploadSection" class="hidden" style="margin-top:8px; display:flex; gap:8px; align-items:center;">
+            <input type="file" id="intakeLetterFile" accept=".pdf,.doc,.docx" />
+            <button class="btn-primary" id="intakeLetterUploadBtn">Upload</button>
+          </div>
+          <div id="intakeLetterSentSection" class="hidden" style="margin-top:8px;">
+            <button class="btn-ghost" id="intakeLetterSentBtn">Mark as Sent to Client</button>
+          </div>
+        </div>
+
+        <div class="intake-step" style="margin-bottom:18px;">
+          <h4 style="margin:0 0 8px;">3. Signed Copy</h4>
+          <div id="intakeSignedSummary" style="font-size:13px; color:var(--slate-300);"></div>
+          <div id="intakeSignedUploadSection" class="hidden" style="margin-top:8px; display:flex; gap:8px; align-items:center;">
+            <input type="file" id="intakeSignedFile" accept=".pdf,.doc,.docx" />
+            <button class="btn-primary" id="intakeSignedUploadBtn">Upload</button>
+          </div>
+        </div>
+
+        <div class="intake-step" style="margin-bottom:18px;">
+          <h4 style="margin:0 0 8px;">4. Retainer</h4>
+          <div id="intakeRetainerSummary" style="font-size:13px; color:var(--slate-300);"></div>
+          <div id="intakeRetainerFormSection" class="hidden" style="margin-top:8px;">
+            <div class="form-row-two">
+              <div class="form-group-modal">
+                <label for="intakeRetainerAccount">Trust Account</label>
+                <select id="intakeRetainerAccount"></select>
+              </div>
+              <div class="form-group-modal">
+                <label for="intakeRetainerLedger">Client Ledger</label>
+                <select id="intakeRetainerLedger"></select>
+              </div>
+            </div>
+            <div class="form-row-two">
+              <div class="form-group-modal">
+                <label for="intakeRetainerAmount">Amount (USD)</label>
+                <input type="number" id="intakeRetainerAmount" min="0.01" step="0.01" placeholder="e.g. 2500.00" />
+              </div>
+              <div class="form-group-modal">
+                <label for="intakeRetainerMemo">Memo</label>
+                <input type="text" id="intakeRetainerMemo" placeholder="e.g. Initial retainer" />
+              </div>
+            </div>
+            <button class="btn-primary" id="intakeRetainerRecordBtn">Record Retainer Deposit</button>
+            <div style="margin-top:12px; padding-top:12px; border-top:1px solid rgba(255,255,255,0.08);">
+              <textarea id="intakeRetainerWaiveReason" rows="2" style="width:100%; box-sizing:border-box; font:inherit; padding:6px 8px;"
+                placeholder="Reason for waiving a retainer (e.g. contingency-fee matter)"></textarea>
+              <button class="btn-ghost" id="intakeRetainerWaiveBtn" style="margin-top:6px;">Waive Retainer</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="intake-step" style="margin-bottom:6px;">
+          <h4 style="margin:0 0 8px;">5. Activate Matter</h4>
+          <div id="intakeActivateSummary" style="font-size:13px; color:var(--slate-300);"></div>
+          <button class="btn-primary hidden" id="intakeActivateBtn"
+            style="margin-top:8px; background:var(--gold-500); color:var(--navy-950); font-weight:600; border:none;">Activate Matter</button>
+        </div>
+
+        <div class="modal-footer" style="justify-content:space-between; margin-top:16px;">
+          <button type="button" class="btn-ghost danger-item" id="intakeDeclineBtn">Decline Matter</button>
+          <button type="button" class="btn-ghost" id="intakeModalCloseBtn2">Close</button>
+        </div>
       </div>
     </div>
   </div>
@@ -1519,6 +1858,131 @@
               Invoice</button>
           </div>
         </form>
+      </div>
+    </div>
+  </div>
+
+  <!-- NEW TRUST CLIENT LEDGER MODAL -->
+  <div class="modal-overlay hidden" id="trustLedgerModal">
+    <div class="modal-box">
+      <div class="modal-header">
+        <h3 class="modal-title">New Client Trust Ledger</h3>
+        <button class="modal-close-btn" id="trustLedgerModalCloseBtn">&times;</button>
+      </div>
+      <div class="modal-body">
+        <form id="trustLedgerForm" onsubmit="handleTrustLedgerSubmit(event)">
+          <div class="form-group-modal">
+            <label for="trustLedgerAccount">Trust Account</label>
+            <select id="trustLedgerAccount" required></select>
+          </div>
+          <div class="form-group-modal">
+            <label for="trustLedgerClientName">Client Name</label>
+            <input type="text" id="trustLedgerClientName" required placeholder="e.g. Harrison Manufacturing Co." />
+          </div>
+          <div class="modal-footer">
+            <button type="button" class="btn-ghost" id="trustLedgerModalCancelBtn">Cancel</button>
+            <button type="submit" class="btn-primary" id="trustLedgerSubmitBtn"
+              style="background: var(--gold-500); color: var(--navy-950); font-weight: 600; border: none;">Create Ledger</button>
+          </div>
+        </form>
+      </div>
+    </div>
+  </div>
+
+  <!-- TRUST DEPOSIT / DISBURSEMENT MODAL -->
+  <div class="modal-overlay hidden" id="trustEntryModal">
+    <div class="modal-box">
+      <div class="modal-header">
+        <h3 class="modal-title" id="trustEntryModalTitle">Record Deposit</h3>
+        <button class="modal-close-btn" id="trustEntryModalCloseBtn">&times;</button>
+      </div>
+      <div class="modal-body">
+        <form id="trustEntryForm" onsubmit="handleTrustEntrySubmit(event)">
+          <input type="hidden" id="trustEntryLedgerId" />
+          <input type="hidden" id="trustEntryType" value="DEPOSIT" />
+          <div class="form-group-modal">
+            <label id="trustEntryClientLabel">Client</label>
+            <div id="trustEntryClientName" style="font-weight:600;">—</div>
+          </div>
+          <div class="form-row-two">
+            <div class="form-group-modal">
+              <label for="trustEntryAmount">Amount (USD)</label>
+              <input type="number" id="trustEntryAmount" required min="0.01" step="0.01" placeholder="e.g. 5000.00" />
+            </div>
+            <div class="form-group-modal">
+              <label for="trustEntryCheckNumber">Check # (optional)</label>
+              <input type="text" id="trustEntryCheckNumber" placeholder="e.g. 1042" />
+            </div>
+          </div>
+          <div class="form-group-modal">
+            <label for="trustEntryMemo">Memo</label>
+            <textarea id="trustEntryMemo" rows="2" required placeholder="What this is for — required for the trust ledger's paper trail."></textarea>
+          </div>
+          <div class="modal-footer">
+            <button type="button" class="btn-ghost" id="trustEntryModalCancelBtn">Cancel</button>
+            <button type="submit" class="btn-primary" id="trustEntrySubmitBtn"
+              style="background: var(--gold-500); color: var(--navy-950); font-weight: 600; border: none;">Record Deposit</button>
+          </div>
+        </form>
+      </div>
+    </div>
+  </div>
+
+  <!-- TRUST TRANSFER TO OPERATING MODAL -->
+  <div class="modal-overlay hidden" id="trustTransferModal">
+    <div class="modal-box">
+      <div class="modal-header">
+        <h3 class="modal-title">Pay Invoice from Trust</h3>
+        <button class="modal-close-btn" id="trustTransferModalCloseBtn">&times;</button>
+      </div>
+      <div class="modal-body">
+        <form id="trustTransferForm" onsubmit="handleTrustTransferSubmit(event)">
+          <input type="hidden" id="trustTransferLedgerId" />
+          <div class="form-group-modal">
+            <label id="trustTransferClientLabel">Client</label>
+            <div id="trustTransferClientName" style="font-weight:600;">—</div>
+          </div>
+          <div class="form-group-modal">
+            <label for="trustTransferInvoice">Unpaid Invoice</label>
+            <select id="trustTransferInvoice" required></select>
+          </div>
+          <div class="form-group-modal">
+            <label for="trustTransferMemo">Memo</label>
+            <textarea id="trustTransferMemo" rows="2" required placeholder="e.g. Applied retainer to invoice INV-2026-014."></textarea>
+          </div>
+          <div class="modal-footer">
+            <button type="button" class="btn-ghost" id="trustTransferModalCancelBtn">Cancel</button>
+            <button type="submit" class="btn-primary" id="trustTransferSubmitBtn"
+              style="background: var(--gold-500); color: var(--navy-950); font-weight: 600; border: none;">Transfer &amp; Mark Paid</button>
+          </div>
+        </form>
+      </div>
+    </div>
+  </div>
+
+  <!-- TRUST TRANSACTION HISTORY MODAL -->
+  <div class="modal-overlay hidden" id="trustHistoryModal">
+    <div class="modal-box" style="max-width: 720px;">
+      <div class="modal-header">
+        <h3 class="modal-title" id="trustHistoryModalTitle">Transaction History</h3>
+        <button class="modal-close-btn" id="trustHistoryModalCloseBtn">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div class="table-container">
+          <table class="cases-large-table" id="trustHistoryTable">
+            <thead>
+              <tr>
+                <th>Date</th>
+                <th>Type</th>
+                <th>Amount</th>
+                <th>Memo</th>
+                <th>By</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody id="trustHistoryTableBody"></tbody>
+          </table>
+        </div>
       </div>
     </div>
   </div>
@@ -1999,10 +2463,56 @@
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:14px;height:14px"><path d="M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z"/><line x1="4" y1="22" x2="4" y2="15"/></svg>
       <span id="ctxFlagLabel">Flag for Review</span>
     </div>
+    <div class="ctx-item" id="ctxVersions">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:14px;height:14px"><path d="M12 8v4l3 3"/><circle cx="12" cy="12" r="9"/></svg>
+      Version History
+    </div>
     <div class="ctx-divider"></div>
     <div class="ctx-item danger" id="ctxDelete">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:14px;height:14px"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v6M14 11v6"/><path d="M9 6V4h6v2"/></svg>
       Delete
+    </div>
+  </div>
+
+  <!-- DOCUMENT DETAIL / VERSION HISTORY MODAL -->
+  <div class="modal-overlay hidden" id="documentDetailModal">
+    <div class="modal-box" style="max-width: 640px;">
+      <div class="modal-header">
+        <h3 class="modal-title">Document — <span id="docDetailFileName"></span></h3>
+        <button class="modal-close-btn" id="docDetailModalCloseBtn">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div style="margin-bottom:22px;">
+          <h4 style="margin:0 0 8px;">Upload New Version</h4>
+          <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+            <input type="file" id="docDetailNewVersionFile" accept=".pdf,.doc,.docx,.xls,.xlsx,.png,.jpg,.jpeg" />
+            <button class="btn-primary" id="docDetailUploadVersionBtn" disabled>Upload New Version</button>
+          </div>
+          <div id="docDetailCommentGroup" class="hidden" style="margin-top:10px;">
+            <label for="docDetailVersionComment" style="font-size:12px; color:var(--slate-400);">Version comment (optional)</label>
+            <textarea id="docDetailVersionComment" rows="2" style="width:100%; box-sizing:border-box; font:inherit; padding:6px 8px; margin-top:4px;"
+              placeholder="What changed in this version?"></textarea>
+          </div>
+        </div>
+
+        <div>
+          <h4 style="margin:0 0 8px;">Version History</h4>
+          <div class="table-container">
+            <table class="cases-large-table" id="docDetailVersionsTable">
+              <thead>
+                <tr>
+                  <th>Version</th>
+                  <th>Uploaded By</th>
+                  <th>Uploaded</th>
+                  <th>Comment</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody id="docDetailVersionsTableBody"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
     </div>
   </div>
 
