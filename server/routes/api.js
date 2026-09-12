@@ -139,9 +139,17 @@ router.get('/conversations/:id', communicationsController.getConversation);
 router.post('/conversations/:id/messages', communicationsController.postMessage);
 
 // ═════════════════════════════════════════════════════════════════════
-// G2. INVOICES / BILLING (client portal)
+// G2. INVOICES / BILLING (staff Billing page + client portal read)
+// Create/edit are gated to ASSOCIATE+ — the same floor DELETE
+// /api/v1/files/:id and PATCH /api/v1/cases/:id/archive already use.
+// Mark Paid is gated one level higher, to PARTNER+: it's a financial
+// attestation that money was actually received (not a metadata edit),
+// so it gets a stricter floor rather than defaulting to ASSOCIATE.
 // ═════════════════════════════════════════════════════════════════════
 router.get('/invoices', invoiceController.listInvoices);
+router.post('/invoices', requireRole('ASSOCIATE'), invoiceController.createInvoice);
+router.patch('/invoices/:id', requireRole('ASSOCIATE'), invoiceController.updateInvoice);
+router.patch('/invoices/:id/mark-paid', requireRole('PARTNER'), invoiceController.markInvoicePaid);
 
 // ═════════════════════════════════════════════════════════════════════
 // H. ADMIN — TEAM / USER PROVISIONING

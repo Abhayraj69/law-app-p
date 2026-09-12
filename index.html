@@ -1163,6 +1163,118 @@
       </div>
     </main>
 
+    <!-- BILLING PAGE -->
+    <main class="content hidden" id="billingPage">
+      <div class="page-header-row">
+        <h2 class="cases-page-title">Invoices</h2>
+        <button class="btn-primary hidden" id="billingPageNewBtn">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+            style="width: 14px; height: 14px; vertical-align: middle; margin-right: 4px;">
+            <line x1="12" y1="5" x2="12" y2="19" />
+            <line x1="5" y1="12" x2="19" y2="12" />
+          </svg>
+          + New Invoice
+        </button>
+      </div>
+
+      <!-- Command Bar -->
+      <div class="command-bar">
+        <div class="search-box">
+          <svg class="search-box-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="11" cy="11" r="8" />
+            <path d="M21 21l-4.35-4.35" />
+          </svg>
+          <input type="text" id="billingPageSearch" placeholder="Search by invoice #, case, or client..."
+            autocomplete="off" />
+        </div>
+        <div class="filter-row">
+          <div class="filter-group">
+            <span class="filter-label">Status:</span>
+            <div class="pill-group" id="billingStatusFilterPills">
+              <button class="pill active" data-value="all">All</button>
+              <button class="pill" data-value="draft">Draft</button>
+              <button class="pill" data-value="sent">Sent</button>
+              <button class="pill" data-value="paid">Paid</button>
+              <button class="pill" data-value="overdue">Overdue</button>
+              <button class="pill" data-value="void">Void</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Invoice List (Data Table) -->
+      <div class="panel table-panel edge-to-edge">
+        <div class="table-container">
+          <table class="cases-large-table" id="billingLargeTable">
+            <thead>
+              <tr>
+                <th>Invoice #</th>
+                <th>Case</th>
+                <th>Amount</th>
+                <th>Status</th>
+                <th>Issued</th>
+                <th>Due</th>
+                <th>Paid</th>
+                <th style="width: 80px;">Actions</th>
+              </tr>
+            </thead>
+            <tbody id="billingLargeTableBody">
+              <!-- Rendered Dynamically -->
+            </tbody>
+          </table>
+        </div>
+
+        <!-- Empty State Container -->
+        <div class="empty-state-container hidden" id="billingEmptyState">
+          <div class="empty-state-illustration" style="margin: 0 auto 20px;">
+            <svg viewBox="0 0 120 120" fill="none" xmlns="http://www.w3.org/2000/svg"
+              style="width: 80px; height: 80px;">
+              <rect x="25" y="35" width="70" height="55" rx="8" stroke="var(--slate-400)" stroke-width="2.5"
+                stroke-dasharray="6 4" fill="none" opacity="0.4" />
+              <path d="M35 35V28a4 4 0 014-4h20l6 8h26a4 4 0 014 4v7" stroke="var(--slate-400)" stroke-width="2.5"
+                stroke-linecap="round" fill="none" opacity="0.4" />
+              <circle cx="60" cy="62" r="16" stroke="var(--gold-500)" stroke-width="3" fill="var(--navy-800)" />
+              <line x1="71" y1="73" x2="88" y2="90" stroke="var(--gold-500)" stroke-width="3.5"
+                stroke-linecap="round" />
+              <line x1="53" y1="56" x2="67" y2="56" stroke="var(--slate-300)" stroke-width="2" stroke-linecap="round" />
+              <line x1="53" y1="62" x2="67" y2="62" stroke="var(--slate-300)" stroke-width="2" stroke-linecap="round" />
+              <line x1="53" y1="68" x2="61" y2="68" stroke="var(--slate-300)" stroke-width="2" stroke-linecap="round" />
+            </svg>
+          </div>
+          <h3 class="empty-state-title">No invoices found</h3>
+          <p class="empty-state-description">We couldn't find any invoices matching your search or selected filter.
+            Try adjusting your filters, or create a new invoice.</p>
+          <button class="btn-primary hidden" id="billingEmptyStateNewBtn">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+              style="width: 14px; height: 14px; vertical-align: middle; margin-right: 4px;">
+              <line x1="12" y1="5" x2="12" y2="19" />
+              <line x1="5" y1="12" x2="19" y2="12" />
+            </svg>
+            + New Invoice
+          </button>
+        </div>
+
+        <div class="table-footer">
+          <span class="showing-text" id="billingShowingText">Showing 0 of 0</span>
+          <div class="pagination">
+            <button class="page-btn" id="billingPrevPage" disabled>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M15 18l-6-6 6-6" />
+              </svg>
+            </button>
+            <div id="billingPageNumbers" class="page-numbers-container" style="display: flex; gap: 4px;">
+              <!-- Dynamic page numbers -->
+            </div>
+            <button class="page-btn" id="billingNextPage">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M9 18l6-6-6-6" />
+              </svg>
+            </button>
+          </div>
+        </div>
+      </div>
+    </main>
+
     <!-- NOTIFICATION PANEL -->
     <div class="notification-panel" id="notificationPanel">
       <div class="notif-header">
@@ -1247,6 +1359,59 @@
             <button type="submit" class="btn-primary"
               style="background: var(--gold-500); color: var(--navy-950); font-weight: 600; border: none;">Create Case
               Record</button>
+          </div>
+        </form>
+      </div>
+    </div>
+  </div>
+
+  <!-- NEW / EDIT INVOICE MODAL -->
+  <div class="modal-overlay hidden" id="invoiceModal">
+    <div class="modal-box">
+      <div class="modal-header">
+        <h3 class="modal-title" id="invoiceModalTitle">New Invoice</h3>
+        <button class="modal-close-btn" id="invoiceModalCloseBtn">&times;</button>
+      </div>
+      <div class="modal-body">
+        <form id="invoiceForm" onsubmit="handleInvoiceSubmit(event)">
+          <div class="form-row-two">
+            <div class="form-group-modal">
+              <label for="invoiceCase">Case (optional)</label>
+              <select id="invoiceCase">
+                <option value="">No linked case</option>
+              </select>
+            </div>
+            <div class="form-group-modal">
+              <label for="invoiceAmount">Amount (USD)</label>
+              <input type="number" id="invoiceAmount" required min="0" step="0.01" placeholder="e.g. 4200.00" />
+            </div>
+          </div>
+          <div class="form-row-two">
+            <div class="form-group-modal">
+              <label for="invoiceStatus">Status</label>
+              <select id="invoiceStatus" required>
+                <option value="draft">Draft</option>
+                <option value="sent">Sent</option>
+                <option value="overdue">Overdue</option>
+                <option value="void">Void</option>
+              </select>
+            </div>
+            <div class="form-group-modal">
+              <label for="invoiceDueDate">Due Date</label>
+              <input type="date" id="invoiceDueDate" />
+            </div>
+          </div>
+          <div class="form-row-two" id="invoiceIssuedDateGroup">
+            <div class="form-group-modal">
+              <label for="invoiceIssuedDate">Issued Date</label>
+              <input type="date" id="invoiceIssuedDate" />
+            </div>
+          </div>
+          <div class="modal-footer">
+            <button type="button" class="btn-ghost" id="invoiceModalCancelBtn">Cancel</button>
+            <button type="submit" class="btn-primary" id="invoiceSubmitBtn"
+              style="background: var(--gold-500); color: var(--navy-950); font-weight: 600; border: none;">Create
+              Invoice</button>
           </div>
         </form>
       </div>

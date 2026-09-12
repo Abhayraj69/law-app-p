@@ -626,15 +626,105 @@ async function getMaxCaseNumber(firmId) {
 }
 
 // ── Invoices ─────────────────────────────────────────────────────────────
+const INVOICE_SELECT = `SELECT invoices.*, cases.case_name FROM invoices
+     LEFT JOIN cases ON cases.id = invoices.case_id`;
+
 async function listInvoicesByFirm(firmId) {
   const { rows } = await pool.query(
-    `SELECT invoices.*, cases.case_name FROM invoices
-     LEFT JOIN cases ON cases.id = invoices.case_id
+    `${INVOICE_SELECT}
      WHERE invoices.firm_id = $1
      ORDER BY invoices.issued_date DESC`,
     [firmId]
   );
   return rows.map(r => ({ ...r, amount_cents: Number(r.amount_cents) }));
+}
+
+// GET (single)/PATCH /api/v1/invoices/:id — firm-scoped, not further
+// scoped by user: unlike listInvoicesForUser (the client portal's read),
+// create/update/markPaid are staff-only actions gated by requireRole in
+// server/routes/api.js, so there's no CLIENT case to restrict here.
+async function getInvoiceById(firmId, invoiceId) {
+  const { rows } = await pool.query(
+    `${INVOICE_SELECT} WHERE invoices.firm_id = $1 AND invoices.id = $2`,
+    [firmId, invoiceId]
+  );
+  if (!rows[0]) return null;
+  return { ...rows[0], amount_cents: Number(rows[0].amount_cents) };
+}
+
+// Highest existing numeric suffix of an invoice_number like
+// 'INV-2026-084', used to generate the next one when creating an invoice
+// from the UI — same convention as getMaxCaseNumber for case ids.
+async function getMaxInvoiceNumber(firmId) {
+  const { rows } = await pool.query(
+    `SELECT invoice_number FROM invoices WHERE firm_id = $1 AND invoice_number ~ '^INV-[0-9]{4}-[0-9]+$' ORDER BY invoice_number DESC`,
+    [firmId]
+  );
+  let max = 0;
+  for (const row of rows) {
+    const n = parseInt(row.invoice_number.split('-')[2], 10);
+    if (n > max) max = n;
+  }
+  return max;
+}
+
+async function insertInvoice({ id, firmId, caseId, invoiceNumber, amountCents, status, issuedDate, dueDate }) {
+  const { rows } = await pool.query(
+    `INSERT INTO invoices (id, firm_id, case_id, invoice_number, amount_cents, status, issued_date, due_date)
+     VALUES (COALESCE($1, uuid_generate_v4()), $2, $3, $4, $5, COALESCE($6, 'draft'), COALESCE($7, CURRENT_DATE), $8)
+     RETURNING id`,
+    [id || null, firmId, caseId || null, invoiceNumber, amountCents, status || null, issuedDate || null, dueDate || null]
+  );
+  return getInvoiceById(firmId, rows[0].id);
+}
+
+// General field update (case, amount, due date, non-paid status changes).
+// Deliberately excludes `status = 'paid'` and `paid_date` — those only ever
+// go through markInvoicePaid below, the same way archiveCase is a separate
+// dedicated action from updateCaseFields rather than a status value any
+// generic update can set.
+async function updateInvoiceFields(firmId, invoiceId, updates = {}) {
+  const fieldMap = {
+    caseId: 'case_id',
+    amountCents: 'amount_cents',
+    status: 'status',
+    dueDate: 'due_date'
+  };
+
+  const setClauses = [];
+  const values = [];
+  let i = 1;
+  for (const [key, column] of Object.entries(fieldMap)) {
+    if (updates[key] !== undefined) {
+      setClauses.push(`${column} = $${i}`);
+      values.push(updates[key]);
+      i++;
+    }
+  }
+  if (!setClauses.length) return getInvoiceById(firmId, invoiceId);
+
+  setClauses.push('updated_at = CURRENT_TIMESTAMP');
+  values.push(firmId, invoiceId);
+  await pool.query(
+    `UPDATE invoices SET ${setClauses.join(', ')} WHERE firm_id = $${i} AND id = $${i + 1}`,
+    values
+  );
+  return getInvoiceById(firmId, invoiceId);
+}
+
+// Used by the "Mark Paid" action — sets status to 'paid' and stamps
+// paid_date (defaults to today, same as issued_date's own column default,
+// but taken explicitly here since CURRENT_DATE in an UPDATE isn't a column
+// default).
+async function markInvoicePaidRow(firmId, invoiceId, paidDate) {
+  const { rows } = await pool.query(
+    `UPDATE invoices SET status = 'paid', paid_date = COALESCE($1, CURRENT_DATE), updated_at = CURRENT_TIMESTAMP
+     WHERE firm_id = $2 AND id = $3
+     RETURNING id`,
+    [paidDate || null, firmId, invoiceId]
+  );
+  if (!rows[0]) return null;
+  return getInvoiceById(firmId, invoiceId);
 }
 
 // GET /api/v1/invoices — the client portal's billing view. Same
@@ -1005,6 +1095,11 @@ module.exports = {
   getMaxCaseNumber,
   listInvoicesByFirm,
   listInvoicesForUser,
+  getInvoiceById,
+  getMaxInvoiceNumber,
+  insertInvoice,
+  updateInvoiceFields,
+  markInvoicePaidRow,
   getMonthlyBillingTotals,
   getInvoiceStats,
   listConversationsForUser,

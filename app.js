@@ -27,6 +27,7 @@ let MESSAGES = [];
 let BILLING_DATA = [];
 let ACTIVITIES = [];
 let NOTIFICATIONS = [];
+let INVOICES = [];
 
 const SEARCH_DATA = [
   { type: 'case', icon: 'case', name: 'Anderson v. Meridian Corp.', meta: 'Active · Commercial Litigation' },
@@ -82,6 +83,34 @@ const Auth = {
   }
 };
 
+// Mirrors the server's requireRole('ASSOCIATE') floor on DELETE
+// /api/v1/files/:id and PATCH /api/v1/cases/:id/archive (server/routes/api.js)
+// — PARALEGAL is the only role below that floor (CLIENT never reaches this
+// SPA at all, see initAuth). Reads the same cached session user that
+// applyUserToChrome/initAuth already populate, rather than a separate
+// role-checking mechanism.
+function isParalegal() {
+  const user = Auth.getUser();
+  return !!user && user.role === 'PARALEGAL';
+}
+
+// Mirrors the server's requireRole('ASSOCIATE') floor on POST /api/v1/invoices
+// and PATCH /api/v1/invoices/:id (server/routes/api.js) — same floor and
+// same PARALEGAL exception as isParalegal() above, just phrased positively
+// since it gates showing a control rather than hiding one.
+function canManageBilling() {
+  return !isParalegal();
+}
+
+// Mirrors the server's requireRole('PARTNER') floor on
+// PATCH /api/v1/invoices/:id/mark-paid — stricter than canManageBilling()
+// above because marking an invoice paid is a financial attestation that
+// money was actually received, not a metadata edit.
+function canMarkInvoicesPaid() {
+  const role = Auth.getUser() && Auth.getUser().role;
+  return role === 'PARTNER' || role === 'SENIOR_PARTNER' || role === 'ADMIN';
+}
+
 function showAuthOverlay(message) {
   document.body.classList.add('auth-locked');
   const errBox = $('authError');
@@ -118,6 +147,24 @@ function applyUserToChrome(user) {
   if ($('dropdownUserAvatar')) $('dropdownUserAvatar').textContent = initials;
   if ($('dropdownUserName')) $('dropdownUserName').textContent = `${user.full_name}, Esq.`;
   if ($('dropdownUserEmail')) $('dropdownUserEmail').textContent = user.email;
+
+  applyRolePermissionsToChrome(user);
+}
+
+// Hides the delete entry points a PARALEGAL would otherwise see and then
+// get bounced off with a raw 403 toast: the bulk-action-bar Delete button
+// and the per-row context-menu Delete item (plus its now-orphaned divider).
+// The Archive Case button is handled separately, in renderCasesList, since
+// it's rebuilt from scratch per row on every render rather than living as
+// static markup like these two.
+function applyRolePermissionsToChrome(user) {
+  const restricted = user && user.role === 'PARALEGAL';
+  if ($('bulkDelete')) $('bulkDelete').classList.toggle('hidden', restricted);
+  if ($('ctxDelete')) $('ctxDelete').classList.toggle('hidden', restricted);
+  const ctxDeleteDivider = $('ctxDelete')?.previousElementSibling;
+  if (ctxDeleteDivider && ctxDeleteDivider.classList.contains('ctx-divider')) {
+    ctxDeleteDivider.classList.toggle('hidden', restricted);
+  }
 }
 
 // Called once at startup: trust a stored token only after the server
@@ -221,6 +268,14 @@ function formatCurrency(n) {
   return '$' + n.toLocaleString();
 }
 
+// Invoice amounts are stored/transmitted in cents (see amount_cents on the
+// API) so money never touches a float on the wire — this is the one place
+// that turns them back into a full, exact dollar figure for display,
+// unlike formatCurrency's abbreviated "$142k" KPI-card format above.
+function formatMoney(cents) {
+  return '$' + (cents / 100).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
 function getStatusLabel(status) {
   const map = { active: 'Active', pending: 'Pending', review: 'In Review', closed: 'Closed' };
   return map[status] || status;
@@ -262,6 +317,7 @@ function navigateToPage(page) {
   const casesPage = $('casesPage');
   const commsPage = $('commsPage');
   const documentsPage = $('documentsPage');
+  const billingPage = $('billingPage');
   const settingsPage = $('settingsPage');
   const placeholder = $('placeholderPage');
 
@@ -270,6 +326,7 @@ function navigateToPage(page) {
   if (casesPage) casesPage.classList.add('hidden');
   if (commsPage) commsPage.classList.add('hidden');
   if (documentsPage) documentsPage.classList.add('hidden');
+  if (billingPage) billingPage.classList.add('hidden');
   if (settingsPage) settingsPage.classList.add('hidden');
   if (placeholder) placeholder.classList.add('hidden');
 
@@ -292,6 +349,11 @@ function navigateToPage(page) {
     if (commsPage) {
       commsPage.classList.remove('hidden');
       initCommsPage();
+    }
+  } else if (page === 'billing') {
+    if (billingPage) {
+      billingPage.classList.remove('hidden');
+      initBillingPage();
     }
   } else if (page === 'settings') {
     if (settingsPage) {
@@ -1011,6 +1073,11 @@ function renderCasesList() {
   const start = (casesCurrentPage - 1) * CASES_PAGE_SIZE;
   const slice = results.slice(start, start + CASES_PAGE_SIZE);
 
+  // Matches the server's requireRole('ASSOCIATE') floor on PATCH
+  // /api/v1/cases/:id/archive — computed once per render rather than per
+  // row, since it doesn't vary by case.
+  const canArchive = !isParalegal();
+
   // Render rows
   tbody.innerHTML = slice.map(c => {
     const statusLabels = {
@@ -1054,11 +1121,13 @@ function renderCasesList() {
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" style="width:14px;height:14px;stroke:currentColor;margin-right:2px"><path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/></svg>
               Message via Client Portal
             </button>
+            ${canArchive ? `
             <div style="height:1px; background:rgba(255,255,255,0.06); margin:4px 0;"></div>
             <button class="actions-dropdown-item danger-item" onclick="handleCaseAction('archive', '${c.id}', '${c.name}')">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" style="width:14px;height:14px;stroke:currentColor;margin-right:2px"><path d="M21 8v13a2 2 0 01-2 2H5a2 2 0 01-2-2V8M22 3H2v5h20V3zM10 12h4"/></svg>
               Archive Case
             </button>
+            ` : ''}
           </div>
         </td>
       </tr>
@@ -1293,6 +1362,338 @@ async function handleCaseAction(action, caseId, caseName) {
     } catch (err) {
       showToast(err.message || 'Failed to archive case.', 'error');
     }
+  }
+}
+
+/* ════════════════════════════════════════════
+   BILLING PAGE (INVOICES)
+   Same list/filter/modal/row-action-dropdown pattern as the Active Cases
+   page above: re-fetches on every visit (initBillingPage, matching
+   initCasesPage/initDocumentVault), filters/paginates client-side over
+   the full INVOICES array, and reuses the same modal/dropdown/status-badge
+   CSS classes rather than introducing new ones.
+   ════════════════════════════════════════════ */
+
+let billingSearchQuery = "";
+let billingStatusFilter = "all";
+let billingCurrentPage = 1;
+const BILLING_PAGE_SIZE = 8;
+let billingListenersInitialized = false;
+let currentInvoiceEditId = null;
+
+function initBillingPage() {
+  const allowed = canManageBilling();
+  if ($('billingPageNewBtn')) $('billingPageNewBtn').classList.toggle('hidden', !allowed);
+  if ($('billingEmptyStateNewBtn')) $('billingEmptyStateNewBtn').classList.toggle('hidden', !allowed);
+
+  setupBillingPageListeners();
+  loadInvoices();
+}
+
+async function loadInvoices() {
+  try {
+    INVOICES = await ApiClient.get('/api/v1/invoices');
+    billingCurrentPage = 1;
+    renderBillingList();
+  } catch (err) {
+    console.error('Invoices load error', err);
+    const tbody = $('billingLargeTableBody');
+    if (tbody) tbody.innerHTML = `<tr><td colspan="8" style="text-align:center;color:var(--slate-400)">Error loading invoices</td></tr>`;
+  }
+}
+
+function filteredInvoices() {
+  const q = billingSearchQuery.toLowerCase();
+  return INVOICES.filter(inv => {
+    const matchesSearch = !q ||
+      inv.invoice_number.toLowerCase().includes(q) ||
+      (inv.case_name || '').toLowerCase().includes(q) ||
+      (inv.case_id || '').toLowerCase().includes(q);
+    const matchesStatus = billingStatusFilter === 'all' || inv.status === billingStatusFilter;
+    return matchesSearch && matchesStatus;
+  });
+}
+
+// A raw DATE column ('YYYY-MM-DD' or null — see parseDateOnly's own
+// comment above) formatted for display; null shows as an em dash rather
+// than "Invalid Date" (due_date/paid_date are both nullable).
+function formatInvoiceDate(dateStr) {
+  if (!dateStr) return '—';
+  return parseDateOnly(dateStr).toLocaleDateString('en-US', { month: 'short', day: '2-digit', year: 'numeric' });
+}
+
+// Same badge classes the Active Cases table already uses (active/pending/
+// review/urgent/closed) rather than adding new CSS for invoice-specific
+// colors — chosen by closest semantic match: paid≈active (green),
+// sent≈review (blue, awaiting action), draft≈pending (amber, not yet
+// sent), overdue≈urgent (red), void≈closed (gray, inactive).
+const INVOICE_STATUS_BADGE_CLASS = { draft: 'pending', sent: 'review', paid: 'active', overdue: 'urgent', void: 'closed' };
+const INVOICE_STATUS_LABEL = { draft: 'Draft', sent: 'Sent', paid: 'Paid', overdue: 'Overdue', void: 'Void' };
+
+function renderBillingList() {
+  const tbody = $('billingLargeTableBody');
+  const emptyState = $('billingEmptyState');
+  const table = $('billingLargeTable');
+  if (!tbody) return;
+
+  const results = filteredInvoices();
+
+  if (results.length === 0) {
+    emptyState.classList.remove('hidden');
+    table.classList.add('hidden');
+    $('billingShowingText').textContent = 'No invoices found';
+    $('billingPrevPage').disabled = true;
+    $('billingNextPage').disabled = true;
+    $('billingPageNumbers').innerHTML = '';
+    return;
+  } else {
+    emptyState.classList.add('hidden');
+    table.classList.remove('hidden');
+  }
+
+  const total = results.length;
+  const totalPages = Math.ceil(total / BILLING_PAGE_SIZE);
+  if (billingCurrentPage > totalPages) billingCurrentPage = totalPages;
+  if (billingCurrentPage < 1) billingCurrentPage = 1;
+
+  const start = (billingCurrentPage - 1) * BILLING_PAGE_SIZE;
+  const slice = results.slice(start, start + BILLING_PAGE_SIZE);
+
+  // Matches the server's requireRole floors: ASSOCIATE+ for create/edit
+  // (requireRole('ASSOCIATE') on POST/PATCH /api/v1/invoices), PARTNER+
+  // for Mark Paid (requireRole('PARTNER') on the mark-paid route). A paid
+  // invoice is never offered for edit — see the "Edit Invoice" action
+  // below — so openInvoiceModal never has to reconcile a 'paid' status
+  // against the edit form's status options, which deliberately exclude it.
+  const canEdit = canManageBilling();
+  const canMarkPaid = canMarkInvoicesPaid();
+
+  tbody.innerHTML = slice.map(inv => {
+    const actions = [];
+    if (canEdit && inv.status !== 'paid') {
+      actions.push(`
+        <button class="actions-dropdown-item" onclick="openInvoiceModal('${inv.id}')">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" style="width:14px;height:14px;stroke:currentColor;margin-right:2px"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+          Edit Invoice
+        </button>
+      `);
+    }
+    if (canMarkPaid && inv.status !== 'paid' && inv.status !== 'void') {
+      actions.push(`
+        <button class="actions-dropdown-item" onclick="handleInvoiceMarkPaid('${inv.id}', '${inv.invoice_number}')">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" style="width:14px;height:14px;stroke:currentColor;margin-right:2px"><path d="M20 6L9 17l-5-5"/></svg>
+          Mark Paid
+        </button>
+      `);
+    }
+
+    const actionsHtml = !actions.length ? '' : `
+      <button class="row-action-btn" aria-label="Actions for ${inv.invoice_number}" onclick="toggleActionsDropdown(event, 'inv-${inv.id}')">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <circle cx="12" cy="5" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="12" cy="19" r="1.5"/>
+        </svg>
+      </button>
+      <div class="actions-dropdown-menu" id="dropdown-inv-${inv.id}">
+        ${actions.join('')}
+      </div>
+    `;
+
+    return `
+      <tr>
+        <td>${inv.invoice_number}</td>
+        <td>${inv.case_name || '—'}</td>
+        <td>${formatMoney(inv.amount_cents)}</td>
+        <td><span class="status-badge ${INVOICE_STATUS_BADGE_CLASS[inv.status] || 'closed'}">${INVOICE_STATUS_LABEL[inv.status] || inv.status}</span></td>
+        <td class="activity-time">${formatInvoiceDate(inv.issued_date)}</td>
+        <td class="activity-time">${formatInvoiceDate(inv.due_date)}</td>
+        <td class="activity-time">${formatInvoiceDate(inv.paid_date)}</td>
+        <td class="actions-cell-wrap">${actionsHtml}</td>
+      </tr>
+    `;
+  }).join('');
+
+  const end = Math.min(start + BILLING_PAGE_SIZE, total);
+  $('billingShowingText').textContent = `Showing ${start + 1}–${end} of ${total}`;
+  $('billingPrevPage').disabled = billingCurrentPage === 1;
+  $('billingNextPage').disabled = billingCurrentPage === totalPages;
+
+  let pageNumbersHtml = '';
+  for (let i = 1; i <= totalPages; i++) {
+    pageNumbersHtml += `<button class="page-btn ${billingCurrentPage === i ? 'active' : ''}" onclick="setBillingPage(${i})">${i}</button>`;
+  }
+  $('billingPageNumbers').innerHTML = pageNumbersHtml;
+}
+
+function setBillingPage(p) {
+  billingCurrentPage = p;
+  renderBillingList();
+}
+
+function setupBillingPageListeners() {
+  if (billingListenersInitialized) return;
+
+  $('billingPageSearch').addEventListener('input', (e) => {
+    billingSearchQuery = e.target.value;
+    billingCurrentPage = 1;
+    renderBillingList();
+  });
+
+  $$('#billingStatusFilterPills .pill').forEach(pill => {
+    pill.addEventListener('click', () => {
+      $$('#billingStatusFilterPills .pill').forEach(p => p.classList.remove('active'));
+      pill.classList.add('active');
+      billingStatusFilter = pill.dataset.value;
+      billingCurrentPage = 1;
+      renderBillingList();
+    });
+  });
+
+  $('billingPrevPage').addEventListener('click', () => {
+    if (billingCurrentPage > 1) {
+      billingCurrentPage--;
+      renderBillingList();
+    }
+  });
+
+  $('billingNextPage').addEventListener('click', () => {
+    const totalPages = Math.ceil(filteredInvoices().length / BILLING_PAGE_SIZE);
+    if (billingCurrentPage < totalPages) {
+      billingCurrentPage++;
+      renderBillingList();
+    }
+  });
+
+  ['billingPageNewBtn', 'billingEmptyStateNewBtn'].forEach(id => {
+    const btn = $(id);
+    if (btn) btn.addEventListener('click', () => openInvoiceModal(null));
+  });
+
+  $('invoiceModalCloseBtn').addEventListener('click', closeInvoiceModal);
+  $('invoiceModalCancelBtn').addEventListener('click', closeInvoiceModal);
+  $('invoiceModal').addEventListener('click', (e) => {
+    if (e.target === $('invoiceModal')) closeInvoiceModal();
+  });
+
+  // Same outside-click-closes-dropdown behavior setupCasesPageListeners
+  // registers for the Cases table — registered again here (harmlessly
+  // redundant if both pages were visited) so it also works for a session
+  // that opens Billing without ever having visited Cases first.
+  document.addEventListener('click', (e) => {
+    if (!e.target.closest('.actions-cell-wrap')) {
+      closeAllActionsDropdowns();
+    }
+  });
+
+  billingListenersInitialized = true;
+}
+
+// `invoiceId` is null for "New Invoice" (create mode) or a real invoice id
+// for "Edit Invoice" (row action). A paid invoice is never passed here —
+// see renderBillingList, which only offers the Edit action for non-paid
+// invoices — so the status <select>'s options (which deliberately exclude
+// 'paid', matching updateInvoice's server-side rejection of that value)
+// never need to represent one.
+function openInvoiceModal(invoiceId) {
+  closeAllActionsDropdowns();
+  const invoice = invoiceId ? INVOICES.find(i => i.id === invoiceId) : null;
+  currentInvoiceEditId = invoice ? invoice.id : null;
+
+  // Rebuilt fresh each open — CASES may have changed since the modal was
+  // last shown (a case created after page load, etc).
+  const caseSelect = $('invoiceCase');
+  caseSelect.innerHTML = '<option value="">No linked case</option>' +
+    CASES.map(c => `<option value="${c.id}">${c.id} — ${c.name}</option>`).join('');
+
+  if (invoice) {
+    $('invoiceModalTitle').textContent = 'Edit Invoice';
+    $('invoiceSubmitBtn').textContent = 'Save Changes';
+    caseSelect.value = invoice.case_id || '';
+    $('invoiceAmount').value = (invoice.amount_cents / 100).toFixed(2);
+    $('invoiceStatus').value = invoice.status;
+    $('invoiceDueDate').value = invoice.due_date || '';
+    // issued_date isn't editable after creation (see InvoiceService.updateInvoice)
+    $('invoiceIssuedDateGroup').classList.add('hidden');
+  } else {
+    $('invoiceForm').reset();
+    $('invoiceModalTitle').textContent = 'New Invoice';
+    $('invoiceSubmitBtn').textContent = 'Create Invoice';
+    caseSelect.value = '';
+    $('invoiceStatus').value = 'draft';
+    $('invoiceIssuedDateGroup').classList.remove('hidden');
+  }
+
+  const modal = $('invoiceModal');
+  modal.classList.remove('hidden');
+  setTimeout(() => modal.classList.add('active'), 10);
+}
+
+function closeInvoiceModal() {
+  const modal = $('invoiceModal');
+  if (modal) {
+    modal.classList.remove('active');
+    setTimeout(() => modal.classList.add('hidden'), 300);
+    $('invoiceForm').reset();
+    currentInvoiceEditId = null;
+  }
+}
+
+async function handleInvoiceSubmit(e) {
+  e.preventDefault();
+
+  const caseId = $('invoiceCase').value || null;
+  const amountDollars = parseFloat($('invoiceAmount').value);
+  const status = $('invoiceStatus').value;
+  const dueDate = $('invoiceDueDate').value || null;
+  const issuedDate = $('invoiceIssuedDate').value || null;
+
+  if (!Number.isFinite(amountDollars) || amountDollars < 0) {
+    showToast('Enter a valid, non-negative amount.', 'error');
+    return;
+  }
+  // Cents on the wire, same as the API — see amount_cents's own comment
+  // in db/migrations/0001_cases_invoices_conversations.sql.
+  const amountCents = Math.round(amountDollars * 100);
+
+  const isEdit = !!currentInvoiceEditId;
+  const submitBtn = $('invoiceSubmitBtn');
+  submitBtn.disabled = true;
+  submitBtn.textContent = isEdit ? 'Saving…' : 'Creating…';
+
+  try {
+    if (isEdit) {
+      await ApiClient.patch(`/api/v1/invoices/${currentInvoiceEditId}`, {
+        case_id: caseId, amount_cents: amountCents, status, due_date: dueDate
+      });
+      showToast('Invoice updated successfully.', 'success');
+    } else {
+      const { ok, json } = await ApiClient.post('/api/v1/invoices', {
+        case_id: caseId, amount_cents: amountCents, status, issued_date: issuedDate, due_date: dueDate
+      });
+      if (!ok) throw new Error(json.error || 'Failed to create invoice.');
+      showToast(`Invoice ${json.data.invoice_number} created successfully.`, 'success');
+    }
+
+    closeInvoiceModal();
+    await loadInvoices();
+  } catch (err) {
+    showToast(err.message || 'Failed to save invoice.', 'error');
+  } finally {
+    submitBtn.disabled = false;
+    submitBtn.textContent = isEdit ? 'Save Changes' : 'Create Invoice';
+  }
+}
+
+async function handleInvoiceMarkPaid(invoiceId, invoiceNumber) {
+  closeAllActionsDropdowns();
+  const confirmed = confirm(`Mark invoice ${invoiceNumber} as paid? This records today's date as the payment date.`);
+  if (!confirmed) return;
+
+  try {
+    await ApiClient.patch(`/api/v1/invoices/${invoiceId}/mark-paid`, {});
+    showToast(`Invoice ${invoiceNumber} marked as paid.`, 'success');
+    await loadInvoices();
+  } catch (err) {
+    showToast(err.message || 'Failed to mark invoice as paid.', 'error');
   }
 }
 
