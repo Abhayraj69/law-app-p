@@ -4,6 +4,12 @@ const router = express.Router();
 const authController = require('../controllers/authController');
 const inviteController = require('../controllers/inviteController');
 const { authMiddleware } = require('../middleware/auth');
+const { authRateLimiter } = require('../middleware/authRateLimit');
+
+// Applies to every route below, not just /login: /invite/:token/accept takes
+// a bearer-token-like secret over an unauthenticated POST and is just as
+// brute-forceable, so it gets the same per-IP throttle.
+router.use(authRateLimiter);
 
 // Public — issues a JWT
 router.post('/login', authController.login);
