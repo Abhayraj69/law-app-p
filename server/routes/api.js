@@ -6,6 +6,8 @@ const { authMiddleware, requireRole } = require('../middleware/auth');
 const enforceStorageQuota = require('../middleware/storageQuota');
 const { validateAndScanUpload } = require('../middleware/securityScanner');
 const logAuditAction = require('../middleware/auditLogger');
+const { validateBody } = require('../middleware/validate');
+const { UpdateQuotaInput } = require('../schemas/storageQuotaSchemas');
 
 // Uploads are held in memory only long enough to validate + write them to
 // disk (see FileService.saveUploadedFile) — never written to a temp file
@@ -41,6 +43,7 @@ router.get('/vault/stats', vaultController.getStats);
 // ═════════════════════════════════════════════════════════════════════
 router.get('/vault/tree', vaultController.getTree);
 router.get('/vault/files', vaultController.getFiles);
+router.get('/vault/tags', vaultController.getTags);
 
 router.post(
   '/vault/folders',
@@ -113,6 +116,14 @@ router.get(
   '/files/:id/versions/:versionId/download',
   logAuditAction('DOWNLOAD'),
   vaultController.downloadVersion
+);
+// :v1/:v2 are version_numbers (the "v1"/"v3" labels already shown in the
+// Version History table), not a document_versions.id — the numeric
+// constraint keeps this route from ever matching against the UUID-based
+// /versions/:versionId/download route above.
+router.get(
+  '/files/:id/versions/:v1(\\d+)/diff/:v2(\\d+)',
+  vaultController.compareVersions
 );
 router.post(
   '/files/:id/versions',
@@ -279,7 +290,7 @@ router.get('/admin/audit-logs', requireRole('ADMIN'), auditLogController.listAud
 // server/middleware/storageQuota.js enforces on every upload.
 // ═════════════════════════════════════════════════════════════════════
 router.get('/admin/storage-quota', requireRole('ADMIN'), storageQuotaController.getQuota);
-router.patch('/admin/storage-quota', requireRole('ADMIN'), storageQuotaController.updateQuota);
+router.patch('/admin/storage-quota', requireRole('ADMIN'), validateBody(UpdateQuotaInput), storageQuotaController.updateQuota);
 
 // ═════════════════════════════════════════════════════════════════════
 // I. AI COPILOT TOOLS

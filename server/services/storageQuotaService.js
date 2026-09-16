@@ -28,6 +28,8 @@ function toView(row) {
 }
 
 class StorageQuotaService {
+  static MIN_LIMIT_BYTES = MIN_LIMIT_BYTES;
+
   /** GET /api/v1/admin/storage-quota */
   static async getQuota(tenantId) {
     const quota = await db.getStorageQuota(tenantId);
