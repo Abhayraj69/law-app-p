@@ -36,6 +36,15 @@ async function getFiles(req, res, next) {
   }
 }
 
+async function getTags(req, res, next) {
+  try {
+    const tags = await VaultService.getTagOptions(req.tenantId);
+    res.json({ success: true, data: tags });
+  } catch (err) {
+    next(err);
+  }
+}
+
 async function createFolder(req, res, next) {
   try {
     const folder = await VaultService.createFolder(req.tenantId, req.user.id, req.body);
@@ -129,6 +138,17 @@ async function downloadVersion(req, res, next) {
   }
 }
 
+async function compareVersions(req, res, next) {
+  try {
+    const v1 = parseInt(req.params.v1, 10);
+    const v2 = parseInt(req.params.v2, 10);
+    const comparison = await FileService.compareVersions(req.tenantId, req.params.id, v1, v2, req.user);
+    res.json({ success: true, data: comparison });
+  } catch (err) {
+    next(err);
+  }
+}
+
 async function uploadVersion(req, res, next) {
   try {
     if (!req.file) {
@@ -195,6 +215,7 @@ module.exports = {
   getStats,
   getTree,
   getFiles,
+  getTags,
   createFolder,
   uploadFile,
   getPreview,
@@ -204,6 +225,7 @@ module.exports = {
   deleteFile,
   getVersions,
   downloadVersion,
+  compareVersions,
   uploadVersion,
   getQuickAccess,
   getFlaggedMessages,

@@ -653,6 +653,37 @@
         </div>
       </div>
 
+      <!-- Vault Filters -->
+      <div class="filter-row" id="vaultFilterRow" style="margin-bottom:16px;">
+        <div class="filter-group">
+          <span class="filter-label">Case:</span>
+          <select id="vaultCaseFilter" class="select-filter">
+            <option value="">All Cases</option>
+          </select>
+        </div>
+        <div class="filter-group">
+          <span class="filter-label">File Type:</span>
+          <select id="vaultTypeFilter" class="select-filter">
+            <option value="">All Types</option>
+            <option value="pdf">PDF</option>
+            <option value="doc">DOC</option>
+            <option value="docx">DOCX</option>
+            <option value="xls">XLS</option>
+            <option value="xlsx">XLSX</option>
+            <option value="png">PNG</option>
+            <option value="jpg">JPG</option>
+            <option value="jpeg">JPEG</option>
+          </select>
+        </div>
+        <div class="filter-group">
+          <span class="filter-label">Tag:</span>
+          <select id="vaultTagFilter" class="select-filter">
+            <option value="">All Tags</option>
+            <!-- Populated by loadVaultTagOptions() with the firm's actual in-use tags -->
+          </select>
+        </div>
+      </div>
+
       <!-- KPI Row -->
       <section class="vault-kpi-row" id="vaultKpiRow">
         <!-- Card 1: Total Documents -->
@@ -2049,30 +2080,6 @@
 
       <div class="vault-drawer-body" style="display:flex;flex-direction:column;height:100%;overflow:hidden">
 
-        <!-- Tool Selection Tabs -->
-        <div class="copilot-tool-tabs" style="display:flex;gap:4px;padding:8px 0;border-bottom:1px solid rgba(255,255,255,0.06);margin-bottom:8px;overflow-x:auto">
-          <button class="copilot-tab-btn active" data-tool="chat" style="flex:1;min-width:max-content;padding:8px 12px;border:none;background:transparent;color:var(--white);font-size:12px;font-weight:500;border-radius:6px;cursor:pointer;transition:all .15s;white-space:nowrap">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:14px;height:14px;vertical-align:middle;margin-right:6px"><path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/></svg>
-            Chat
-          </button>
-          <button class="copilot-tab-btn" data-tool="search" style="flex:1;min-width:max-content;padding:8px 12px;border:none;background:transparent;color:var(--slate-400);font-size:12px;font-weight:500;border-radius:6px;cursor:pointer;transition:all .15s;white-space:nowrap">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:14px;height:14px;vertical-align:middle;margin-right:6px"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>
-            Search
-          </button>
-          <button class="copilot-tab-btn" data-tool="summarize" style="flex:1;min-width:max-content;padding:8px 12px;border:none;background:transparent;color:var(--slate-400);font-size:12px;font-weight:500;border-radius:6px;cursor:pointer;transition:all .15s;white-space:nowrap">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:14px;height:14px;vertical-align:middle;margin-right:6px"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><path d="M14 2v6h6M16 13H8M16 17H8M10 9H8"/></svg>
-            Summarize
-          </button>
-          <button class="copilot-tab-btn" data-tool="manageFiles" style="flex:1;min-width:max-content;padding:8px 12px;border:none;background:transparent;color:var(--slate-400);font-size:12px;font-weight:500;border-radius:6px;cursor:pointer;transition:all .15s;white-space:nowrap">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:14px;height:14px;vertical-align:middle;margin-right:6px"><path d="M3 3h18v18H3zM12 8v8M8 12h8"/></svg>
-            Manage Files
-          </button>
-          <button class="copilot-tab-btn" data-tool="cases" style="flex:1;min-width:max-content;padding:8px 12px;border:none;background:transparent;color:var(--slate-400);font-size:12px;font-weight:500;border-radius:6px;cursor:pointer;transition:all .15s;white-space:nowrap">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:14px;height:14px;vertical-align:middle;margin-right:6px"><path d="M20 7H4a2 2 0 00-2 2v10a2 2 0 002 2h16a2 2 0 002-2V9a2 2 0 00-2-2z"/><path d="M16 7V5a2 2 0 00-2-2h-4a2 2 0 00-2 2v2"/></svg>
-            Cases
-          </button>
-        </div>
-
         <!-- CHAT PANEL -->
         <div class="copilot-panel" id="copilotChatPanel" style="flex:1;display:flex;flex-direction:column;overflow:hidden">
           <div class="chat-messages" id="copilotChatMessages" style="flex:1;overflow-y:auto;padding:8px 0;display:flex;flex-direction:column;gap:12px">
@@ -2080,13 +2087,8 @@
             <div class="chat-message assistant" style="display:flex;gap:10px">
               <div class="msg-avatar" style="width:28px;height:28px;border-radius:50%;background:rgba(155,89,182,.15);color:#9B59B6;display:flex;align-items:center;justify-content:center;flex-shrink:0;font-size:10px;font-weight:600">AI</div>
               <div class="msg-content" style="flex:1;min-width:0">
-                <div style="font-size:13px;color:var(--slate-300);line-height:1.5">Hello! I'm your AI Copilot. I can help you:</div>
-                <ul style="margin:8px 0 0 18px;font-size:12px;color:var(--slate-400);line-height:1.8">
-                  <li><strong>Search</strong> the vault for documents, cases, folders, or messages</li>
-                  <li><strong>Summarize</strong> any document with an executive summary & key points</li>
-                  <li><strong>Manage files</strong> — move, rename, tag, or delete (with your approval)</li>
-                  <li><strong>Update cases</strong> — change status, assign attorneys, post client updates (with approval)</li>
-                </ul>
+                <div style="font-size:13px;color:var(--slate-300);line-height:1.5">Hello! I'm your AI Copilot — just ask, in plain language. I can search the vault, summarize a document, or tell you what's coming up, across your cases, documents, and client communications.</div>
+                <div style="margin-top:8px;font-size:11px;color:var(--slate-500)">I don't have access to billing or trust accounting.</div>
                 <div style="margin-top:8px;font-size:12px;color:var(--slate-500)">What would you like to do?</div>
               </div>
             </div>
@@ -2102,132 +2104,7 @@
               <button class="quick-action-chip" data-prompt="Find all documents tagged CONFIDENTIAL" style="padding:6px 10px;background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.06);border-radius:20px;font-size:11px;color:var(--slate-300);cursor:pointer;transition:all .15s">Find CONFIDENTIAL docs</button>
               <button class="quick-action-chip" data-prompt="Show me upcoming deadlines this week" style="padding:6px 10px;background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.06);border-radius:20px;font-size:11px;color:var(--slate-300);cursor:pointer;transition:all .15s">Upcoming deadlines</button>
               <button class="quick-action-chip" data-prompt="Search for Anderson v. Meridian" style="padding:6px 10px;background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.06);border-radius:20px;font-size:11px;color:var(--slate-300);cursor:pointer;transition:all .15s">Anderson v. Meridian</button>
-              <button class="quick-action-chip" data-prompt="Flag all documents by Marcus R. for review" style="padding:6px 10px;background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.06);border-radius:20px;font-size:11px;color:var(--slate-300);cursor:pointer;transition:all .15s">Flag Marcus docs</button>
-            </div>
-          </div>
-        </div>
-
-        <!-- SEARCH PANEL -->
-        <div class="copilot-panel hidden" id="copilotSearchPanel" style="flex:1;display:flex;flex-direction:column;overflow:hidden">
-          <div style="padding:8px 0 12px">
-            <label style="font-size:11px;color:var(--slate-400);text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px;display:block">Search Scope</label>
-            <div class="copilot-search-scope" style="display:flex;gap:6px;flex-wrap:wrap">
-              <button class="scope-btn active" data-scope="all" style="padding:6px 12px;background:rgba(155,89,182,.15);border:1px solid rgba(155,89,182,.3);border-radius:20px;font-size:11px;color:#9B59B6;cursor:pointer">All</button>
-              <button class="scope-btn" data-scope="documents" style="padding:6px 12px;background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.06);border-radius:20px;font-size:11px;color:var(--slate-300);cursor:pointer">Documents</button>
-              <button class="scope-btn" data-scope="cases" style="padding:6px 12px;background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.06);border-radius:20px;font-size:11px;color:var(--slate-300);cursor:pointer">Cases</button>
-              <button class="scope-btn" data-scope="folders" style="padding:6px 12px;background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.06);border-radius:20px;font-size:11px;color:var(--slate-300);cursor:pointer">Folders</button>
-              <button class="scope-btn" data-scope="messages" style="padding:6px 12px;background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.06);border-radius:20px;font-size:11px;color:var(--slate-300);cursor:pointer">Messages</button>
-            </div>
-          </div>
-          <div class="search-input-wrap" style="display:flex;gap:8px;margin-bottom:12px">
-            <input type="text" id="copilotSearchInput" placeholder="Search vault..." style="flex:1;padding:10px 14px;background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.08);border-radius:8px;color:var(--white);font-size:13px;outline:none" />
-            <button class="btn-primary" id="copilotSearchBtn" style="padding:10px 16px;white-space:nowrap">Search</button>
-          </div>
-          <div class="copilot-search-results" id="copilotSearchResults" style="flex:1;overflow-y:auto;display:flex;flex-direction:column;gap:8px">
-            <div style="text-align:center;padding:40px 0;color:var(--slate-400);font-size:13px">Enter a query to search your vault</div>
-          </div>
-        </div>
-
-        <!-- SUMMARIZE PANEL -->
-        <div class="copilot-panel hidden" id="copilotSummarizePanel" style="flex:1;display:flex;flex-direction:column;overflow:hidden">
-          <div style="padding:8px 0 12px">
-            <label style="font-size:11px;color:var(--slate-400);text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px;display:block">Select Document</label>
-            <div style="display:flex;gap:8px">
-              <input type="text" id="copilotSummarizeInput" placeholder="Type document name or ID..." style="flex:1;padding:10px 14px;background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.08);border-radius:8px;color:var(--white);font-size:13px;outline:none" />
-              <button class="btn-primary" id="copilotSummarizeBtn" style="padding:10px 16px;white-space:nowrap">Summarize</button>
-            </div>
-          </div>
-          <div class="copilot-summary-result" id="copilotSummaryResult" style="flex:1;overflow-y:auto;padding:8px 0;display:flex;flex-direction:column;gap:12px">
-            <div style="text-align:center;padding:40px 0;color:var(--slate-400);font-size:13px">Select a document to generate a summary</div>
-          </div>
-        </div>
-
-        <!-- MANAGE FILES PANEL -->
-        <div class="copilot-panel hidden" id="copilotManageFilesPanel" style="flex:1;display:flex;flex-direction:column;overflow:hidden">
-          <div style="padding:8px 0 12px">
-            <label style="font-size:11px;color:var(--slate-400);text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px;display:block">Action</label>
-            <div style="display:flex;gap:6px;flex-wrap:wrap">
-              <button class="action-btn active" data-action="move" style="padding:6px 12px;background:rgba(155,89,182,.15);border:1px solid rgba(155,89,182,.3);border-radius:6px;font-size:11px;color:#9B59B6;cursor:pointer">Move</button>
-              <button class="action-btn" data-action="rename" style="padding:6px 12px;background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.06);border-radius:6px;font-size:11px;color:var(--slate-300);cursor:pointer">Rename</button>
-              <button class="action-btn" data-action="tag" style="padding:6px 12px;background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.06);border-radius:6px;font-size:11px;color:var(--slate-300);cursor:pointer">Tag</button>
-              <button class="action-btn" data-action="delete" style="padding:6px 12px;background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.06);border-radius:6px;font-size:11px;color:var(--slate-300);cursor:pointer">Delete</button>
-            </div>
-          </div>
-
-          <div style="display:flex;flex-direction:column;gap:10px;margin-bottom:12px">
-            <div style="display:flex;flex-direction:column;gap:4px">
-              <label style="font-size:11px;color:var(--slate-400)">Target Type</label>
-              <select id="manageTargetType" style="padding:8px 12px;background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.08);border-radius:6px;color:var(--white);font-size:12px">
-                <option value="file">File</option>
-                <option value="folder">Folder</option>
-              </select>
-            </div>
-            <div style="display:flex;flex-direction:column;gap:4px">
-              <label style="font-size:11px;color:var(--slate-400)">Target ID</label>
-              <input type="text" id="manageTargetId" placeholder="e.g. doc-101" style="padding:8px 12px;background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.08);border-radius:6px;color:var(--white);font-size:12px" />
-            </div>
-            <div id="manageActionFields" style="display:flex;flex-direction:column;gap:10px">
-              <!-- Action-specific fields injected here -->
-            </div>
-          </div>
-
-          <button class="btn-primary" id="manageFilesSubmit" style="padding:10px;justify-content:center">Preview Action (Requires Approval)</button>
-        </div>
-
-        <!-- CASES PANEL -->
-        <div class="copilot-panel hidden" id="copilotCasesPanel" style="flex:1;display:flex;flex-direction:column;overflow:hidden">
-          <div style="padding:8px 0 12px">
-            <label style="font-size:11px;color:var(--slate-400);text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px;display:block">Case ID</label>
-            <input type="text" id="caseIdInput" placeholder="e.g. LC-2026-001" style="width:100%;padding:8px 12px;background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.08);border-radius:6px;color:var(--white);font-size:12px" />
-          </div>
-
-          <div style="display:flex;flex-direction:column;gap:10px;margin-bottom:12px">
-            <div style="display:flex;flex-direction:column;gap:4px">
-              <label style="font-size:11px;color:var(--slate-400)">New Status (optional)</label>
-              <input type="text" id="caseStatusInput" placeholder="e.g. PENDING_REVIEW" style="padding:8px 12px;background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.08);border-radius:6px;color:var(--white);font-size:12px" />
-            </div>
-            <div style="display:flex;flex-direction:column;gap:4px">
-              <label style="font-size:11px;color:var(--slate-400)">Lead Attorney (optional)</label>
-              <input type="text" id="caseAttorneyInput" placeholder="e.g. Sarah Jennings" style="padding:8px 12px;background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.08);border-radius:6px;color:var(--white);font-size:12px" />
-            </div>
-            <div style="display:flex;flex-direction:column;gap:4px">
-              <label style="font-size:11px;color:var(--slate-400)">Client Update Subject (optional)</label>
-              <input type="text" id="caseUpdateSubject" placeholder="e.g. Case Update" style="padding:8px 12px;background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.08);border-radius:6px;color:var(--white);font-size:12px" />
-            </div>
-            <div style="display:flex;flex-direction:column;gap:4px">
-              <label style="font-size:11px;color:var(--slate-400)">Client Update Body (optional)</label>
-              <textarea id="caseUpdateBody" placeholder="Message to client..." style="padding:8px 12px;background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.08);border-radius:6px;color:var(--white);font-size:12px;min-height:60px;resize:vertical"></textarea>
-            </div>
-            <div style="display:flex;align-items:center;gap:8px">
-              <input type="checkbox" id="caseUpdateUrgent" style="width:16px;height:16px" />
-              <label style="font-size:11px;color:var(--slate-400)">Mark as urgent</label>
-            </div>
-          </div>
-
-          <button class="btn-primary" id="casesSubmit" style="padding:10px;justify-content:center">Preview Update (Requires Approval)</button>
-        </div>
-
-        <!-- HITL APPROVAL CARD (appears as overlay within drawer) -->
-        <div class="copilot-approval-overlay hidden" id="copilotApprovalOverlay" style="position:absolute;top:0;left:0;right:0;bottom:0;background:rgba(11,15,23,.95);z-index:100;display:flex;align-items:center;justify-content:center;padding:20px">
-          <div class="approval-card" style="width:100%;max-width:400px;background:var(--navy-700);border:1px solid rgba(255,255,255,0.08);border-radius:14px;overflow:hidden;box-shadow:0 20px 60px rgba(0,0,0,0.5)">
-            <div class="approval-header" style="padding:16px 20px;border-bottom:1px solid rgba(255,255,255,0.06);display:flex;align-items:center;gap:12px">
-              <div style="width:40px;height:40px;border-radius:10px;background:rgba(247,113,113,.15);display:flex;align-items:center;justify-content:center">
-                <svg viewBox="0 0 24 24" fill="none" stroke="#F87171" stroke-width="2" style="width:20px;height:20px"><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
-              </div>
-              <div>
-                <div style="font-weight:600;font-size:14px;color:var(--white)" id="approvalTitle">Confirm Action</div>
-                <div style="font-size:12px;color:var(--slate-400)" id="approvalMessage">Are you sure you want to proceed?</div>
-              </div>
-            </div>
-            <div class="approval-body" style="padding:16px 20px;max-height:300px;overflow-y:auto">
-              <div style="font-size:12px;color:var(--slate-300);margin-bottom:12px" id="approvalTool">Tool: —</div>
-              <div style="font-size:12px;color:var(--slate-300);margin-bottom:12px" id="approvalAction">Action: —</div>
-              <div style="font-size:12px;color:var(--slate-300);margin-bottom:12px" id="approvalTarget">Target: —</div>
-              <div style="background:rgba(255,255,255,0.03);border-radius:8px;padding:12px;font-size:11px;font-family:monospace;color:var(--slate-300);max-height:150px;overflow-y:auto" id="approvalPayload">Loading...</div>
-            </div>
-            <div class="approval-footer" style="padding:16px 20px;border-top:1px solid rgba(255,255,255,0.06);display:flex;gap:8px;justify-content:flex-end">
-              <button class="btn-ghost" id="approvalCancel" style="padding:10px 20px">Cancel</button>
-              <button class="btn-primary" id="approvalConfirm" style="padding:10px 20px;background:#F87171;color:var(--navy-950);font-weight:600;border:none">Approve & Execute</button>
+              <button class="quick-action-chip" data-prompt="Find documents by Marcus R." style="padding:6px 10px;background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.06);border-radius:20px;font-size:11px;color:var(--slate-300);cursor:pointer;transition:all .15s">Marcus R.'s docs</button>
             </div>
           </div>
         </div>
@@ -2511,7 +2388,28 @@
               <tbody id="docDetailVersionsTableBody"></tbody>
             </table>
           </div>
+
+          <div id="docDetailCompareBar" class="hidden" style="display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-top:14px;">
+            <label for="docDetailCompareA" style="font-size:12px; color:var(--slate-400);">Compare</label>
+            <select id="docDetailCompareA"></select>
+            <label for="docDetailCompareB" style="font-size:12px; color:var(--slate-400);">with</label>
+            <select id="docDetailCompareB"></select>
+            <button class="btn-ghost" id="docDetailCompareBtn" style="padding:4px 12px; font-size:12px;">Compare versions</button>
+          </div>
         </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- VERSION COMPARE MODAL -->
+  <div class="modal-overlay hidden" id="versionCompareModal">
+    <div class="modal-box" style="max-width: 900px;">
+      <div class="modal-header">
+        <h3 class="modal-title" id="versionCompareTitle">Compare versions</h3>
+        <button class="modal-close-btn" id="versionCompareModalCloseBtn">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div id="versionCompareBody">Loading…</div>
       </div>
     </div>
   </div>

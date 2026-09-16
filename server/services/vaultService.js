@@ -79,6 +79,8 @@ class VaultService {
       tab_category = 'Case Files',
       q = '',
       tag = '',
+      case_id = '',
+      extension = '',
       sort = 'updated_at',
       order = 'desc',
       page = 1,
@@ -104,9 +106,21 @@ class VaultService {
       );
     }
 
-    // Filter by tag
+    // Filter by tag — tag names aren't case-normalized in the tags table
+    // (e.g. "CONFIDENTIAL" vs "Engagement Letter"), so match exactly as
+    // stored rather than forcing .toUpperCase() on every tag.
     if (tag) {
-      docs = docs.filter(d => d.tags && d.tags.includes(tag.toUpperCase()));
+      docs = docs.filter(d => d.tags && d.tags.includes(tag));
+    }
+
+    // Filter by case
+    if (case_id) {
+      docs = docs.filter(d => d.case_id === case_id);
+    }
+
+    // Filter by file type (extension)
+    if (extension) {
+      docs = docs.filter(d => d.extension === extension.toLowerCase());
     }
 
     // Sort
@@ -149,6 +163,16 @@ class VaultService {
   }
 
   /**
+   * GET /api/v1/vault/tags
+   * The real, currently-in-use tag names for this firm — backs the Tag
+   * filter dropdown so its options never drift from what's actually
+   * applied to documents.
+   */
+  static async getTagOptions(tenantId) {
+    return db.listDistinctDocumentTags(tenantId);
+  }
+
+  /**
    * POST /api/v1/vault/folders
    * Create a new folder
    */
@@ -179,14 +203,15 @@ class VaultService {
    * db/schema.sql, not by application code.
    *
    * @param {object} file - multer file object: { originalname, mimetype, size, buffer }
-   * @param {object} fields - the rest of the multipart form fields (folder_id, case_id, tags)
+   * @param {object} fields - the rest of the multipart form fields (folder_id,
+   *   case_id, tags, allow_duplicate)
    */
   static async initiateUpload(tenantId, userId, file, fields = {}) {
     if (!file || !file.buffer) {
       throw new Error('No file content received.');
     }
 
-    const { folder_id, case_id, tags } = fields;
+    const { folder_id, case_id, tags, allow_duplicate } = fields;
     // multipart form fields arrive as strings; tags may be sent as either
     // a JSON-encoded array string or repeated form fields (already an array).
     let parsedTags = [];
@@ -198,6 +223,32 @@ class VaultService {
 
     const fileName = file.originalname;
     const ext = (fileName.split('.').pop() || '').toLowerCase();
+
+    // Real content-based duplicate detection: hash the bytes BEFORE
+    // writing anything to disk, so a detected duplicate never leaves an
+    // orphaned file behind. Scoped to case/folder (not firm-wide) so a
+    // common template reused across different cases isn't flagged.
+    // `allow_duplicate` (set when the user confirms "upload anyway" on
+    // the frontend's prompt) skips this check entirely.
+    const contentHash = crypto.createHash('sha256').update(file.buffer).digest('hex');
+    if (!(allow_duplicate === true || allow_duplicate === 'true')) {
+      const existing = await db.findDocumentBySha256(tenantId, contentHash, {
+        caseId: case_id || null,
+        folderId: folder_id || null
+      });
+      if (existing) {
+        const err = new Error(
+          `This file's content is identical to an existing document, '${existing.original_name}' ` +
+          `(uploaded ${new Date(existing.created_at).toLocaleDateString()}). ` +
+          'Upload it as a new version of that document instead, or confirm to upload as a separate file anyway.'
+        );
+        err.status = 409;
+        err.code = 'DUPLICATE_CONTENT';
+        err.existingDocument = { id: existing.id, original_name: existing.original_name, created_at: existing.created_at };
+        throw err;
+      }
+    }
+
     // documents.id is a Postgres UUID column — must be a real UUID, not an
     // arbitrary string, or the insert below fails.
     const docId = crypto.randomUUID();

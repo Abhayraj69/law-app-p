@@ -3459,6 +3459,9 @@ const VaultState = {
   activeTab: 'Case Files',
   selectedFolderId: null,
   searchQuery: '',
+  caseFilter: '',
+  typeFilter: '',
+  tagFilter: '',
   sortCol: 'updated_at',
   sortDir: 'desc',
   selectedDocIds: new Set(),
@@ -3477,9 +3480,40 @@ async function initDocumentVault() {
   await Promise.all([
     loadVaultStats(),
     loadVaultTree(),
-    loadSidebarWidgets()
+    loadSidebarWidgets(),
+    loadVaultCaseFilterOptions(),
+    loadVaultTagFilterOptions()
   ]);
   await loadVaultFiles();
+}
+
+// The Case filter reuses whatever CASES the Cases page already fetched
+// (same shape: {id, name}) rather than a second endpoint — fetch it only
+// if nothing has loaded it yet (e.g. Vault opened before Cases).
+async function loadVaultCaseFilterOptions() {
+  try {
+    if (!CASES.length) await loadCases();
+    const select = $('vaultCaseFilter');
+    const current = select.value;
+    select.innerHTML = `<option value="">All Cases</option>` +
+      CASES.map(c => `<option value="${c.id}">${c.id} — ${c.name}</option>`).join('');
+    select.value = current;
+  } catch (err) {
+    console.error('Case filter options load error', err);
+  }
+}
+
+async function loadVaultTagFilterOptions() {
+  try {
+    const tags = await ApiClient.get('/api/v1/vault/tags');
+    const select = $('vaultTagFilter');
+    const current = select.value;
+    select.innerHTML = `<option value="">All Tags</option>` +
+      tags.map(t => `<option value="${t.replace(/"/g, '&quot;')}">${t}</option>`).join('');
+    select.value = current;
+  } catch (err) {
+    console.error('Tag filter options load error', err);
+  }
 }
 
 // API Wrapper
@@ -3532,7 +3566,11 @@ const ApiClient = {
     });
     if (res.status === 401) { handleUnauthenticated(); throw new Error('Not signed in.'); }
     const json = await res.json();
-    if (!json.success && res.status !== 413) throw new Error(json.error || 'API Error');
+    // 413 (storage quota) and 409 (DUPLICATE_CONTENT — see
+    // VaultService.initiateUpload) carry structured detail the caller
+    // needs to act on (e.g. an "upload anyway?" prompt), not just an
+    // error string — let those through instead of throwing.
+    if (!json.success && res.status !== 413 && res.status !== 409) throw new Error(json.error || 'API Error');
     return { ok: res.ok, status: res.status, json };
   },
   async del(url) {
@@ -3579,31 +3617,27 @@ function renderVaultTree() {
   const container = $('vaultFolderTree');
   if (!VaultState.tree) return;
   
+  // The tree is navigation ONLY — it used to also render every file inside
+  // every folder inline (node.files), which meant the same documents
+  // appeared twice: once as tree leaves here, once in the table on the
+  // right (see vaultTableBody / renderVaultTable). Clicking a folder here
+  // already drives the table via selectFolder -> loadVaultFiles, so the
+  // file list itself belongs in exactly one place.
   function buildHtml(nodes, level = 0) {
     return nodes.map(node => {
       const isSelected = VaultState.selectedFolderId === node.id;
-      const hasChildren = (node.subfolders && node.subfolders.length) || (node.files && node.files.length);
-      const subHtml = node.subfolders?.length ? `<div class="tree-children" style="padding-left:14px; display:block;">${buildHtml(node.subfolders, level + 1)}</div>` : '';
-      
-      const fileHtml = node.files?.length ? `
-        <div class="tree-file-children" style="padding-left:24px; display:block;">
-          ${node.files.map(f => `
-            <div class="tree-file-item" onclick="handlePreview('${f.id}')">
-              <svg viewBox="0 0 24 24" fill="none" stroke="${f.extension === 'pdf' ? '#E74C3C' : '#3B82F6'}" stroke-width="2" class="doc-icon"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><path d="M14 2v6h6"/></svg>
-              <span>${f.name}</span>
-            </div>
-          `).join('')}
-        </div>
-      ` : '';
+      const hasChildren = node.subfolders && node.subfolders.length;
+      const subHtml = hasChildren ? `<div class="tree-children" style="padding-left:14px; display:block;">${buildHtml(node.subfolders, level + 1)}</div>` : '';
+      const fileCount = node.files ? node.files.length : 0;
 
       return `
         <div class="tree-item ${isSelected ? 'active-item' : ''}" onclick="selectFolder('${node.id}', '${node.name}')">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="arrow-icon" style="transform: ${hasChildren ? 'rotate(90deg)' : 'rotate(0)'}; opacity: ${hasChildren ? 1 : 0};"><path d="M9 18l6-6-6-6"/></svg>
           <svg viewBox="0 0 24 24" fill="none" stroke="${isSelected ? '#2DC8B0' : '#8A99AD'}" ${isSelected ? 'fill="rgba(45,200,176,0.2)"' : ''} stroke-width="2" class="folder-icon"><path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z"/></svg>
           <span class="tree-label ${isSelected ? 'green-label' : ''}">${node.name}</span>
+          ${fileCount ? `<span class="tree-file-count">${fileCount}</span>` : ''}
         </div>
         ${subHtml}
-        ${fileHtml}
       `;
     }).join('');
   }
@@ -3646,6 +3680,9 @@ async function loadVaultFiles() {
     });
     if (VaultState.selectedFolderId) params.append('folder_id', VaultState.selectedFolderId);
     if (VaultState.searchQuery) params.append('q', VaultState.searchQuery);
+    if (VaultState.caseFilter) params.append('case_id', VaultState.caseFilter);
+    if (VaultState.typeFilter) params.append('extension', VaultState.typeFilter);
+    if (VaultState.tagFilter) params.append('tag', VaultState.tagFilter);
     
     const res = await fetch(`/api/v1/vault/files?${params}`, { headers: { ...Auth.authHeader() } });
     if (res.status === 401) { handleUnauthenticated(); return; }
@@ -3708,7 +3745,9 @@ function renderVaultTable() {
             <span class="file-name-text">${doc.file_name}</span>
           </div>
         </td>
-        <td class="col-case">${doc.case_name || '—'}</td>
+        <td class="col-case">${doc.case_id
+          ? `<a href="#" class="case-name-link" onclick="event.stopPropagation(); openCaseDetailModal('${doc.case_id}', '${(doc.case_name || '').replace(/'/g, "\\'")}'); return false;">${doc.case_name || doc.case_id}</a>`
+          : '—'}</td>
         <td class="col-author">${doc.author_name}</td>
         <td class="col-date">${dateStr}</td>
         <td class="col-size">${sizeMb}</td>
@@ -3771,6 +3810,23 @@ function setupVaultEventListeners() {
     }, 300);
   });
 
+  // Filters (Case / File Type / Tag)
+  $('vaultCaseFilter').addEventListener('change', (e) => {
+    VaultState.caseFilter = e.target.value;
+    VaultState.currentPage = 1;
+    loadVaultFiles();
+  });
+  $('vaultTypeFilter').addEventListener('change', (e) => {
+    VaultState.typeFilter = e.target.value;
+    VaultState.currentPage = 1;
+    loadVaultFiles();
+  });
+  $('vaultTagFilter').addEventListener('change', (e) => {
+    VaultState.tagFilter = e.target.value;
+    VaultState.currentPage = 1;
+    loadVaultFiles();
+  });
+
   // Sorting
   $$('.sortable').forEach(th => {
     th.addEventListener('click', () => {
@@ -3800,7 +3856,14 @@ function setupVaultEventListeners() {
 
   // Modals
   $('btnNewFolder').addEventListener('click', () => openVaultModal('newFolderModal'));
-  $('btnUploadFiles').addEventListener('click', openUploadModal);
+  // NOT `addEventListener('click', openUploadModal)` — that would call
+  // openUploadModal(clickEvent), and openUploadModal's first parameter is
+  // an optional case id (see its own doc comment above), not an event. A
+  // truthy PointerEvent there used to become VaultState.presetCaseId,
+  // which formData.append then stringified to the literal text
+  // "[object PointerEvent]" and db.ensureCase persisted as a real case
+  // row (both its id and case_name) on every plain "Upload Files" click.
+  $('btnUploadFiles').addEventListener('click', () => openUploadModal());
   $('btnIntegrations').addEventListener('click', () => {
     $('integrationsDrawerOverlay').classList.remove('hidden');
   });
@@ -3912,7 +3975,9 @@ async function downloadDocument(docId) {
    (GET/POST /api/v1/files/:id/versions, GET
    /api/v1/files/:id/versions/:versionId/download) — re-upload here
    creates a new version instead of overwriting the file, same as every
-   other re-upload path in this app. No diff/redline view in this pass.
+   other re-upload path in this app. Includes a "Compare versions" line-diff
+   view for text-like formats (GET /api/v1/files/:id/versions/:v1/diff/:v2),
+   falling back to a side-by-side download for anything not diffable.
    ════════════════════════════════════════════ */
 
 let docDetailCurrentDocId = null;
@@ -3981,6 +4046,129 @@ function renderDocumentVersions(versions) {
       <td><button class="btn-ghost" style="padding:2px 8px; font-size:12px;" onclick="downloadDocumentVersion('${v.id}')">Download</button></td>
     </tr>
   `).join('');
+
+  populateCompareSelectors(versions);
+}
+
+// "Compare versions" entry point on the Version History panel — only shown
+// once there are at least two versions to pick between. Defaults to the two
+// most recent (versions is newest-first, same order the table above uses).
+function populateCompareSelectors(versions) {
+  const bar = $('docDetailCompareBar');
+  if (versions.length < 2) {
+    bar.classList.add('hidden');
+    return;
+  }
+  bar.classList.remove('hidden');
+
+  const options = versions.map(v => `<option value="${v.version_number}">v${v.version_number}${v.is_current ? ' (current)' : ''}</option>`).join('');
+  const selectA = $('docDetailCompareA');
+  const selectB = $('docDetailCompareB');
+  selectA.innerHTML = options;
+  selectB.innerHTML = options;
+  selectA.value = versions[1].version_number; // second-newest
+  selectB.value = versions[0].version_number; // newest / current
+}
+
+async function handleCompareVersions() {
+  const v1 = $('docDetailCompareA').value;
+  const v2 = $('docDetailCompareB').value;
+  if (!docDetailCurrentDocId || !v1 || !v2) return;
+
+  if (v1 === v2) {
+    showToast('Pick two different versions to compare.', 'error');
+    return;
+  }
+
+  openVersionCompareModal();
+  try {
+    const data = await ApiClient.get(`/api/v1/files/${docDetailCurrentDocId}/versions/${v1}/diff/${v2}`);
+    renderVersionComparison(data);
+  } catch (err) {
+    $('versionCompareBody').innerHTML = `<p style="color:var(--urgent-color)">${err.message || 'Failed to compare versions.'}</p>`;
+  }
+}
+
+function openVersionCompareModal() {
+  $('versionCompareTitle').textContent = 'Compare versions';
+  $('versionCompareBody').innerHTML = 'Loading…';
+  const modal = $('versionCompareModal');
+  modal.classList.remove('hidden');
+  setTimeout(() => modal.classList.add('active'), 10);
+}
+
+function closeVersionCompareModal() {
+  const modal = $('versionCompareModal');
+  modal.classList.remove('active');
+  setTimeout(() => modal.classList.add('hidden'), 300);
+}
+
+function escapeHtml(str) {
+  return String(str ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+function renderVersionComparison(data) {
+  $('versionCompareTitle').textContent = `Compare — ${escapeHtml(data.file_name)}`;
+
+  const metaRow = `
+    <div class="diff-meta-row">
+      <span><strong>v${data.version_a.version_number}</strong> — ${escapeHtml(data.version_a.uploaded_by_name || 'Unknown')}, ${new Date(data.version_a.uploaded_at).toLocaleString()}</span>
+      <span><strong>v${data.version_b.version_number}</strong> — ${escapeHtml(data.version_b.uploaded_by_name || 'Unknown')}, ${new Date(data.version_b.uploaded_at).toLocaleString()}</span>
+    </div>`;
+
+  if (!data.diffable) {
+    $('versionCompareBody').innerHTML = metaRow + `
+      <p style="color:var(--slate-400); font-size:12.5px; margin-bottom:14px;">${escapeHtml(data.reason)}</p>
+      <div class="diff-sidebyside">
+        <div><h4 style="margin:0 0 8px;">v${data.version_a.version_number}</h4><div id="diffSideA">Loading…</div></div>
+        <div><h4 style="margin:0 0 8px;">v${data.version_b.version_number}</h4><div id="diffSideB">Loading…</div></div>
+      </div>`;
+    loadSideBySideVersion(data.version_a, 'diffSideA');
+    loadSideBySideVersion(data.version_b, 'diffSideB');
+    return;
+  }
+
+  const rows = data.diff.rows.map(r => `
+    <tr class="${r.type === 'add' ? 'diff-row-add' : r.type === 'remove' ? 'diff-row-remove' : ''}">
+      <td class="diff-line-no">${r.a_line ?? ''}</td>
+      <td class="diff-line-no">${r.b_line ?? ''}</td>
+      <td>${r.type === 'add' ? '+' : r.type === 'remove' ? '−' : ''}</td>
+      <td>${escapeHtml(r.text)}</td>
+    </tr>`).join('');
+
+  $('versionCompareBody').innerHTML = metaRow + `
+    <p style="color:var(--slate-400); font-size:12.5px; margin-bottom:10px;">
+      <span style="color:var(--active-color)">+${data.diff.stats.additions}</span> &nbsp;
+      <span style="color:var(--urgent-color)">−${data.diff.stats.deletions}</span>
+    </p>
+    <div class="table-container" style="max-height:60vh; overflow:auto;">
+      <table class="diff-table"><tbody>${rows}</tbody></table>
+    </div>`;
+}
+
+// Fetches one version's bytes the same auth-aware way downloadDocumentVersion
+// does (a plain <img>/<iframe> src can't carry the Authorization header),
+// then renders it inline as a blob URL instead of triggering a save-as.
+async function loadSideBySideVersion(version, targetId) {
+  const target = $(targetId);
+  try {
+    const res = await fetch(`/api/v1/files/${docDetailCurrentDocId}/versions/${version.id}/download`, { headers: { ...Auth.authHeader() } });
+    if (res.status === 401) { handleUnauthenticated(); return; }
+    if (!res.ok) throw new Error('Failed to load version content.');
+
+    const blob = await res.blob();
+    const objectUrl = URL.createObjectURL(blob);
+
+    if ((version.file_type || '').startsWith('image/')) {
+      target.innerHTML = `<img src="${objectUrl}" alt="v${version.version_number}" />`;
+    } else if (version.file_type === 'application/pdf') {
+      target.innerHTML = `<iframe src="${objectUrl}" title="v${version.version_number}"></iframe>`;
+    } else {
+      target.innerHTML = `<p style="color:var(--slate-400); font-size:12.5px;">Preview not available for this format — <a href="${objectUrl}" download="${escapeHtml(version.original_name)}">download v${version.version_number}</a> to view it.</p>`;
+    }
+  } catch (err) {
+    target.innerHTML = `<p style="color:var(--urgent-color); font-size:12.5px;">Failed to load this version.</p>`;
+  }
 }
 
 // Same auth-aware blob-download approach as downloadDocument above (a
@@ -4030,6 +4218,10 @@ function setupDocumentDetailListeners() {
   });
 
   $('docDetailUploadVersionBtn').addEventListener('click', handleUploadNewVersion);
+  $('docDetailCompareBtn').addEventListener('click', handleCompareVersions);
+
+  $('versionCompareModalCloseBtn').addEventListener('click', closeVersionCompareModal);
+  $('versionCompareModal').addEventListener('click', (e) => { if (e.target === $('versionCompareModal')) closeVersionCompareModal(); });
 }
 
 async function handleUploadNewVersion() {
@@ -4285,13 +4477,35 @@ $('uploadSubmitBtn').addEventListener('click', async () => {
       // Real multipart upload — the actual file bytes are sent (and
       // validated + signature-checked + written to disk server-side), not
       // just its name/size/type as before.
-      const formData = new FormData();
-      formData.append('file', f.file);
-      if (VaultState.selectedFolderId) formData.append('folder_id', VaultState.selectedFolderId);
-      if (VaultState.presetCaseId) formData.append('case_id', VaultState.presetCaseId);
-      formData.append('tags', JSON.stringify([]));
+      const buildFormData = (allowDuplicate) => {
+        const formData = new FormData();
+        formData.append('file', f.file);
+        if (VaultState.selectedFolderId) formData.append('folder_id', VaultState.selectedFolderId);
+        if (VaultState.presetCaseId) formData.append('case_id', VaultState.presetCaseId);
+        formData.append('tags', JSON.stringify([]));
+        if (allowDuplicate) formData.append('allow_duplicate', 'true');
+        return formData;
+      };
 
-      const res = await ApiClient.postForm('/api/v1/vault/upload', formData);
+      let res = await ApiClient.postForm('/api/v1/vault/upload', buildFormData(false));
+
+      // Content-identical to an existing document (see
+      // VaultService.initiateUpload's sha256 check) — ask before creating
+      // a sibling file rather than silently doing it.
+      if (res.status === 409 && res.json?.code === 'DUPLICATE_CONTENT') {
+        const proceed = confirm(
+          `${res.json.error}\n\nUpload "${f.file.name}" as a separate file anyway?`
+        );
+        if (proceed) {
+          res = await ApiClient.postForm('/api/v1/vault/upload', buildFormData(true));
+        } else {
+          f.status = 'error';
+          showToast(`Skipped ${f.file.name} — duplicate of an existing document.`, 'info');
+          renderUploadList();
+          continue;
+        }
+      }
+
       if (res.ok) {
         f.status = 'success';
         f.progress = 100;
@@ -4515,10 +4729,6 @@ $('vaultCalNext') && $('vaultCalNext').addEventListener('click', () => {
    AI COPILOT DRAWER LOGIC
    ═══════════════════════════════════════════════════════════════════════════ */
 
-let copilotActiveTool = 'chat';
-let copilotSearchScope = 'all';
-let copilotPendingApproval = null;
-
 function openCopilotDrawer() {
   const overlay = $('copilotDrawerOverlay');
   const drawer = $('copilotDrawer');
@@ -4539,20 +4749,6 @@ function closeCopilotDrawer() {
   drawer.classList.remove('active');
   overlay.classList.remove('active');
   setTimeout(() => overlay.classList.add('hidden'), 250);
-  hideApprovalOverlay();
-}
-
-function switchCopilotTool(tool) {
-  copilotActiveTool = tool;
-  $$('.copilot-tab-btn').forEach(btn => {
-    const isActive = btn.dataset.tool === tool;
-    btn.classList.toggle('active', isActive);
-    btn.style.color = isActive ? 'var(--white)' : 'var(--slate-400)';
-    btn.style.background = isActive ? 'rgba(155,89,182,.15)' : 'transparent';
-  });
-  $$('.copilot-panel').forEach(panel => panel.classList.add('hidden'));
-  $(`copilot${tool.charAt(0).toUpperCase() + tool.slice(1)}Panel`)?.classList.remove('hidden');
-  hideApprovalOverlay();
 }
 
 async function handleCopilotChat(prompt) {
@@ -4569,21 +4765,14 @@ async function handleCopilotChat(prompt) {
     // Simple intent detection based on keywords
     const lowerPrompt = prompt.toLowerCase();
 
-    if (lowerPrompt.includes('search') || lowerPrompt.includes('find') || lowerPrompt.includes('look for')) {
-      // Extract search terms after "search for" or "find"
-      const searchTerms = prompt.replace(/^(search|find|look for)\s+(for\s+)?/i, '').trim();
-      if (searchTerms) {
-        await handleSearch(searchTerms);
-        removeChatMessage(typingId);
-        return;
-      }
-    }
-
     if (lowerPrompt.includes('summarize') || lowerPrompt.includes('summary')) {
-      // Extract document name
+      // Extract document name, then resolve it to a real document_id via
+      // search before calling /copilot/summarize (which requires an id,
+      // not a name) — the chat surface is now the only place this runs,
+      // so it has to do that resolution itself.
       const docName = prompt.replace(/^(summarize|summary)\s+(of\s+)?/i, '').trim();
       if (docName) {
-        await handleSummarize(docName);
+        await respondWithSummary(docName);
         removeChatMessage(typingId);
         return;
       }
@@ -4600,32 +4789,66 @@ async function handleCopilotChat(prompt) {
       return;
     }
 
-    if (lowerPrompt.includes('flag') || lowerPrompt.includes('review')) {
-      // This would invoke manageFiles with tag action
+    if (lowerPrompt.includes('bill') || lowerPrompt.includes('invoice') || lowerPrompt.includes('trust account')) {
       removeChatMessage(typingId);
-      appendChatMessage('assistant', 'I can help you tag documents for review. Please use the **Search** tab to find specific documents, then use the **Manage Files** tool to add the "REVIEW" tag. Would you like me to search for documents by a specific attorney or case first?');
+      appendChatMessage('assistant', "I don't have access to billing or trust accounting — please use the **Billing** page for that.");
       return;
     }
 
-    // Default: search the vault
-    const results = await ApiClient.post('/api/v1/copilot/search', { query: prompt, scope: 'all', limit: 5 });
-    removeChatMessage(typingId);
+    // Search terms: strip a leading "search for"/"find"/"look for" if
+    // present, otherwise fall back to the whole prompt as the query — this
+    // also covers the default (no keyword matched) case.
+    const searchTerms = lowerPrompt.includes('search') || lowerPrompt.includes('find') || lowerPrompt.includes('look for')
+      ? prompt.replace(/^(search|find|look for)\s+(for\s+)?/i, '').trim() || prompt
+      : prompt;
 
-    if (results.data?.results?.length) {
-      const topResults = results.data.results.slice(0, 3);
-      let response = `I found ${results.data.total} results. Here are the top matches:\n\n`;
-      topResults.forEach(r => {
-        response += `• **${r.title}** (${r.type}) — ${r.meta}\n  ${r.snippet}\n\n`;
-      });
-      response += 'Switch to the **Search** tab for full results with filters.';
-      appendChatMessage('assistant', response);
-    } else {
-      appendChatMessage('assistant', 'I couldn\'t find anything matching that query. Try using the **Search** tab with different keywords or scopes.');
-    }
+    await respondWithSearchResults(searchTerms);
+    removeChatMessage(typingId);
   } catch (err) {
     removeChatMessage(typingId);
     console.error('Copilot chat error:', err);
     appendChatMessage('assistant', `Sorry, I encountered an error: ${err.message}`);
+  }
+}
+
+// Runs a vault search and renders the results directly into the chat
+// transcript — replaces the old dedicated Search tab/panel, which this
+// posted results into instead (see copilotSystemPrompt.js and the removal
+// of the Search/Summarize/Manage Files/Cases tabs).
+async function respondWithSearchResults(query) {
+  const results = await ApiClient.post('/api/v1/copilot/search', { query, scope: 'all', limit: 5 });
+  if (results.data?.results?.length) {
+    const topResults = results.data.results.slice(0, 3);
+    let response = `I found ${results.data.total} result${results.data.total === 1 ? '' : 's'}. Here ${results.data.total === 1 ? 'it is' : 'are the top matches'}:\n\n`;
+    topResults.forEach(r => {
+      response += `• **${r.title}** (${r.type}) — ${r.meta}\n  ${r.snippet}\n\n`;
+    });
+    appendChatMessage('assistant', response);
+  } else {
+    appendChatMessage('assistant', `I couldn't find anything matching "${query}". Try different keywords.`);
+  }
+}
+
+// Resolves a document by name via search, then summarizes the best match
+// — replaces the old dedicated Summarize tab/panel.
+async function respondWithSummary(docName) {
+  const results = await ApiClient.post('/api/v1/copilot/search', { query: docName, scope: 'documents', limit: 1 });
+  const match = results.data?.results?.[0];
+  if (!match) {
+    appendChatMessage('assistant', `I couldn't find a document matching "${docName}".`);
+    return;
+  }
+
+  try {
+    const summary = await ApiClient.post('/api/v1/copilot/summarize', { document_id: match.id });
+    const { file_name, executive_summary, key_points } = summary.data || {};
+    let response = `**${file_name || match.title}**\n\n${executive_summary || ''}`;
+    if (key_points?.length) {
+      response += `\n\n${key_points.map(p => `• ${p}`).join('\n')}`;
+    }
+    appendChatMessage('assistant', response);
+  } catch (err) {
+    appendChatMessage('assistant', `Found "${match.title}", but couldn't generate a summary: ${err.message}`);
   }
 }
 
@@ -4657,423 +4880,6 @@ function removeChatMessage(id) {
   if (el) el.remove();
 }
 
-async function handleSearch(query) {
-  try {
-    const data = await ApiClient.post('/api/v1/copilot/search', { query, scope: copilotSearchScope, limit: 20 });
-    renderSearchResults(data);
-  } catch (err) {
-    console.error('Search error:', err);
-    const resultsContainer = $('copilotSearchResults');
-    if (resultsContainer) {
-      resultsContainer.innerHTML = `<div style="text-align:center;padding:20px;color:#E74C3C">Search failed: ${err.message}</div>`;
-    }
-  }
-}
-
-function renderSearchResults(data) {
-  const container = $('copilotSearchResults');
-  if (!container) return;
-
-  const results = data.data?.results || [];
-  const total = data.data?.total || 0;
-
-  if (!results.length) {
-    container.innerHTML = `<div style="text-align:center;padding:40px 0;color:var(--slate-400);font-size:13px">No results found for "${data.data?.query || ''}"</div>`;
-    return;
-  }
-
-  const typeIcons = {
-    document: '<path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><path d="M14 2v6h6M16 13H8M16 17H8M10 9H8"/>',
-    folder: '<path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z"/>',
-    case: '<path d="M20 7H4a2 2 0 00-2 2v10a2 2 0 002 2h16a2 2 0 002-2V9a2 2 0 00-2-2z"/><path d="M16 7V5a2 2 0 00-2-2h-4a2 2 0 00-2 2v2"/>',
-    message: '<path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/>'
-  };
-
-  const typeColors = {
-    document: '#2DC8B0',
-    folder: '#C9A84C',
-    case: '#3B82F6',
-    message: '#F39C12'
-  };
-
-  container.innerHTML = results.map(r => `
-    <div class="search-result-item" style="display:flex;gap:10px;padding:10px;background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.05);border-radius:8px;cursor:pointer;transition:all .15s"
-         onmouseover="this.style.background='rgba(255,255,255,0.06)'"
-         onmouseout="this.style.background='rgba(255,255,255,0.03)'"
-         onclick="handleSearchResultClick('${r.type}', '${r.id}')">
-      <div style="width:32px;height:32px;border-radius:6px;background:${typeColors[r.type] || '#8A99AD'}22;color:${typeColors[r.type] || '#8A99AD'};display:flex;align-items:center;justify-content:center;flex-shrink:0">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:14px;height:14px">${typeIcons[r.type] || ''}</svg>
-      </div>
-      <div style="flex:1;min-width:0">
-        <div style="font-size:12px;font-weight:600;color:var(--white);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${r.title}</div>
-        <div style="font-size:10px;color:var(--slate-400);margin-top:2px">${r.meta}</div>
-        <div style="font-size:11px;color:var(--slate-500);margin-top:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${r.snippet}</div>
-      </div>
-      <span style="font-size:9px;padding:2px 8px;border-radius:12px;background:${typeColors[r.type] || '#8A99AD'}22;color:${typeColors[r.type] || '#8A99AD'};font-weight:600;text-transform:uppercase">${r.type}</span>
-    </div>
-  `).join('');
-}
-
-function handleSearchResultClick(type, id) {
-  if (type === 'document') {
-    // Switch to summarize tab and auto-fill
-    switchCopilotTool('summarize');
-    $('copilotSummarizeInput').value = id;
-    handleSummarize(id);
-  } else if (type === 'case') {
-    showToast(`Opening case ${id}...`, 'info');
-    // Could navigate to case view
-  }
-}
-
-async function handleSummarize(documentId) {
-  const container = $('copilotSummaryResult');
-  if (!container) return;
-
-  container.innerHTML = `<div style="text-align:center;padding:40px 0;color:var(--slate-400)">Generating summary…</div>`;
-
-  try {
-    const data = await ApiClient.post('/api/v1/copilot/summarize', { document_id: documentId });
-    renderSummary(data);
-  } catch (err) {
-    console.error('Summarize error:', err);
-    container.innerHTML = `<div style="text-align:center;padding:40px 0;color:#E74C3C">Failed to summarize: ${err.message}</div>`;
-  }
-}
-
-function renderSummary(data) {
-  const container = $('copilotSummaryResult');
-  if (!container) return;
-
-  const { file_name, file_type, case_name, author_name, tags, size_mb, updated_at, executive_summary, key_points } = data.data || {};
-
-  container.innerHTML = `
-    <div style="background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.05);border-radius:10px;padding:16px">
-      <div style="display:flex;align-items:flex-start;gap:12px;margin-bottom:12px">
-        <div style="width:40px;height:40px;border-radius:8px;background:rgba(45,200,176,.15);color:#2DC8B0;display:flex;align-items:center;justify-content:center;flex-shrink:0">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:18px;height:18px"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><path d="M14 2v6h6"/></svg>
-        </div>
-        <div style="flex:1">
-          <div style="font-size:14px;font-weight:600;color:var(--white)">${file_name}</div>
-          <div style="font-size:11px;color:var(--slate-400);margin-top:2px">${file_type?.toUpperCase()} · ${size_mb} MB · ${new Date(updated_at).toLocaleDateString()}</div>
-        </div>
-      </div>
-
-      <div style="margin-bottom:16px;padding:12px;background:rgba(155,89,182,.1);border-radius:8px;border-left:3px solid #9B59B6">
-        <div style="font-size:10px;color:#9B59B6;text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px">Executive Summary</div>
-        <div style="font-size:12px;color:var(--slate-300);line-height:1.6">${executive_summary}</div>
-      </div>
-
-      <div>
-        <div style="font-size:10px;color:var(--slate-400);text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">Key Points</div>
-        <ul style="font-size:12px;color:var(--slate-300);line-height:1.8;padding-left:18px">
-          ${(key_points || []).map(p => `<li>${p}</li>`).join('')}
-        </ul>
-      </div>
-
-      <div style="margin-top:16px;display:flex;gap:8px;flex-wrap:wrap">
-        ${(tags || []).map(t => `<span style="font-size:10px;padding:3px 8px;border-radius:12px;background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.08);color:var(--slate-300)">${t}</span>`).join('')}
-      </div>
-    </div>
-  `;
-}
-
-// ── HITL APPROVAL FLOW ──
-
-let copilotPendingExecutablePayload = null;
-
-function showApprovalOverlay(approvalData) {
-  // Store the executable payload separately from the display payload
-  copilotPendingApproval = approvalData;
-  copilotPendingExecutablePayload = {
-    tool: approvalData.tool,
-    action: approvalData.action,
-    target_id: approvalData.target_id,
-    target_type: approvalData.target_type,
-    payload: approvalData.executable_payload,  // the real executable payload
-    case_id: approvalData.case_id
-  };
-  const overlay = $('copilotApprovalOverlay');
-  if (!overlay) return;
-
-  $('approvalTitle').textContent = `Confirm ${approvalData.action} on "${approvalData.target_name}"`;
-  $('approvalMessage').textContent = approvalData.message;
-  $('approvalTool').textContent = `Tool: ${approvalData.tool}`;
-  $('approvalAction').textContent = `Action: ${approvalData.action}`;
-  $('approvalTarget').textContent = `Target: ${approvalData.target_name} (${approvalData.target_type})`;
-  $('approvalPayload').textContent = JSON.stringify(approvalData.proposed_payload, null, 2);
-
-  overlay.classList.remove('hidden');
-  setTimeout(() => overlay.classList.add('active'), 10);
-}
-
-function hideApprovalOverlay() {
-  const overlay = $('copilotApprovalOverlay');
-  if (!overlay) return;
-  overlay.classList.remove('active');
-  setTimeout(() => overlay.classList.add('hidden'), 200);
-  copilotPendingApproval = null;
-  copilotPendingExecutablePayload = null;
-}
-
-async function handleApprovalConfirm() {
-  if (!copilotPendingExecutablePayload) return;
-
-  const { tool, action, target_id, target_type, payload, case_id } = copilotPendingExecutablePayload;
-  const confirmBtn = $('approvalConfirm');
-  const originalText = confirmBtn.textContent;
-  confirmBtn.textContent = 'Executing…';
-  confirmBtn.disabled = true;
-
-  try {
-    let endpoint, body;
-
-    if (tool === 'manageFiles') {
-      endpoint = '/api/v1/copilot/manage-files';
-      body = { action, target_id, target_type, payload, approved: true };
-    } else if (tool === 'createOrUpdateCase') {
-      endpoint = '/api/v1/copilot/cases';
-      body = { case_id, payload, approved: true };
-    }
-
-    const res = await fetch(endpoint, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', ...Auth.authHeader() },
-      body: JSON.stringify(body)
-    });
-    if (res.status === 401) { handleUnauthenticated(); return; }
-    const json = await res.json();
-
-    if (json.success) {
-      showToast(`Action completed: ${json.data?.result ? JSON.stringify(json.data.result) : 'Success'}`, 'success');
-      hideApprovalOverlay();
-
-      // Refresh relevant views
-      if (tool === 'manageFiles') {
-        loadVaultFiles?.();
-        loadVaultStats?.();
-      }
-    } else {
-      throw new Error(json.error || 'Action failed');
-    }
-  } catch (err) {
-    console.error('Approval error:', err);
-    showToast(`Failed: ${err.message}`, 'error');
-  } finally {
-    confirmBtn.textContent = originalText;
-    confirmBtn.disabled = false;
-  }
-}
-
-function handleApprovalCancel() {
-  hideApprovalOverlay();
-  showToast('Action cancelled', 'info');
-}
-
-// ════════════════════════════════════════════════════════════════════════════
-// MANAGE FILES PANEL LOGIC
-// ════════════════════════════════════════════════════════════════════════════
-
-let currentManageAction = 'move';
-
-function switchManageAction(action) {
-  currentManageAction = action;
-  $$('.action-btn').forEach(btn => {
-    const active = btn.dataset.action === action;
-    btn.classList.toggle('active', active);
-    btn.style.background = active ? 'rgba(155,89,182,.15)' : 'rgba(255,255,255,0.03)';
-    btn.style.borderColor = active ? 'rgba(155,89,182,.3)' : 'rgba(255,255,255,0.06)';
-    btn.style.color = active ? '#9B59B6' : 'var(--slate-300)';
-  });
-  renderManageActionFields();
-}
-
-function renderManageActionFields() {
-  const container = $('manageActionFields');
-  const targetType = $('manageTargetType')?.value || 'file';
-  if (!container) return;
-
-  let html = '';
-
-  switch (currentManageAction) {
-    case 'move':
-      html = `
-        <div style="display:flex;flex-direction:column;gap:4px">
-          <label style="font-size:11px;color:var(--slate-400)">Destination Folder ID</label>
-          <input type="text" id="manageFolderId" placeholder="e.g. folder-201" style="padding:8px 12px;background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.08);border-radius:6px;color:var(--white);font-size:12px" required />
-        </div>
-      `;
-      break;
-    case 'rename':
-      html = `
-        <div style="display:flex;flex-direction:column;gap:4px">
-          <label style="font-size:11px;color:var(--slate-400)">New Name</label>
-          <input type="text" id="manageNewName" placeholder="e.g. Updated_Document.pdf" style="padding:8px 12px;background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.08);border-radius:6px;color:var(--white);font-size:12px" required />
-        </div>
-      `;
-      break;
-    case 'tag':
-      html = `
-        <div style="display:flex;flex-direction:column;gap:4px">
-          <label style="font-size:11px;color:var(--slate-400)">Tags to Add (comma-separated)</label>
-          <input type="text" id="manageAddTags" placeholder="e.g. CONFIDENTIAL, REVIEW, URGENT" style="padding:8px 12px;background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.08);border-radius:6px;color:var(--white);font-size:12px" />
-        </div>
-        <div style="display:flex;flex-direction:column;gap:4px">
-          <label style="font-size:11px;color:var(--slate-400)">Tags to Remove (comma-separated)</label>
-          <input type="text" id="manageRemoveTags" placeholder="e.g. DRAFT, ARCHIVE" style="padding:8px 12px;background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.08);border-radius:6px;color:var(--white);font-size:12px" />
-        </div>
-      `;
-      break;
-    case 'delete':
-      html = `
-        <div style="display:flex;flex-direction:column;gap:4px">
-          <label style="font-size:11px;color:var(--slate-400);display:flex;align-items:center;gap:8px">
-            <input type="checkbox" id="managePermanent" style="width:16px;height:16px" />
-            Permanent delete (cannot be undone)
-          </label>
-        </div>
-      `;
-      break;
-  }
-
-  container.innerHTML = html;
-}
-
-async function handleManageFilesSubmit() {
-  const targetId = $('manageTargetId')?.value?.trim();
-  const targetType = $('manageTargetType')?.value || 'file';
-
-  if (!targetId) {
-    showToast('Please enter a Target ID', 'error');
-    return;
-  }
-
-  let payload = {};
-
-  switch (currentManageAction) {
-    case 'move': {
-      const folderId = $('manageFolderId')?.value?.trim();
-      if (!folderId) {
-        showToast('Destination Folder ID is required', 'error');
-        return;
-      }
-      payload = { folder_id: folderId };
-      break;
-    }
-    case 'rename': {
-      const newName = $('manageNewName')?.value?.trim();
-      if (!newName) {
-        showToast('New name is required', 'error');
-        return;
-      }
-      payload = { new_name: newName };
-      break;
-    }
-    case 'tag': {
-      const addTags = ($('manageAddTags')?.value || '').split(',').map(s => s.trim()).filter(Boolean);
-      const removeTags = ($('manageRemoveTags')?.value || '').split(',').map(s => s.trim()).filter(Boolean);
-      payload = { add_tags: addTags, remove_tags: removeTags };
-      break;
-    }
-    case 'delete': {
-      const permanent = $('managePermanent')?.checked || false;
-      payload = { permanent };
-      break;
-    }
-  }
-
-  // Call the API with approved: false to get the HITL approval card
-  // Include executable_payload so the approval confirm can execute it
-  try {
-    const res = await fetch('/api/v1/copilot/manage-files', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', ...Auth.authHeader() },
-      body: JSON.stringify({
-        action: currentManageAction,
-        target_id: targetId,
-        target_type: targetType,
-        payload: payload,
-        approved: false,
-        executable_payload: payload
-      })
-    });
-    if (res.status === 401) { handleUnauthenticated(); return; }
-    const json = await res.json();
-
-    if (json.success && json.requires_approval) {
-      // Show the approval overlay
-      showApprovalOverlay(json.data);
-    } else if (json.success) {
-      showToast('Action completed: ' + JSON.stringify(json.data?.result || {}), 'success');
-      loadVaultFiles?.();
-      loadVaultStats?.();
-    } else {
-      throw new Error(json.error || 'Request failed');
-    }
-  } catch (err) {
-    console.error('Manage Files error:', err);
-    showToast('Failed: ' + err.message, 'error');
-  }
-}
-
-// ════════════════════════════════════════════════════════════════════════════
-// CASES PANEL LOGIC
-// ════════════════════════════════════════════════════════════════════════════
-
-async function handleCasesSubmit() {
-  const caseId = $('caseIdInput')?.value?.trim();
-
-  if (!caseId) {
-    showToast('Please enter a Case ID', 'error');
-    return;
-  }
-
-  const payload = {};
-  const status = $('caseStatusInput')?.value?.trim();
-  const leadAttorney = $('caseAttorneyInput')?.value?.trim();
-  const updateSubject = $('caseUpdateSubject')?.value?.trim();
-  const updateBody = $('caseUpdateBody')?.value?.trim();
-  const urgent = $('caseUpdateUrgent')?.checked || false;
-
-  if (status) payload.status = status;
-  if (leadAttorney) payload.lead_attorney = leadAttorney;
-  if (updateSubject || updateBody) {
-    payload.client_update = {
-      subject: updateSubject || 'Case Update',
-      body: updateBody || '',
-      urgent: urgent
-    };
-  }
-
-  // Call the API with approved: false to get the HITL approval card
-  // Include executable_payload so the approval confirm can execute it
-  try {
-    const res = await fetch('/api/v1/copilot/cases', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', ...Auth.authHeader() },
-      body: JSON.stringify({
-        case_id: caseId,
-        payload: payload,
-        approved: false,
-        executable_payload: payload
-      })
-    });
-    if (res.status === 401) { handleUnauthenticated(); return; }
-    const json = await res.json();
-
-    if (json.success && json.requires_approval) {
-      // Show the approval overlay
-      showApprovalOverlay(json.data);
-    } else if (json.success) {
-      showToast('Case update completed', 'success');
-    } else {
-      throw new Error(json.error || 'Request failed');
-    }
-  } catch (err) {
-    console.error('Cases error:', err);
-    showToast('Failed: ' + err.message, 'error');
-  }
-}
 
 // ── INITIALIZATION ──
 
@@ -5086,11 +4892,6 @@ function initCopilot() {
 
   $('copilotDrawerOverlay')?.addEventListener('click', (e) => {
     if (e.target === $('copilotDrawerOverlay')) closeCopilotDrawer();
-  });
-
-  // Tab switching
-  $$('.copilot-tab-btn').forEach(btn => {
-    btn.addEventListener('click', () => switchCopilotTool(btn.dataset.tool));
   });
 
   // Chat input
@@ -5113,64 +4914,6 @@ function initCopilot() {
       if (prompt) handleCopilotChat(prompt);
     });
   });
-
-  // Search scope buttons
-  $$('.scope-btn').forEach(btn => {
-    btn.addEventListener('click', () => {
-      copilotSearchScope = btn.dataset.scope;
-      $$('.scope-btn').forEach(b => {
-        const active = b === btn;
-        b.classList.toggle('active', active);
-        b.style.background = active ? 'rgba(155,89,182,.15)' : 'rgba(255,255,255,0.03)';
-        b.style.borderColor = active ? 'rgba(155,89,182,.3)' : 'rgba(255,255,255,0.06)';
-        b.style.color = active ? '#9B59B6' : 'var(--slate-300)';
-      });
-    });
-  });
-
-  // Search panel
-  $('copilotSearchBtn')?.addEventListener('click', () => {
-    const input = $('copilotSearchInput');
-    if (input?.value?.trim()) handleSearch(input.value.trim());
-  });
-
-  $('copilotSearchInput')?.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') {
-      const input = $('copilotSearchInput');
-      if (input?.value?.trim()) handleSearch(input.value.trim());
-    }
-  });
-
-  // Summarize panel
-  $('copilotSummarizeBtn')?.addEventListener('click', () => {
-    const input = $('copilotSummarizeInput');
-    if (input?.value?.trim()) handleSummarize(input.value.trim());
-  });
-
-  $('copilotSummarizeInput')?.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') {
-      const input = $('copilotSummarizeInput');
-      if (input?.value?.trim()) handleSummarize(input.value.trim());
-    }
-  });
-
-  // Manage Files panel - action buttons
-  $$('.action-btn').forEach(btn => {
-    btn.addEventListener('click', () => switchManageAction(btn.dataset.action));
-  });
-
-  // Manage Files panel - target type change
-  $('manageTargetType')?.addEventListener('change', () => renderManageActionFields());
-
-  // Manage Files panel - submit
-  $('manageFilesSubmit')?.addEventListener('click', handleManageFilesSubmit);
-
-  // Cases panel - submit
-  $('casesSubmit')?.addEventListener('click', handleCasesSubmit);
-
-  // Approval buttons
-  $('approvalConfirm')?.addEventListener('click', handleApprovalConfirm);
-  $('approvalCancel')?.addEventListener('click', handleApprovalCancel);
 
   // ESC to close
   document.addEventListener('keydown', (e) => {

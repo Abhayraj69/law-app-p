@@ -2986,6 +2986,12 @@ svg { display: block; flex-shrink: 0; }
   background: rgba(0, 0, 0, 0.08);
 }
 
+.tree-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
 .tree-item:hover {
   background: rgba(255, 255, 255, 0.04);
   color: var(--slate-300);
@@ -3020,23 +3026,19 @@ svg { display: block; flex-shrink: 0; }
   padding-left: 16px;
 }
 
-.tree-file-children {
-  padding-left: 28px;
-  margin: 2px 0;
-}
-
-.tree-file-item {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 12px;
+/* Document count for a folder — the tree no longer lists files inline
+   (see renderVaultTree in app.js), just how many live there; the actual
+   list only ever renders once, in the table on the right. */
+.tree-file-count {
+  margin-left: auto;
+  font-size: 10.5px;
+  font-weight: 600;
   color: var(--slate-500);
-  padding: 4px 0;
-}
-
-.tree-file-item .doc-icon {
-  width: 14px;
-  height: 14px;
+  background: rgba(255, 255, 255, 0.06);
+  border-radius: 10px;
+  padding: 1px 6px;
+  min-width: 16px;
+  text-align: center;
 }
 
 /* Document Table */
@@ -3120,6 +3122,16 @@ svg { display: block; flex-shrink: 0; }
   overflow: hidden;
   text-overflow: ellipsis;
   color: var(--slate-400);
+}
+
+.case-name-link {
+  color: var(--slate-300);
+  text-decoration: none;
+}
+
+.case-name-link:hover {
+  color: #5EEAD4;
+  text-decoration: underline;
 }
 
 .col-date, .col-size {
@@ -4261,3 +4273,59 @@ body.auth-locked .auth-overlay {
   text-align: center;
   margin: 4px 0 0;
 }
+
+/* ── Version compare (documentDetailModal / versionCompareModal) ────────── */
+.diff-meta-row {
+  display: flex;
+  gap: 24px;
+  flex-wrap: wrap;
+  margin-bottom: 14px;
+  font-size: 12.5px;
+  color: var(--slate-400);
+}
+.diff-meta-row strong { color: var(--white); }
+
+.diff-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
+  font-size: 12.5px;
+  border: var(--card-border);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+.diff-table td {
+  padding: 1px 10px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  vertical-align: top;
+}
+.diff-table td.diff-line-no {
+  width: 1%;
+  text-align: right;
+  color: var(--slate-500);
+  user-select: none;
+  padding-right: 8px;
+}
+.diff-row-add { background: rgba(46, 204, 113, 0.12); }
+.diff-row-add td.diff-line-no { color: rgba(46, 204, 113, 0.6); }
+.diff-row-remove { background: rgba(240, 72, 62, 0.12); }
+.diff-row-remove td.diff-line-no { color: rgba(240, 72, 62, 0.6); }
+
+.diff-sidebyside {
+  display: flex;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+.diff-sidebyside > div {
+  flex: 1 1 320px;
+  min-width: 0;
+}
+.diff-sidebyside iframe, .diff-sidebyside img {
+  width: 100%;
+  max-height: 60vh;
+  border: var(--card-border);
+  border-radius: var(--radius-sm);
+  background: var(--white);
+}
+.diff-sidebyside img { object-fit: contain; }

@@ -54,13 +54,36 @@ function buildPoolConfig() {
   };
 }
 
-const pool = new Pool(buildPoolConfig());
+// The real pg.Pool is built lazily, on first actual use, not here at
+// module load. Plenty of modules (ConflictCheckService, etc.) require this
+// file transitively (via server/db.js) just to reach a handful of
+// functions that never touch the database — e.g. ConflictCheckService.
+// normalizeName is pure string logic. Building the Pool eagerly meant
+// simply requiring those modules threw "No database configuration found"
+// on a fresh clone with no .env.local, which broke unit tests that have
+// nothing to do with Postgres. `pool` below is a Proxy that defers
+// buildPoolConfig() (and its throw) until the first property access —
+// i.e. the first real `pool.query(...)`/`pool.connect()`/`pool.end()` call.
+let realPool = null;
 
-pool.on('error', (err) => {
-  // A pooled client emitting an error (e.g. connection dropped while idle)
-  // must not crash the process — just log it. Queries in flight already
-  // get their own rejected promise.
-  console.error('[DB] Unexpected error on idle client:', err.message);
+function getPool() {
+  if (!realPool) {
+    realPool = new Pool(buildPoolConfig());
+    realPool.on('error', (err) => {
+      // A pooled client emitting an error (e.g. connection dropped while idle)
+      // must not crash the process — just log it. Queries in flight already
+      // get their own rejected promise.
+      console.error('[DB] Unexpected error on idle client:', err.message);
+    });
+  }
+  return realPool;
+}
+
+const pool = new Proxy({}, {
+  get(target, prop, receiver) {
+    const value = getPool()[prop];
+    return typeof value === 'function' ? value.bind(realPool) : value;
+  }
 });
 
 /**
