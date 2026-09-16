@@ -1,0 +1,26 @@
+name: CI
+
+# No existing CI config was found in this repo (no .github/ directory) — this
+# is a new, minimal workflow: install and run the test suite on every PR
+# targeting main. server/test/*.test.js's integration suites (Postgres-backed)
+# skip themselves when TEST_DATABASE_URL isn't set, so this runs only the
+# real unit tests until a DB service is added here as a follow-up.
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - run: npm ci
+      - run: npm test

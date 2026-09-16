@@ -2,6 +2,7 @@ const crypto = require('crypto');
 const bcrypt = require('bcryptjs');
 const db = require('../db');
 const authService = require('./authService');
+const { validatePassword } = require('../utils/passwordPolicy');
 
 /**
  * Invite Service
@@ -111,14 +112,15 @@ class InviteService {
    * response shape as a normal login, so the client can reuse Auth.setSession.
    */
   static async acceptInvite(rawToken, password) {
-    if (!password || password.length < 8) {
-      const err = new Error('Password must be at least 8 characters.');
+    const invite = await db.getUsableInviteByTokenHash(hashToken(rawToken));
+    if (!invite) throw invalidOrExpiredError();
+
+    const { valid, message } = validatePassword(password, [invite.email, invite.full_name]);
+    if (!valid) {
+      const err = new Error(message);
       err.status = 400;
       throw err;
     }
-
-    const invite = await db.getUsableInviteByTokenHash(hashToken(rawToken));
-    if (!invite) throw invalidOrExpiredError();
 
     const passwordHash = bcrypt.hashSync(password, 10);
     const accepted = await db.acceptUserInvite(invite.id, invite.user_id, passwordHash);

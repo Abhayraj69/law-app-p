@@ -7,6 +7,7 @@ const path = require('path');
 const cors = require('cors');
 const apiRoutes = require('./routes/api');
 const authRoutes = require('./routes/auth');
+const healthController = require('./controllers/healthController');
 
 const { checkConnection } = require('./db/pool');
 const { runMigrations } = require('./db/migrate');
@@ -44,6 +45,11 @@ app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
 // Static frontend file serving
 app.use(express.static(path.join(__dirname, '..')));
+
+// Health check — deliberately registered before authMiddleware is applied
+// (that happens inside apiRoutes, at the top of routes/api.js), so an
+// orchestrator/load balancer can poll it without a token.
+app.get('/api/v1/health', healthController.getHealth);
 
 // Auth (login is public; /me requires a token)
 app.use('/api/v1/auth', authRoutes);
