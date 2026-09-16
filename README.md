@@ -147,7 +147,34 @@ section before assuming a feature is wired up.
   timestamp, optional comment, a "Current" badge, and a per-version
   download link) is reachable from the Document Vault's file context menu
   and from a document's row in the Case File detail view's document list.
-  No diff/redline view yet — see "What's still mock/static" below.
+  A "Compare versions" view (`GET /api/v1/files/:id/versions/:v1/diff/:v2`,
+  `server/services/fileService.js`) shows a real line-level diff for
+  text-like formats under a size limit; anything else (PDFs, images, office
+  formats, oversized files) reports `diffable:false` with a reason and
+  falls back to a side-by-side view using each version's existing
+  download link.
+- **Content-based duplicate upload detection** — every upload is hashed
+  (SHA-256) before anything is written to disk, so a byte-identical file
+  already on record for the same case/folder is caught before the write,
+  not after (`documents.sha256`, `db/migrations/0017_document_sha256.sql`,
+  `VaultService.initiateUpload`). The caller can confirm "upload anyway"
+  (`allow_duplicate`) to skip the check for a deliberate second copy.
+- **Password strength, not just length** — invite acceptance (see
+  "Adding a user" below) scores the chosen password with zxcvbn instead of
+  only checking an 8-character minimum, penalizing ones built from the
+  user's own name/email (`server/utils/passwordPolicy.js`,
+  `server/services/inviteService.js`).
+- **`GET /api/v1/health`** — a public, unauthenticated endpoint reporting
+  Postgres/ClamAV/KMS reachability (each gated by the same "required
+  unless `NODE_ENV=development`" rule boot itself uses), for use by a load
+  balancer or orchestrator (`server/controllers/healthController.js`).
+- **Containerized deployment** — a `Dockerfile` (a production, non-dev
+  image with a `HEALTHCHECK` against `/api/v1/health`) and a minimal
+  GitHub Actions CI workflow (`.github/workflows/ci.yml`) that installs
+  and runs the test suite on every push/PR to `main`.
+- **Rate limiting on authentication endpoints** — login and invite-accept
+  are throttled per IP (`express-rate-limit`) to slow down credential
+  stuffing and invite-token brute-forcing.
 - **"Open Case File," "Upload to Document Index," and "Message via
   Client Portal"** (Active Cases page row actions) all do something real
   now, reusing existing views rather than each getting its own: "Open
@@ -178,9 +205,6 @@ section before assuming a feature is wired up.
   is deliberately just a document id + timestamp so a future e-signature
   provider integration (DocuSign, HelloSign, etc.) can slot in without a
   schema change, but no such provider is wired up today.
-- **Document version history has no diff/redline view.** You can list and
-  download any past version (see above), but there's no side-by-side or
-  inline comparison between two versions.
 - **The message composer's "Attach" quick action doesn't produce a real,
   structured message attachment** — see above. The file is genuinely
   uploaded and stored; the message only carries a plain-text reference to
