@@ -1,5 +1,17 @@
 const { pool } = require('./db/pool');
 
+// Postgres rejects a non-UUID string against a UUID column with a hard
+// error (22P02), not an empty result set — so an id lookup fed a garbage or
+// unrelated-format id (e.g. a case's text id passed where a document id was
+// expected, or a caller just guessing) would 500 instead of behaving like
+// any other "not found". Checked before querying wherever an id is looked
+// up against a UUID primary key so that case looks the same as a
+// well-formed-but-nonexistent id.
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+function isUuid(value) {
+  return typeof value === 'string' && UUID_RE.test(value);
+}
+
 /**
  * Database Access Layer
  *
@@ -224,6 +236,7 @@ async function insertFolder({ firmId, parentId, folderName, category, createdBy 
 }
 
 async function getFolderById(firmId, folderId) {
+  if (!isUuid(firmId) || !isUuid(folderId)) return null;
   const { rows } = await pool.query(
     'SELECT * FROM folders WHERE firm_id = $1 AND id = $2',
     [firmId, folderId]
@@ -343,12 +356,29 @@ async function listActiveDocuments(firmId, user) {
 }
 
 async function getDocumentById(firmId, docId, user) {
+  if (!isUuid(firmId) || !isUuid(docId)) return null;
   const values = [firmId, docId];
   let query = `${DOCUMENT_SELECT} WHERE d.firm_id = $1 AND d.id = $2 AND d.is_deleted = FALSE`;
   query = scopeDocumentsToUser(query, values, user);
   query += ' GROUP BY d.id, u.full_name, u.initials, c.case_name, fo.category';
   const { rows } = await pool.query(query, values);
   return normalizeDocumentRow(rows[0]) || null;
+}
+
+// Backs the vault's Tag filter dropdown — the real, currently-in-use set
+// of tag names for this firm, rather than a hardcoded guess in the
+// frontend that would drift from whatever tags actually get applied.
+async function listDistinctDocumentTags(firmId) {
+  const { rows } = await pool.query(
+    `SELECT DISTINCT t.name
+     FROM tags t
+     JOIN document_tags dt ON dt.tag_id = t.id
+     JOIN documents d ON d.id = dt.document_id
+     WHERE d.firm_id = $1 AND d.is_deleted = FALSE
+     ORDER BY t.name`,
+    [firmId]
+  );
+  return rows.map(r => r.name);
 }
 
 // GET /api/v1/cases/:id/documents — the client portal's document list.
@@ -371,16 +401,17 @@ async function insertDocument(doc) {
     `INSERT INTO documents (
         id, firm_id, file_name, original_name, file_type, extension,
         file_size_bytes, storage_path_url, preview_path_url, case_id,
-        folder_id, author_id, is_archived, is_flagged, is_deleted
+        folder_id, author_id, is_archived, is_flagged, is_deleted, sha256
      ) VALUES (
         COALESCE($1, uuid_generate_v4()), $2, $3, $4, $5, $6,
         $7, $8, $9, $10,
-        $11, $12, $13, $14, $15
+        $11, $12, $13, $14, $15, $16
      ) RETURNING *`,
     [
       doc.id || null, doc.firm_id, doc.file_name, doc.original_name, doc.file_type, doc.extension,
       doc.file_size_bytes, doc.storage_path_url, doc.preview_path_url || null, doc.case_id || null,
-      doc.folder_id || null, doc.author_id || null, doc.is_archived || false, doc.is_flagged || false, doc.is_deleted || false
+      doc.folder_id || null, doc.author_id || null, doc.is_archived || false, doc.is_flagged || false, doc.is_deleted || false,
+      doc.sha256 || null
     ]
   );
   const inserted = rows[0];
@@ -388,6 +419,26 @@ async function insertDocument(doc) {
     await setDocumentTags(inserted.id, doc.firm_id, doc.tags);
   }
   return getDocumentById(doc.firm_id, inserted.id);
+}
+
+// Backs upload-time duplicate detection (see VaultService.initiateUpload)
+// — finds an existing, non-deleted document with byte-identical content
+// in this firm, optionally narrowed to one case/folder so a firm-wide
+// content match doesn't block re-using a common template across cases.
+async function findDocumentBySha256(firmId, sha256, { caseId, folderId } = {}) {
+  const values = [firmId, sha256];
+  let query = `${DOCUMENT_SELECT} WHERE d.firm_id = $1 AND d.sha256 = $2 AND d.is_deleted = FALSE`;
+  if (caseId) {
+    values.push(caseId);
+    query += ` AND d.case_id = $${values.length}`;
+  }
+  if (folderId) {
+    values.push(folderId);
+    query += ` AND d.folder_id = $${values.length}`;
+  }
+  query += ' GROUP BY d.id, u.full_name, u.initials, c.case_name, fo.category ORDER BY d.created_at ASC LIMIT 1';
+  const { rows } = await pool.query(query, values);
+  return normalizeDocumentRow(rows[0]) || null;
 }
 
 async function updateDocument(firmId, docId, updates) {
@@ -476,6 +527,22 @@ async function getDocumentVersionById(firmId, docId, versionId) {
      JOIN documents d ON d.id = v.document_id
      WHERE d.firm_id = $1 AND v.document_id = $2 AND v.id = $3`,
     [firmId, docId, versionId]
+  );
+  if (!rows[0]) return null;
+  return { ...rows[0], file_size_bytes: Number(rows[0].file_size_bytes) };
+}
+
+// Same as getDocumentVersionById but addressed by version_number — used by
+// the version-compare endpoint, where the URL references versions the same
+// human-readable way the Version History table already displays them
+// ("v1", "v3", ...) rather than an internal UUID the user never sees.
+async function getDocumentVersionByNumber(firmId, docId, versionNumber) {
+  const { rows } = await pool.query(
+    `SELECT v.*, u.full_name AS uploaded_by_name FROM document_versions v
+     JOIN documents d ON d.id = v.document_id
+     LEFT JOIN users u ON u.id = v.uploaded_by
+     WHERE d.firm_id = $1 AND v.document_id = $2 AND v.version_number = $3`,
+    [firmId, docId, versionNumber]
   );
   if (!rows[0]) return null;
   return { ...rows[0], file_size_bytes: Number(rows[0].file_size_bytes) };
@@ -1656,13 +1723,16 @@ module.exports = {
   ensureCase,
   setDocumentTags,
   listActiveDocuments,
+  listDistinctDocumentTags,
   getDocumentById,
   listDocumentsByCase,
+  findDocumentBySha256,
   insertDocument,
   updateDocument,
   softDeleteDocument,
   listDocumentVersions,
   getDocumentVersionById,
+  getDocumentVersionByNumber,
   insertInitialDocumentVersion,
   insertDocumentVersionAndPromote,
   insertShare,

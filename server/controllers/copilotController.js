@@ -148,9 +148,16 @@ async function searchVault(req, res, next) {
     if (scope === 'all' || scope === 'documents') {
       const docs = await db.listActiveDocuments(firmId);
       docs.forEach(d => {
-        const text = `${d.file_name} ${d.case_name} ${d.author_name} ${(d.tags || []).join(' ')}`;
+        // A document with no case (d.case_name is NULL) must not fall
+        // through to a bare template-literal interpolation — that stringifies
+        // to the literal text "null", which would then wrongly match a
+        // search for the word "null", and SearchVaultOutput's schema
+        // requires `meta` to be a string, not null, which a raw d.case_name
+        // violated (the bug this fixes).
+        const caseLabel = d.case_name || 'No case assigned';
+        const text = `${d.file_name} ${caseLabel} ${d.author_name} ${(d.tags || []).join(' ')}`;
         const score = scoreMatch(text, terms);
-        if (score > 0) results.push({ type: 'document', score, id: d.id, title: d.file_name, meta: d.case_name, snippet: text.slice(0, 120) });
+        if (score > 0) results.push({ type: 'document', score, id: d.id, title: d.file_name, meta: caseLabel, snippet: text.slice(0, 120) });
       });
     }
 
@@ -158,7 +165,7 @@ async function searchVault(req, res, next) {
       const folders = await db.listFolders(firmId);
       folders.forEach(f => {
         const score = scoreMatch(f.folder_name, terms);
-        if (score > 0) results.push({ type: 'folder', score, id: f.id, title: f.folder_name, meta: f.category, snippet: f.folder_name });
+        if (score > 0) results.push({ type: 'folder', score, id: f.id, title: f.folder_name, meta: f.category || 'Uncategorized', snippet: f.folder_name });
       });
     }
 
@@ -181,8 +188,9 @@ async function searchVault(req, res, next) {
     if (scope === 'all' || scope === 'messages') {
       const messages = await db.listClientMessages(firmId);
       messages.forEach(m => {
-        const score = scoreMatch(`${m.client_name} ${m.subject} ${m.preview}`, terms);
-        if (score > 0) results.push({ type: 'message', score, id: m.id, title: m.subject, meta: m.client_name, snippet: m.preview });
+        const clientLabel = m.client_name || 'Unknown client';
+        const score = scoreMatch(`${clientLabel} ${m.subject} ${m.preview}`, terms);
+        if (score > 0) results.push({ type: 'message', score, id: m.id, title: m.subject, meta: clientLabel, snippet: m.preview || '' });
       });
     }
 
@@ -570,6 +578,14 @@ async function createOrUpdateCase(req, res, next) {
       data: { tool: 'createOrUpdateCase', case_id: applyResult.case.id, result }
     }));
   } catch (err) {
+    // requireCaseChangeRole's forbidden error is an authorization failure,
+    // not a business-logic one — it goes through next() to the global error
+    // handler (same as every route-level requireRole() 403), so it can't be
+    // confused with the CaseService failures below by anything inspecting
+    // the response shape.
+    if (err.code === 'INSUFFICIENT_ROLE') {
+      return next(err);
+    }
     // Business-logic failures from CaseService (ambiguous name, case not
     // found with insufficient create info, unresolvable attorney, invalid
     // status) all carry `.status` — surfaced in the same shape every other
