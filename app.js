@@ -633,9 +633,9 @@ function renderNotifications() {
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">${iconMap[n.icon]}</svg>
       </div>
       <div class="notif-content">
-        <div class="notif-title">${n.title}</div>
-        <div class="notif-desc">${n.desc}</div>
-        <div class="notif-time">${n.time}</div>
+        <div class="notif-title">${escapeHtml(n.title)}</div>
+        <div class="notif-desc">${escapeHtml(n.desc)}</div>
+        <div class="notif-time">${escapeHtml(n.time)}</div>
       </div>
     </div>
   `).join('');
@@ -692,7 +692,7 @@ function initSearch() {
   let requestSeq = 0;
 
   function showMessage(text, color) {
-    results.innerHTML = `<div style="padding:16px;text-align:center;color:${color || 'var(--slate-400)'};font-size:13px">${text}</div>`;
+    results.innerHTML = `<div style="padding:16px;text-align:center;color:${color || 'var(--slate-400)'};font-size:13px">${escapeHtml(text)}</div>`;
     results.classList.add('visible');
   }
 
@@ -705,8 +705,8 @@ function initSearch() {
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">${iconMap[d.type] || ''}</svg>
         </div>
         <div>
-          <div class="result-name">${d.name}</div>
-          <div class="result-meta">${d.meta}</div>
+          <div class="result-name">${escapeHtml(d.name)}</div>
+          <div class="result-meta">${escapeHtml(d.meta)}</div>
         </div>
       </div>
     `).join('');
@@ -1041,10 +1041,10 @@ function renderHearings() {
         <span class="hearing-date-day">${h.day}</span>
       </div>
       <div class="hearing-info">
-        <div class="hearing-case">${h.case}</div>
-        <div class="hearing-meta">${typeLabels[h.type]} · ${h.room}</div>
+        <div class="hearing-case">${escapeHtml(h.case)}</div>
+        <div class="hearing-meta">${typeLabels[h.type]} · ${escapeHtml(h.room)}</div>
       </div>
-      <div class="hearing-time">${h.time}</div>
+      <div class="hearing-time">${escapeHtml(h.time)}</div>
     </div>
   `).join('');
 }
@@ -1072,13 +1072,13 @@ function renderMessages() {
   const list = $('messagesList');
   list.innerHTML = MESSAGES.map(m => `
     <div class="message-item ${m.unreadItem ? 'unread' : ''}">
-      <div class="msg-avatar" style="background:${m.color}22; color:${m.color}">${m.initials}</div>
+      <div class="msg-avatar" style="background:${m.color}22; color:${m.color}">${escapeHtml(m.initials)}</div>
       <div class="message-content">
-        <div class="message-name">${m.name}</div>
-        <div class="message-preview">${m.preview}</div>
+        <div class="message-name">${escapeHtml(m.name)}</div>
+        <div class="message-preview">${escapeHtml(m.preview)}</div>
       </div>
       <div class="message-meta">
-        <span class="message-time">${m.time}</span>
+        <span class="message-time">${escapeHtml(m.time)}</span>
         ${m.unread ? `<span class="message-unread-count">${m.unread}</span>` : ''}
       </div>
     </div>
@@ -1151,8 +1151,8 @@ function renderActivityFeed() {
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">${iconMap[a.icon]}</svg>
       </div>
       <div class="activity-content">
-        <div class="activity-text">${a.text}</div>
-        <div class="activity-time-tag">${a.time}</div>
+        <div class="activity-text">${escapeHtml(a.text)}</div>
+        <div class="activity-time-tag">${escapeHtml(a.time)}</div>
       </div>
     </div>
   `).join('');
@@ -1709,7 +1709,7 @@ async function openCaseDetailModal(caseId, caseName) {
     renderCaseDetailDeadlines(deadlines);
     renderCaseDetailActivity(activity);
   } catch (err) {
-    $('caseDetailOverview').innerHTML = `<p style="color:#E74C3C">Failed to load case file: ${err.message}</p>`;
+    $('caseDetailOverview').innerHTML = `<p style="color:#E74C3C">Failed to load case file: ${escapeHtml(err.message)}</p>`;
   }
 }
 
@@ -1722,19 +1722,19 @@ function closeCaseDetailModal() {
 function renderCaseDetailOverview(c) {
   $('caseDetailOverview').innerHTML = `
     <div class="form-row-two">
-      <div><strong>Client</strong><div>${c.client}</div></div>
+      <div><strong>Client</strong><div>${escapeHtml(c.client)}</div></div>
       <div><strong>Status</strong><div><span class="status-badge ${c.status}">${CASE_DETAIL_STATUS_LABEL[c.status] || c.status}</span></div></div>
     </div>
     <div class="form-row-two" style="margin-top:10px;">
-      <div><strong>Opposing Party</strong><div>${c.opposingParty || '—'}</div></div>
-      <div><strong>Opposing Counsel</strong><div>${c.opposingCounsel || '—'}</div></div>
+      <div><strong>Opposing Party</strong><div>${escapeHtml(c.opposingParty) || '—'}</div></div>
+      <div><strong>Opposing Counsel</strong><div>${escapeHtml(c.opposingCounsel) || '—'}</div></div>
     </div>
     <div class="form-row-two" style="margin-top:10px;">
-      <div><strong>Practice Area</strong><div>${c.type || '—'}</div></div>
-      <div><strong>Lead Attorney</strong><div>${c.attorney || 'Unassigned'}</div></div>
+      <div><strong>Practice Area</strong><div>${escapeHtml(c.type) || '—'}</div></div>
+      <div><strong>Lead Attorney</strong><div>${escapeHtml(c.attorney) || 'Unassigned'}</div></div>
     </div>
-    <div style="margin-top:10px;"><strong>Next Hearing</strong><div>${c.nextHearing || 'None'}</div></div>
-    ${c.description ? `<div style="margin-top:10px;"><strong>Description</strong><div>${c.description}</div></div>` : ''}
+    <div style="margin-top:10px;"><strong>Next Hearing</strong><div>${escapeHtml(c.nextHearing) || 'None'}</div></div>
+    ${c.description ? `<div style="margin-top:10px;"><strong>Description</strong><div>${escapeHtml(c.description)}</div></div>` : ''}
   `;
 }
 
@@ -1747,9 +1747,9 @@ function renderCaseDetailDocuments(docs) {
       <tbody>
         ${docs.map(d => `
           <tr>
-            <td>${d.file_name}</td>
-            <td>${d.category || '—'}</td>
-            <td>${d.author_name || '—'}</td>
+            <td>${escapeHtml(d.file_name)}</td>
+            <td>${escapeHtml(d.category) || '—'}</td>
+            <td>${escapeHtml(d.author_name) || '—'}</td>
             <td class="activity-time">${new Date(d.created_at).toLocaleDateString('en-US', { month: 'short', day: '2-digit', year: 'numeric' })}</td>
             <td><button class="btn-ghost" style="padding:2px 8px; font-size:12px;" data-action="open-document-detail" data-document-id="${escapeAttr(d.id)}" data-file-name="${escapeAttr(d.file_name || '')}">Version History</button></td>
           </tr>
@@ -1764,8 +1764,8 @@ function renderCaseDetailDeadlines(items) {
   if (!items.length) { el.innerHTML = '<p style="color:var(--slate-400)">No deadlines on file.</p>'; return; }
   el.innerHTML = items.map(d => `
     <div style="display:flex; justify-content:space-between; padding:6px 0; border-bottom:1px solid rgba(255,255,255,0.06);">
-      <span>${d.title}${d.location ? ' — ' + d.location : ''}</span>
-      <span class="activity-time">${d.dateFormatted}</span>
+      <span>${escapeHtml(d.title)}${d.location ? ' — ' + escapeHtml(d.location) : ''}</span>
+      <span class="activity-time">${escapeHtml(d.dateFormatted)}</span>
     </div>
   `).join('');
 }
@@ -1775,7 +1775,7 @@ function renderCaseDetailActivity(items) {
   if (!items.length) { el.innerHTML = '<p style="color:var(--slate-400)">No activity recorded yet.</p>'; return; }
   el.innerHTML = items.map(a => `
     <div style="display:flex; justify-content:space-between; padding:6px 0; border-bottom:1px solid rgba(255,255,255,0.06);">
-      <span>${a.label}${a.actorName ? ' — ' + a.actorName : ''}</span>
+      <span>${escapeHtml(a.label)}${a.actorName ? ' — ' + escapeHtml(a.actorName) : ''}</span>
       <span class="activity-time">${new Date(a.date).toLocaleDateString('en-US', { month: 'short', day: '2-digit', year: 'numeric' })}</span>
     </div>
   `).join('');
@@ -1931,8 +1931,13 @@ function renderMatterIntake(intake) {
   // 1. Conflict
   if (s === 'CONFLICT_HOLD') {
     const matches = intake.conflict_check_matches || [];
+    // escapeHtml on every field, not just a manual `<`-only replace on two
+    // of them — found during a security-review follow-up sweep: the old
+    // partial escape left newFieldLabel/existingFieldLabel/caseName
+    // completely unescaped, and even the two fields it did touch only
+    // handled `<`, not `&`/`>`/quotes.
     $('intakeConflictSummary').innerHTML = `<strong style="color:#E74C3C">${matches.length} potential conflict${matches.length === 1 ? '' : 's'} found:</strong><br>` +
-      matches.map(m => `${(m.newValue || '').replace(/</g, '&lt;')} (${m.newFieldLabel}) matches "${(m.existingValue || '').replace(/</g, '&lt;')}" (${m.existingFieldLabel}) on case ${m.caseName}`).join('<br>');
+      matches.map(m => `${escapeHtml(m.newValue)} (${escapeHtml(m.newFieldLabel)}) matches "${escapeHtml(m.existingValue)}" (${escapeHtml(m.existingFieldLabel)}) on case ${escapeHtml(m.caseName)}`).join('<br>');
     $('intakeConflictOverrideSection').classList.toggle('hidden', !canOverride);
     if (!canOverride) {
       $('intakeConflictSummary').innerHTML += '<br><em style="color:var(--slate-400)">Only a Partner can override a conflict hold.</em>';
@@ -2051,7 +2056,7 @@ async function loadIntakeRetainerAccounts() {
   select.dataset.loaded = '1';
   try {
     const accounts = await ApiClient.get('/api/v1/trust/accounts');
-    select.innerHTML = accounts.map(a => `<option value="${a.id}">${a.account_name}</option>`).join('') || '<option value="">No trust accounts configured</option>';
+    select.innerHTML = accounts.map(a => `<option value="${escapeAttr(a.id)}">${escapeHtml(a.account_name)}</option>`).join('') || '<option value="">No trust accounts configured</option>';
     await loadIntakeRetainerLedgers();
   } catch (err) {
     select.innerHTML = '<option value="">Error loading trust accounts</option>';
@@ -2066,7 +2071,7 @@ async function loadIntakeRetainerLedgers() {
   try {
     const ledgers = await ApiClient.get(`/api/v1/trust/client-ledgers?trust_account_id=${accountId}`);
     ledgerSelect.innerHTML = ledgers.length
-      ? ledgers.map(l => `<option value="${l.id}">${l.client_display_name} (${formatMoney(l.balance_cents)})</option>`).join('')
+      ? ledgers.map(l => `<option value="${escapeAttr(l.id)}">${escapeHtml(l.client_display_name)} (${formatMoney(l.balance_cents)})</option>`).join('')
       : '<option value="">No client ledgers — open one on the Trust Accounting page first</option>';
   } catch (err) {
     ledgerSelect.innerHTML = '<option value="">Error loading client ledgers</option>';
@@ -2641,8 +2646,8 @@ function renderTimeEntryTable() {
       <tr>
         <td>${selectable ? `<input type="checkbox" class="time-entry-checkbox" data-entry-id="${escapeAttr(t.id)}" data-case-id="${escapeAttr(t.case_id)}" ${selectedTimeEntryIds.has(t.id) ? 'checked' : ''} />` : ''}</td>
         <td class="activity-time">${formatInvoiceDate(t.entry_date)}</td>
-        <td>${t.case_name || t.case_id}</td>
-        <td>${t.user_full_name}${!t.billable ? ' <span style="color:var(--slate-400);font-size:11px;">(non-billable)</span>' : ''}</td>
+        <td>${escapeHtml(t.case_name || t.case_id)}</td>
+        <td>${escapeHtml(t.user_full_name)}${!t.billable ? ' <span style="color:var(--slate-400);font-size:11px;">(non-billable)</span>' : ''}</td>
         <td style="max-width:280px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title="${escapeAttr(t.description)}">${escapeHtml(t.description)}</td>
         <td>${formatHours(t.minutes)}</td>
         <td>${formatMoney(t.rate_cents)}/h</td>
@@ -2960,7 +2965,7 @@ async function loadTrustAccounts() {
   try {
     TRUST_ACCOUNTS = await ApiClient.get('/api/v1/trust/accounts');
     const select = $('trustAccountSelect');
-    select.innerHTML = TRUST_ACCOUNTS.map(a => `<option value="${a.id}">${a.account_name}</option>`).join('')
+    select.innerHTML = TRUST_ACCOUNTS.map(a => `<option value="${escapeAttr(a.id)}">${escapeHtml(a.account_name)}</option>`).join('')
       || '<option value="">No trust accounts configured</option>';
     await loadTrustLedgers();
     await loadTrustReconciliationHistory();
@@ -3000,8 +3005,8 @@ function renderTrustLedgers() {
 
   tbody.innerHTML = TRUST_LEDGERS.map(l => `
     <tr>
-      <td>${l.client_display_name}</td>
-      <td>${l.trust_account_name}</td>
+      <td>${escapeHtml(l.client_display_name)}</td>
+      <td>${escapeHtml(l.trust_account_name)}</td>
       <td style="font-weight:600">${formatMoney(l.balance_cents)}</td>
       <td class="activity-time">${l.last_activity_at ? formatInvoiceDate(l.last_activity_at.slice(0, 10)) : '—'}</td>
       <td>
@@ -3362,9 +3367,16 @@ function showToast(message, type = 'info') {
     display:flex; align-items:center; gap:10px;
   `;
   const colors = { info: '#3B82F6', success: '#2ECC71', warning: '#F39C12', error: '#E74C3C' };
+  // escapeHtml(message): found during a security review that several
+  // call sites pass a user-controlled value straight through (an
+  // uploaded file's own name, an API error string that can echo back
+  // caller input) — this used to be raw innerHTML, so any of those could
+  // inject markup into every viewer's page. No call site anywhere in the
+  // app intentionally passes real HTML to showToast (checked before
+  // making this change), so escaping unconditionally is safe.
   toast.innerHTML = `
     <div style="width:6px;height:6px;border-radius:50%;background:${colors[type]};flex-shrink:0"></div>
-    ${message}
+    ${escapeHtml(message)}
   `;
   document.body.appendChild(toast);
 
@@ -3446,15 +3458,15 @@ function renderCommsSidebar() {
     return `
       <div class="comms-conv-item ${c.id === activeConvId ? 'active' : ''}" data-action="select-conversation" data-conversation-id="${escapeAttr(c.id)}">
         <div class="conv-avatar" style="background:${c.color}22; color:${c.color}">
-          ${c.initials}
+          ${escapeHtml(c.initials)}
         </div>
         <div class="conv-info">
           <div class="conv-header-row">
-            <span class="conv-name">${c.clientName}</span>
-            <span class="conv-case-id">${c.caseId}</span>
+            <span class="conv-name">${escapeHtml(c.clientName)}</span>
+            <span class="conv-case-id">${escapeHtml(c.caseId)}</span>
           </div>
           <div class="conv-header-row">
-            <span class="conv-preview" title="${previewText}">${previewText}</span>
+            <span class="conv-preview" title="${escapeAttr(previewText)}">${escapeHtml(previewText)}</span>
             ${c.unread > 0 ? `<span class="conv-badge">${c.unread}</span>` : ''}
           </div>
         </div>
@@ -3492,9 +3504,9 @@ function renderActiveChat() {
   // messages, rendered below) being the actual substitute.
   header.innerHTML = `
     <div class="chat-header-left">
-      <div class="chat-header-title">${conv.clientName}</div>
+      <div class="chat-header-title">${escapeHtml(conv.clientName)}</div>
       <div class="chat-header-subtitle">
-        <span>${conv.caseName}</span>
+        <span>${escapeHtml(conv.caseName)}</span>
         <div style="width:4px;height:4px;border-radius:50%;background:var(--slate-400)"></div>
         <span class="status-badge ${conv.status}" style="font-size:10px; padding: 1px 6px;">${statusLabel}</span>
       </div>
@@ -3521,24 +3533,24 @@ function renderActiveChat() {
               </svg>
               Internal Firm Note &mdash; Hidden from Client
             </div>
-            <div>${m.text}</div>
+            <div>${escapeHtml(m.text)}</div>
             ${attachmentHtml}
           </div>
-          <span class="message-meta">${m.time}</span>
+          <span class="message-meta">${escapeHtml(m.time)}</span>
         </div>
       `;
     } else if (m.sender === 'client') {
       return `
         <div class="message-row client-side">
-          <div class="message-bubble">${m.text}${attachmentHtml}</div>
-          <span class="message-meta">${m.time}</span>
+          <div class="message-bubble">${escapeHtml(m.text)}${attachmentHtml}</div>
+          <span class="message-meta">${escapeHtml(m.time)}</span>
         </div>
       `;
     } else {
       return `
         <div class="message-row staff-side">
-          <div class="message-bubble">${m.text}${attachmentHtml}</div>
-          <span class="message-meta">${m.time}</span>
+          <div class="message-bubble">${escapeHtml(m.text)}${attachmentHtml}</div>
+          <span class="message-meta">${escapeHtml(m.time)}</span>
         </div>
       `;
     }
@@ -3556,12 +3568,12 @@ function renderActiveChat() {
 function renderCommsAttachmentChip(attachment) {
   if (!attachment) return '';
   return `
-    <a class="comms-attachment-chip" href="/api/v1/files/${attachment.documentId}/download"
+    <a class="comms-attachment-chip" href="/api/v1/files/${escapeAttr(attachment.documentId)}/download"
        target="_blank" rel="noopener" style="display:flex;align-items:center;gap:6px;margin-top:8px;padding:6px 10px;border-radius:8px;background:rgba(255,255,255,0.08);text-decoration:none;color:inherit;font-size:12px;">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:14px;height:14px;flex-shrink:0;">
         <path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/>
       </svg>
-      <span>${attachment.name}</span>
+      <span>${escapeHtml(attachment.name)}</span>
     </a>
   `;
 }
@@ -3741,7 +3753,7 @@ function renderPendingCommsAttachment() {
   wrap.classList.remove('hidden');
   wrap.innerHTML = `
     <span style="display:inline-flex;align-items:center;gap:6px;font-size:12px;padding:4px 8px;border-radius:6px;background:rgba(255,255,255,0.08);">
-      📎 ${pendingCommsAttachment.name}
+      📎 ${escapeHtml(pendingCommsAttachment.name)}
       <button type="button" data-action="clear-comms-attachment" style="background:none;border:none;color:inherit;cursor:pointer;opacity:0.7;padding:0;">✕</button>
     </span>
   `;
@@ -3978,9 +3990,9 @@ function renderTeamTable(team) {
 
   tbody.innerHTML = team.map(u => `
     <tr>
-      <td>${u.full_name}</td>
-      <td>${u.email}</td>
-      <td>${u.role}</td>
+      <td>${escapeHtml(u.full_name)}</td>
+      <td>${escapeHtml(u.email)}</td>
+      <td>${escapeHtml(u.role)}</td>
       <td><span class="status-badge ${statusClass[u.invite_status] || 'active'}">${statusLabels[u.invite_status] || u.invite_status}</span></td>
       <td class="activity-time">${new Date(u.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}</td>
     </tr>
@@ -4130,7 +4142,7 @@ async function loadAuditLogFilterOptions() {
     // no new backend route needed just to populate a "filter by user" list.
     const team = await ApiClient.get('/api/v1/admin/users');
     $('auditFilterUser').innerHTML = '<option value="">All Users</option>' +
-      team.map(u => `<option value="${u.id}">${u.full_name}</option>`).join('');
+      team.map(u => `<option value="${escapeAttr(u.id)}">${escapeHtml(u.full_name)}</option>`).join('');
   } catch (err) {
     // Non-fatal — the table still loads unfiltered, just without a user dropdown.
   }
@@ -4191,9 +4203,9 @@ function renderAuditLogTable(logs) {
     tbody.innerHTML = logs.map(log => `
       <tr>
         <td class="activity-time">${new Date(log.created_at).toLocaleString('en-US', { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit' })}</td>
-        <td>${log.user_name || 'System'}</td>
+        <td>${escapeHtml(log.user_name) || 'System'}</td>
         <td>${formatAuditAction(log.action)}</td>
-        <td>${auditLogTargetLabel(log)}</td>
+        <td>${escapeHtml(auditLogTargetLabel(log))}</td>
         <td class="activity-time">${log.ip_address || '—'}</td>
       </tr>
     `).join('');
@@ -4457,7 +4469,7 @@ function renderVaultTree() {
         <div class="tree-item ${isSelected ? 'active-item' : ''}" data-action="select-folder" data-folder-id="${escapeAttr(node.id)}" data-folder-name="${escapeAttr(node.name)}">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="arrow-icon" style="transform: ${hasChildren ? 'rotate(90deg)' : 'rotate(0)'}; opacity: ${hasChildren ? 1 : 0};"><path d="M9 18l6-6-6-6"/></svg>
           <svg viewBox="0 0 24 24" fill="none" stroke="${isSelected ? '#2DC8B0' : '#8A99AD'}" ${isSelected ? 'fill="rgba(45,200,176,0.2)"' : ''} stroke-width="2" class="folder-icon"><path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z"/></svg>
-          <span class="tree-label ${isSelected ? 'green-label' : ''}">${node.name}</span>
+          <span class="tree-label ${isSelected ? 'green-label' : ''}">${escapeHtml(node.name)}</span>
           ${fileCount ? `<span class="tree-file-count">${fileCount}</span>` : ''}
         </div>
         ${subHtml}
@@ -4556,7 +4568,7 @@ function renderVaultTable() {
       if (t === 'CONFIDENTIAL') tCls = 'confidential';
       if (t === 'COURT FILING') tCls = 'court-filing';
       if (t === 'EVIDENCE') tCls = 'EVIDENCE';
-      return `<span class="tag-badge ${tCls}">${t}</span>`;
+      return `<span class="tag-badge ${tCls}">${escapeHtml(t)}</span>`;
     }).join('');
 
     return `
@@ -4565,13 +4577,13 @@ function renderVaultTable() {
         <td class="col-name" data-action="preview-document" data-document-id="${escapeAttr(doc.id)}" style="cursor:pointer">
           <div class="file-cell">
             <span class="file-icon-badge ${badgeCls}">${badgeText}</span>
-            <span class="file-name-text">${doc.file_name}</span>
+            <span class="file-name-text">${escapeHtml(doc.file_name)}</span>
           </div>
         </td>
         <td class="col-case">${doc.case_id
-          ? `<a href="#" class="case-name-link" data-action="open-case-detail" data-stop-propagation="true" data-case-id="${escapeAttr(doc.case_id)}" data-case-name="${escapeAttr(doc.case_name || '')}">${doc.case_name || doc.case_id}</a>`
+          ? `<a href="#" class="case-name-link" data-action="open-case-detail" data-stop-propagation="true" data-case-id="${escapeAttr(doc.case_id)}" data-case-name="${escapeAttr(doc.case_name || '')}">${escapeHtml(doc.case_name || doc.case_id)}</a>`
           : '—'}</td>
-        <td class="col-author">${doc.author_name}</td>
+        <td class="col-author">${escapeHtml(doc.author_name)}</td>
         <td class="col-date">${dateStr}</td>
         <td class="col-size">${sizeMb}</td>
         <td class="col-tags">${tagsHtml}</td>
@@ -5271,7 +5283,7 @@ function renderUploadList() {
   list.innerHTML = filesToUpload.map((f, i) => `
     <div class="upload-file-item">
       <div class="upload-file-info">
-        <div class="upload-file-name">${f.file.name}</div>
+        <div class="upload-file-name">${escapeHtml(f.file.name)}</div>
         <div class="upload-file-size">${(f.file.size/(1024*1024)).toFixed(1)} MB - ${f.status}</div>
         <div class="upload-progress-bar">
           <div class="upload-progress-fill" style="width:${f.progress}%"></div>
@@ -5434,10 +5446,10 @@ function renderVaultCalendar(deadlines) {
           <div style="font-size:14px;font-weight:700;color:var(--white)">${dlDate.getDate()}</div>
         </div>
         <div style="flex:1;min-width:0">
-          <div style="font-size:12px;font-weight:500;color:var(--white);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${d.title}</div>
-          <div style="font-size:10px;color:var(--slate-400);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${d.location} · ${d.time_text}</div>
+          <div style="font-size:12px;font-weight:500;color:var(--white);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(d.title)}</div>
+          <div style="font-size:10px;color:var(--slate-400);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(d.location)} · ${escapeHtml(d.time_text)}</div>
         </div>
-        <span style="font-size:9px;padding:2px 6px;border-radius:4px;background:${d.badge_color || '#C9A84C'}22;color:${d.badge_color || '#C9A84C'};font-weight:600;text-transform:uppercase">${d.badge_type}</span>
+        <span style="font-size:9px;padding:2px 6px;border-radius:4px;background:${d.badge_color || '#C9A84C'}22;color:${d.badge_color || '#C9A84C'};font-weight:600;text-transform:uppercase">${escapeHtml(d.badge_type)}</span>
       </div>
     `;
   }).join('') : `<div style="font-size:11px;color:var(--slate-400);text-align:center;padding:16px">No upcoming deadlines</div>`;
@@ -5464,8 +5476,8 @@ function renderVaultQuickAccess(quickAccess) {
         <div class="quick-item" data-action="preview-document" data-document-id="${escapeAttr(f.id)}" style="margin-bottom:6px">
           <span class="file-icon-badge" style="background:${color}22;color:${color};font-size:9px;padding:3px 6px;border-radius:4px;font-weight:600">${ext.toUpperCase()}</span>
           <div style="flex:1;min-width:0">
-            <div style="font-size:12px;font-weight:500;color:#fff;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${f.file_name}</div>
-            <div style="font-size:10px;color:var(--slate-400)">${f.case_id || '—'}</div>
+            <div style="font-size:12px;font-weight:500;color:#fff;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(f.file_name)}</div>
+            <div style="font-size:10px;color:var(--slate-400)">${escapeHtml(f.case_id) || '—'}</div>
           </div>
         </div>
       `;
@@ -5479,7 +5491,7 @@ function renderVaultQuickAccess(quickAccess) {
         <div class="quick-item" data-action="select-folder" data-folder-id="${escapeAttr(f.id)}" data-folder-name="${escapeAttr(f.folder_name || '')}" style="margin-bottom:6px">
           <svg viewBox="0 0 24 24" fill="none" stroke="#C9A84C" stroke-width="2" style="width:16px;height:16px;flex-shrink:0"><path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z"/></svg>
           <div style="flex:1;min-width:0">
-            <div style="font-size:12px;font-weight:500;color:#fff;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${f.folder_name}</div>
+            <div style="font-size:12px;font-weight:500;color:#fff;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(f.folder_name)}</div>
             <div style="font-size:10px;color:var(--slate-400)">${f.document_count} files</div>
           </div>
         </div>
@@ -5515,13 +5527,13 @@ function renderVaultClientMessages(messages) {
     const color = colorMap[initials] || avatarColors[i % avatarColors.length];
     return `
       <div class="client-msg-card hoverable-card" data-action="navigate" data-page="communications" style="cursor:pointer;display:flex;align-items:center;gap:10px;padding:10px;background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.05);border-radius:8px;margin-bottom:8px;transition:background .2s">
-        <div style="width:30px;height:30px;border-radius:50%;background:${color}22;color:${color};display:flex;align-items:center;justify-content:center;font-weight:600;font-size:11px;flex-shrink:0">${initials}</div>
+        <div style="width:30px;height:30px;border-radius:50%;background:${color}22;color:${color};display:flex;align-items:center;justify-content:center;font-weight:600;font-size:11px;flex-shrink:0">${escapeHtml(initials)}</div>
         <div style="flex:1;min-width:0">
           <div style="display:flex;justify-content:space-between;align-items:center">
-            <div style="font-size:12px;font-weight:600;color:#fff;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${m.client_name}${m.is_urgent ? ' <span style="color:#E74C3C;font-size:10px">⚠</span>' : ''}</div>
-            <div style="font-size:10px;color:var(--slate-400);flex-shrink:0;margin-left:6px">${m.timestamp_text}</div>
+            <div style="font-size:12px;font-weight:600;color:#fff;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(m.client_name)}${m.is_urgent ? ' <span style="color:#E74C3C;font-size:10px">⚠</span>' : ''}</div>
+            <div style="font-size:10px;color:var(--slate-400);flex-shrink:0;margin-left:6px">${escapeHtml(m.timestamp_text)}</div>
           </div>
-          <div style="font-size:11px;color:var(--slate-400);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-top:2px">${m.preview}</div>
+          <div style="font-size:11px;color:var(--slate-400);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-top:2px">${escapeHtml(m.preview)}</div>
         </div>
         ${m.is_unread ? `<div style="width:18px;height:18px;border-radius:50%;background:#E74C3C;color:#fff;font-size:10px;display:flex;align-items:center;justify-content:center;flex-shrink:0">1</div>` : ''}
       </div>
