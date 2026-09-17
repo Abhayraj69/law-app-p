@@ -1,4 +1,5 @@
 const jwt = require('jsonwebtoken');
+const crypto = require('node:crypto');
 const bcrypt = require('bcryptjs');
 const db = require('../db');
 
@@ -13,6 +14,16 @@ const db = require('../db');
  * the live user record (role, firm, name) is re-read from Postgres on
  * every request so a role change or deactivation takes effect immediately
  * instead of being frozen inside an old token.
+ *
+ * Revocation (db/migrations/0020_session_revocation.sql): a signed JWT is
+ * otherwise valid for its whole TTL no matter what happens in between,
+ * which meant "log out" was purely cosmetic — it cleared localStorage in
+ * one browser while the token itself kept working anywhere it had been
+ * copied. Every token now carries a unique `jti`, and resolveUserFromToken
+ * refuses one that has been individually revoked (logout) or that predates
+ * the user's sessions_valid_from watermark (an admin force-logout, or a
+ * password change). Both checks are made server-side on every request,
+ * alongside the existing "does this user still exist" read.
  */
 
 const TOKEN_TTL = '12h';
@@ -55,10 +66,66 @@ async function verifyCredentials(email, password) {
 
 function issueToken(user) {
   return jwt.sign(
-    { sub: user.id, firm_id: user.firm_id },
+    // jti makes an individual token addressable so it can be revoked on
+    // logout; without it the only revocation available would be the
+    // blunt, all-sessions-at-once kind.
+    { sub: user.id, firm_id: user.firm_id, jti: crypto.randomUUID() },
     getJwtSecret(),
     { expiresIn: TOKEN_TTL }
   );
+}
+
+function unauthorized(message) {
+  const err = new Error(message);
+  err.status = 401;
+  return err;
+}
+
+/**
+ * Ends one session: the presented token stops working immediately,
+ * everywhere, rather than only being forgotten by one browser.
+ * Idempotent — logging out twice is not an error.
+ */
+async function revokeToken(token) {
+  let payload;
+  try {
+    payload = jwt.verify(token, getJwtSecret());
+  } catch {
+    // An already-expired or malformed token needs no revoking; treating
+    // this as success keeps logout from failing in the one situation
+    // where the user most wants it to just work.
+    return { revoked: false, reason: 'token_not_valid' };
+  }
+
+  if (!payload.jti) {
+    // Tokens issued before migration 0020 carry no jti and cannot be
+    // revoked individually. Falling back to the all-sessions watermark
+    // is strictly safer than silently doing nothing.
+    await db.revokeAllSessionsForUser(payload.sub);
+    return { revoked: true, reason: 'legacy_token_all_sessions_revoked' };
+  }
+
+  await db.revokeToken({
+    jti: payload.jti,
+    userId: payload.sub,
+    expiresAt: new Date(payload.exp * 1000)
+  });
+
+  // Opportunistic sweep; this app has no scheduled job runner, and
+  // logout is the natural moment to do it.
+  db.cleanupExpiredRevocations().catch(err => {
+    console.error('[AUTH] failed to clean up expired token revocations:', err.message);
+  });
+
+  return { revoked: true, reason: 'token_revoked' };
+}
+
+/**
+ * Ends EVERY session a user currently has — the departing-employee and
+ * password-change case. Returns the new watermark.
+ */
+async function revokeAllSessions(userId) {
+  return db.revokeAllSessionsForUser(userId);
 }
 
 /**
@@ -67,26 +134,34 @@ function issueToken(user) {
  *         or no longer matches a real user.
  */
 async function resolveUserFromToken(token) {
-  if (!token) {
-    const err = new Error('Authentication required.');
-    err.status = 401;
-    throw err;
-  }
+  if (!token) throw unauthorized('Authentication required.');
 
   let payload;
   try {
     payload = jwt.verify(token, getJwtSecret());
   } catch (e) {
-    const err = new Error('Invalid or expired session. Please log in again.');
-    err.status = 401;
-    throw err;
+    throw unauthorized('Invalid or expired session. Please log in again.');
+  }
+
+  // Checked before the user read: a revoked token should be refused even
+  // if the account behind it is perfectly healthy.
+  if (await db.isTokenRevoked(payload.jti)) {
+    throw unauthorized('This session has been signed out. Please log in again.');
   }
 
   const user = await db.getUserByIdAndFirm(payload.sub, payload.firm_id);
-  if (!user) {
-    const err = new Error('Account no longer exists.');
-    err.status = 401;
-    throw err;
+  if (!user) throw unauthorized('Account no longer exists.');
+
+  // The all-sessions watermark. `iat` has whole-second resolution, and
+  // db.revokeAllSessionsForUser stores a second-aligned watermark one
+  // second ahead precisely so this comparison is exact rather than
+  // subject to sub-second rounding — see the comment there.
+  if (user.sessions_valid_from) {
+    const issuedAtMs = payload.iat * 1000;
+    const validFromMs = new Date(user.sessions_valid_from).getTime();
+    if (issuedAtMs < validFromMs) {
+      throw unauthorized('All sessions for this account were signed out. Please log in again.');
+    }
   }
 
   return user;
@@ -101,6 +176,8 @@ module.exports = {
   verifyCredentials,
   issueToken,
   resolveUserFromToken,
+  revokeToken,
+  revokeAllSessions,
   toPublicUser,
   TOKEN_TTL
 };

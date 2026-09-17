@@ -287,6 +287,14 @@ router.post(
   inviteController.createInvite
 );
 
+// Force-logout: ends every session the target user currently has (see
+// db/migrations/0020_session_revocation.sql). The departing-employee
+// case — without it, a revoked-in-spirit account stays usable for up to
+// the full 12-hour token TTL. Audited inside the service rather than via
+// logAuditAction, same as the other user-management writes here, because
+// that middleware's document_id column doesn't apply to a user target.
+router.post('/admin/users/:id/revoke-sessions', requireRole('ADMIN'), inviteController.revokeUserSessions);
+
 // ═════════════════════════════════════════════════════════════════════
 // H2. ADMIN — AUDIT LOG VIEWER
 // Read-only: audit_logs rows are written throughout the app already

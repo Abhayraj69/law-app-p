@@ -9,6 +9,7 @@ const apiRoutes = require('./routes/api');
 const authRoutes = require('./routes/auth');
 const healthController = require('./controllers/healthController');
 
+const { securityHeaders } = require('./middleware/securityHeaders');
 const { checkConnection } = require('./db/pool');
 const { runMigrations } = require('./db/migrate');
 const { checkClamAvRequirement } = require('./middleware/securityScanner');
@@ -16,6 +17,14 @@ const { checkMessageEncryptionRequirement } = require('./services/encryption/mes
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+
+// ── Security headers ──────────────────────────────────────────────────────
+// Mounted first, ahead of CORS, static files and every route, so that even
+// an error response or a 404 carries the Content-Security-Policy. See
+// server/middleware/securityHeaders.js — in particular, script-src has no
+// 'unsafe-inline', which is why the frontend uses data-action delegation
+// rather than inline onclick attributes.
+app.use(securityHeaders());
 
 // ── CORS ──────────────────────────────────────────────────────────────────
 // The frontend is served by this same Express app, so it never needs

@@ -56,7 +56,9 @@ async function createFolder(req, res, next) {
 
 async function uploadFile(req, res, next) {
   try {
-    const result = await VaultService.initiateUpload(req.tenantId, req.user.id, req.file, req.body);
+    // req.user (not just the id) so an upload naming a case_id is checked
+    // against what THIS caller may see — see VaultService.initiateUpload.
+    const result = await VaultService.initiateUpload(req.tenantId, req.user.id, req.file, req.body, req.user);
     res.status(201).json({
       success: true,
       data: { ...result, upload_validation: req.uploadValidation || null }

@@ -65,6 +65,71 @@ async function listUsersByFirm(firmId) {
   return rows;
 }
 
+// ═════════════════════════════════════════════════════════════════════
+// SESSION REVOCATION (db/migrations/0020_session_revocation.sql)
+//
+// Two mechanisms, deliberately: revoked_tokens ends one specific session
+// by its jti; users.sessions_valid_from ends every outstanding session
+// for a user at once, which revoked_tokens cannot do because the server
+// never stores the full set of issued jtis.
+// ═════════════════════════════════════════════════════════════════════
+
+// ON CONFLICT DO NOTHING: logging out twice with the same token is not an
+// error, it is just already-revoked.
+async function revokeToken({ jti, userId, expiresAt }) {
+  await pool.query(
+    `INSERT INTO revoked_tokens (jti, user_id, expires_at)
+     VALUES ($1, $2, $3)
+     ON CONFLICT (jti) DO NOTHING`,
+    [jti, userId, expiresAt]
+  );
+}
+
+async function isTokenRevoked(jti) {
+  if (!jti) return false;
+  const { rows } = await pool.query('SELECT 1 FROM revoked_tokens WHERE jti = $1', [jti]);
+  return rows.length > 0;
+}
+
+// Invalidates every token issued to this user up to now, by moving the
+// watermark that resolveUserFromToken compares each token's iat against.
+//
+// The watermark is deliberately truncated to the second and then advanced
+// by one, rather than stored as a raw CURRENT_TIMESTAMP. A JWT's `iat` has
+// only whole-second resolution, so a sub-second watermark creates a window
+// where the arithmetic is wrong in both directions: a token issued at
+// 12:00:00.700 carries iat 12:00:00.000, which would compare as OLDER than
+// a watermark of 12:00:00.500 and be rejected -- meaning a user who
+// legitimately logged back in immediately after an admin revoked their
+// sessions would be locked out of their brand-new session.
+//
+// Truncating and adding a second makes the rule exact at the resolution
+// the token actually has: every token issued during the revocation second
+// or earlier is refused, and the first second that can produce an accepted
+// token is the one after it.
+async function revokeAllSessionsForUser(userId) {
+  const { rows } = await pool.query(
+    `UPDATE users
+     SET sessions_valid_from = date_trunc('second', CURRENT_TIMESTAMP) + interval '1 second',
+         updated_at = CURRENT_TIMESTAMP
+     WHERE id = $1
+     RETURNING sessions_valid_from`,
+    [userId]
+  );
+  return rows[0] ? rows[0].sessions_valid_from : null;
+}
+
+// A revocation row is only load-bearing until the token would have
+// expired on its own — after that jwt.verify rejects it regardless, so
+// keeping the row buys nothing. Called opportunistically on logout
+// rather than from a scheduled job, which this app has no runner for.
+async function cleanupExpiredRevocations() {
+  const { rowCount } = await pool.query(
+    'DELETE FROM revoked_tokens WHERE expires_at < CURRENT_TIMESTAMP'
+  );
+  return rowCount;
+}
+
 async function createUser({ id, firmId, email, fullName, role, initials, passwordHash }) {
   const { rows } = await pool.query(
     `INSERT INTO users (id, firm_id, email, full_name, role, initials, password_hash)
@@ -269,20 +334,28 @@ async function deleteFolder(firmId, folderId) {
   await pool.query('DELETE FROM folders WHERE firm_id = $1 AND id = $2', [firmId, folderId]);
 }
 
-// ── Cases (only what's needed to satisfy the documents.case_id FK and
-//    display a case_name alongside a document; full case management is a
-//    separate piece of work) ────────────────────────────────────────────
-async function ensureCase(firmId, caseId, caseName, clientName) {
-  if (!caseId) return null;
-  const { rows } = await pool.query(
-    `INSERT INTO cases (id, firm_id, case_name, client_name)
-     VALUES ($1, $2, $3, $4)
-     ON CONFLICT (id) DO NOTHING
-     RETURNING *`,
-    [caseId, firmId, caseName || caseId, clientName || 'Unknown']
-  );
-  return rows[0] || null;
-}
+// ── Cases ────────────────────────────────────────────────────────────────
+//
+// REMOVED: ensureCase(firmId, caseId, caseName, clientName).
+//
+// It used to INSERT a cases row for whatever case_id an upload happened to
+// carry, defaulting case_name to the id itself and client_name to
+// 'Unknown', so that documents.case_id's foreign key would be satisfied.
+// That dated from before there was any real case management; now that
+// CaseService owns case creation, auto-vivifying a case from an upload was
+// actively harmful in two ways:
+//
+//   1. It wrote whatever string the client sent as a real PRIMARY KEY.
+//      A frontend bug that passed a click event instead of a case id (see
+//      the comment on btnUploadFiles in app.js) therefore persisted a case
+//      literally named and keyed "[object PointerEvent]" — silently, and
+//      on every plain "Upload Files" click.
+//   2. It was a way for any authenticated user to create cases outside
+//      CaseService.createCase, bypassing its conflict checks, its
+//      LC-YYYY-NNN id minting, its role gate and its audit log entry.
+//
+// Callers now resolve the case with getCaseByIdForUser and refuse an
+// unknown id instead of inventing one — see VaultService.initiateUpload.
 
 // ── Tags ─────────────────────────────────────────────────────────────────
 async function getOrCreateTagId(firmId, name) {
@@ -1814,6 +1887,10 @@ module.exports = {
   getUserById,
   getUserByIdAndFirm,
   listUsersByFirm,
+  revokeToken,
+  isTokenRevoked,
+  revokeAllSessionsForUser,
+  cleanupExpiredRevocations,
   createUser,
   getStorageQuota,
   ensureStorageQuota,
@@ -1823,7 +1900,6 @@ module.exports = {
   getFolderById,
   updateFolder,
   deleteFolder,
-  ensureCase,
   setDocumentTags,
   listActiveDocuments,
   listDistinctDocumentTags,

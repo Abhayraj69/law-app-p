@@ -178,7 +178,16 @@ function renderShell(user) {
   $('portalRoot').classList.remove('hidden');
   $('portalLoading').classList.add('hidden');
 
-  $('portalSignOutBtn').addEventListener('click', () => {
+  $('portalSignOutBtn').addEventListener('click', async () => {
+    // Revoke server-side first, so the token stops working everywhere
+    // rather than only being forgotten by this browser — same reasoning
+    // as the staff app's sign-out (see app.js). Best-effort: the local
+    // session is cleared even if the call fails.
+    try {
+      await fetch('/api/v1/auth/logout', { method: 'POST', headers: Auth.authHeader() });
+    } catch (err) {
+      console.warn('Server-side logout failed; clearing local session anyway.', err);
+    }
     Auth.clearSession();
     window.location.href = '/';
   });

@@ -19,6 +19,12 @@ router.post('/login', authController.login);
 // Requires a valid token — confirms who it belongs to
 router.get('/me', authMiddleware, authController.me);
 
+// Requires a valid token — revokes it server-side, so the session ends
+// everywhere rather than only being forgotten by one browser. You can only
+// ever end your OWN session here; ending someone else's is
+// POST /api/v1/admin/users/:id/revoke-sessions, which is ADMIN-gated.
+router.post('/logout', authMiddleware, authController.logout);
+
 // Public — an invitee has no account (and so no token) until they accept.
 // Deliberately outside authMiddleware; see server/services/inviteService.js.
 router.get('/invite/:token', inviteController.getInvitePreview);

@@ -892,7 +892,7 @@
                 <h3 class="widget-title">Client Messages</h3>
                 <span class="widget-badge red-badge" id="msgUnreadBadge">0 unread</span>
               </div>
-              <button class="btn-view-all" onclick="navigateToPage('communications')">View all</button>
+              <button class="btn-view-all" data-action="navigate" data-page="communications">View all</button>
             </div>
             <div id="vaultMessages">
               <div class="sk-row"></div>
@@ -1136,7 +1136,7 @@
           </div>
 
           <!-- Typing Form -->
-          <form id="commsMessageForm" onsubmit="handleSendCommsMessage(event)">
+          <form id="commsMessageForm" data-action="send-comms-message">
             <div id="commsPendingAttachment" class="hidden" style="margin-bottom:6px;"></div>
             <div class="comms-input-box-wrap">
               <textarea id="commsMessageInput" placeholder="Type a message or internal note..."
@@ -1144,20 +1144,20 @@
               <div class="comms-input-actions">
                 <div class="quick-icons-group">
                   <button type="button" class="quick-action-btn" title="Attach Document from Vault"
-                    onclick="handleInputQuickAction('attach')">
+                    data-action="comms-quick-action" data-quick="attach">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                       <path
                         d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48" />
                     </svg>
                   </button>
                   <button type="button" class="quick-action-btn" title="Request Signature"
-                    onclick="handleInputQuickAction('signature')">
+                    data-action="comms-quick-action" data-quick="signature">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                       <path d="M12 20h9M16.5 3.5a2.121 2.121 0 013 3L7 19l-4 1 1-4L16.5 3.5z" />
                     </svg>
                   </button>
                   <button type="button" class="quick-action-btn" title="Insert Message Template"
-                    onclick="handleInputQuickAction('template', event)">
+                    data-action="comms-quick-action" data-quick="template">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                       <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" />
                       <path d="M14 2v6h6M16 13H8M16 17H8M10 9H8" />
@@ -1591,7 +1591,7 @@
         <button class="modal-close-btn" id="modalCloseBtn">&times;</button>
       </div>
       <div class="modal-body">
-        <form id="newCaseForm" onsubmit="handleNewCaseSubmit(event)">
+        <form id="newCaseForm" data-action="submit-new-case">
           <div class="form-row-two">
             <div class="form-group-modal">
               <label for="newCaseTitle">Case Title</label>
@@ -1692,7 +1692,7 @@
           letter, signature, and retainer are all handled (or explicitly waived) — see the Matter Intake panel after
           creating it.
         </p>
-        <form id="startIntakeForm" onsubmit="handleStartIntakeSubmit(event)">
+        <form id="startIntakeForm" data-action="submit-start-intake">
           <div class="form-row-two">
             <div class="form-group-modal">
               <label for="intakeNewTitle">Case Title</label>
@@ -1849,7 +1849,7 @@
         <button class="modal-close-btn" id="invoiceModalCloseBtn">&times;</button>
       </div>
       <div class="modal-body">
-        <form id="invoiceForm" onsubmit="handleInvoiceSubmit(event)">
+        <form id="invoiceForm" data-action="submit-invoice">
           <div class="form-row-two">
             <div class="form-group-modal">
               <label for="invoiceCase">Case (optional)</label>
@@ -1902,7 +1902,7 @@
         <button class="modal-close-btn" id="signatureRequestModalCloseBtn">&times;</button>
       </div>
       <div class="modal-body">
-        <form id="signatureRequestForm" onsubmit="handleSignatureRequestSubmit(event)">
+        <form id="signatureRequestForm" data-action="submit-signature-request">
           <div class="form-group-modal">
             <label for="signatureRequestDocument">Document to sign</label>
             <select id="signatureRequestDocument" required>
@@ -1963,7 +1963,7 @@
         <button class="modal-close-btn" id="trustLedgerModalCloseBtn">&times;</button>
       </div>
       <div class="modal-body">
-        <form id="trustLedgerForm" onsubmit="handleTrustLedgerSubmit(event)">
+        <form id="trustLedgerForm" data-action="submit-trust-ledger">
           <div class="form-group-modal">
             <label for="trustLedgerAccount">Trust Account</label>
             <select id="trustLedgerAccount" required></select>
@@ -1990,7 +1990,7 @@
         <button class="modal-close-btn" id="trustEntryModalCloseBtn">&times;</button>
       </div>
       <div class="modal-body">
-        <form id="trustEntryForm" onsubmit="handleTrustEntrySubmit(event)">
+        <form id="trustEntryForm" data-action="submit-trust-entry">
           <input type="hidden" id="trustEntryLedgerId" />
           <input type="hidden" id="trustEntryType" value="DEPOSIT" />
           <div class="form-group-modal">
@@ -2029,7 +2029,7 @@
         <button class="modal-close-btn" id="trustTransferModalCloseBtn">&times;</button>
       </div>
       <div class="modal-body">
-        <form id="trustTransferForm" onsubmit="handleTrustTransferSubmit(event)">
+        <form id="trustTransferForm" data-action="submit-trust-transfer">
           <input type="hidden" id="trustTransferLedgerId" />
           <div class="form-group-modal">
             <label id="trustTransferClientLabel">Client</label>
@@ -2088,7 +2088,7 @@
         <button class="modal-close-btn" id="inviteModalCloseBtn">&times;</button>
       </div>
       <div class="modal-body">
-        <form id="inviteUserForm" onsubmit="handleInviteUserSubmit(event)">
+        <form id="inviteUserForm" data-action="submit-invite-user">
           <div class="form-row-two">
             <div class="form-group-modal">
               <label for="inviteFullName">Full Name</label>
@@ -2137,7 +2137,7 @@
           </div>
           <h3 class="vault-modal-title">AI Copilot</h3>
         </div>
-        <button class="vault-modal-close" onclick="closeCopilotDrawer()">&times;</button>
+        <button class="vault-modal-close" data-action="close-copilot-drawer">&times;</button>
       </div>
 
       <div class="vault-drawer-body" style="display:flex;flex-direction:column;height:100%;overflow:hidden">
@@ -2186,7 +2186,7 @@
           </div>
           <h3 class="vault-modal-title">Create New Folder</h3>
         </div>
-        <button class="vault-modal-close" onclick="closeVaultModal('newFolderModal')">&times;</button>
+        <button class="vault-modal-close" data-action="close-vault-modal" data-modal="newFolderModal">&times;</button>
       </div>
       <div class="vault-modal-body">
         <div class="form-group-modal">
@@ -2210,7 +2210,7 @@
         </div>
       </div>
       <div class="vault-modal-footer">
-        <button class="btn-ghost" onclick="closeVaultModal('newFolderModal')">Cancel</button>
+        <button class="btn-ghost" data-action="close-vault-modal" data-modal="newFolderModal">Cancel</button>
         <button class="btn-primary vault-submit-btn" id="newFolderSubmit">Create Folder</button>
       </div>
     </div>
@@ -2226,7 +2226,7 @@
           </div>
           <h3 class="vault-modal-title">Upload Files</h3>
         </div>
-        <button class="vault-modal-close" onclick="closeVaultModal('uploadModal')">&times;</button>
+        <button class="vault-modal-close" data-action="close-vault-modal" data-modal="uploadModal">&times;</button>
       </div>
       <div class="vault-modal-body">
         <!-- Storage Quota Warning -->
@@ -2255,7 +2255,7 @@
         <div class="upload-file-list" id="uploadFileList"></div>
       </div>
       <div class="vault-modal-footer">
-        <button class="btn-ghost" onclick="closeVaultModal('uploadModal')">Cancel</button>
+        <button class="btn-ghost" data-action="close-vault-modal" data-modal="uploadModal">Cancel</button>
         <button class="btn-primary vault-submit-btn" id="uploadSubmitBtn" disabled>Upload All</button>
       </div>
     </div>
@@ -2272,7 +2272,7 @@
         <div class="preview-modal-actions">
           <button class="btn-ghost small" id="previewDownloadBtn">Download</button>
           <button class="btn-ghost small" id="previewShareBtn">Share</button>
-          <button class="vault-modal-close" onclick="closeVaultModal('previewModal')">&times;</button>
+          <button class="vault-modal-close" data-action="close-vault-modal" data-modal="previewModal">&times;</button>
         </div>
       </div>
       <div class="preview-modal-body">
@@ -2305,7 +2305,7 @@
     <div class="vault-drawer" id="shareDrawer">
       <div class="vault-drawer-header">
         <h3 class="vault-modal-title">Share Document</h3>
-        <button class="vault-modal-close" onclick="closeShareDrawer()">&times;</button>
+        <button class="vault-modal-close" data-action="close-share-drawer">&times;</button>
       </div>
       <div class="vault-drawer-body">
         <div class="share-doc-preview" id="shareDocPreview">
@@ -2341,7 +2341,7 @@
         </div>
       </div>
       <div class="vault-drawer-footer">
-        <button class="btn-ghost" onclick="closeShareDrawer()">Cancel</button>
+        <button class="btn-ghost" data-action="close-share-drawer">Cancel</button>
         <button class="btn-primary vault-submit-btn" id="generateShareBtn">Generate Link</button>
       </div>
     </div>
@@ -2352,7 +2352,7 @@
     <div class="vault-drawer" id="integrationsDrawer">
       <div class="vault-drawer-header">
         <h3 class="vault-modal-title">Cloud Integrations</h3>
-        <button class="vault-modal-close" onclick="closeVaultDrawer('integrationsDrawerOverlay')">&times;</button>
+        <button class="vault-modal-close" data-action="close-vault-drawer" data-drawer="integrationsDrawerOverlay">&times;</button>
       </div>
       <div class="vault-drawer-body">
         <p style="font-size:13px;color:var(--slate-400);margin-bottom:20px">Connect your cloud storage to sync documents directly into the Document Vault.</p>
@@ -2362,7 +2362,7 @@
             <div class="integration-name">Google Drive</div>
             <div class="integration-desc">Sync files from My Drive and Shared drives</div>
           </div>
-          <button class="integration-connect-btn" onclick="showToast('Google Drive connection initiated. OAuth flow starting...','info')">Connect</button>
+          <button class="integration-connect-btn" data-action="toast" data-message="Google Drive connection initiated. OAuth flow starting..." data-tone="info">Connect</button>
         </div>
         <div class="integration-item">
           <div class="integration-logo onedrive">&#xf3ca;</div>
@@ -2370,7 +2370,7 @@
             <div class="integration-name">OneDrive</div>
             <div class="integration-desc">Sync from Microsoft 365 & SharePoint</div>
           </div>
-          <button class="integration-connect-btn" onclick="showToast('OneDrive connection initiated. OAuth flow starting...','info')">Connect</button>
+          <button class="integration-connect-btn" data-action="toast" data-message="OneDrive connection initiated. OAuth flow starting..." data-tone="info">Connect</button>
         </div>
         <div class="integration-item">
           <div class="integration-logo dropbox">&#9635;</div>
@@ -2378,7 +2378,7 @@
             <div class="integration-name">Dropbox</div>
             <div class="integration-desc">Sync from Dropbox Business</div>
           </div>
-          <button class="integration-connect-btn" onclick="showToast('Dropbox connection initiated. OAuth flow starting...','info')">Connect</button>
+          <button class="integration-connect-btn" data-action="toast" data-message="Dropbox connection initiated. OAuth flow starting..." data-tone="info">Connect</button>
         </div>
       </div>
     </div>

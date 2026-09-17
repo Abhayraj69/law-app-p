@@ -3417,6 +3417,14 @@ svg { display: block; flex-shrink: 0; }
   border-color: rgba(255, 255, 255, 0.1);
 }
 
+/* Replaces inline onmouseover/onmouseout attributes that set this same
+   background directly. Those are script under the Content-Security-Policy
+   the server now sends (script-src 'self', no 'unsafe-inline'), so the
+   hover state has to live in CSS — where it belonged anyway. */
+.hoverable-card:hover {
+  background: rgba(255, 255, 255, 0.06) !important;
+}
+
 .quick-item-info {
   flex: 1;
   overflow: hidden;

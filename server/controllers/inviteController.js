@@ -45,4 +45,21 @@ async function acceptInvite(req, res, next) {
   }
 }
 
-module.exports = { createInvite, listTeam, getInvitePreview, acceptInvite };
+/**
+ * POST /api/v1/admin/users/:id/revoke-sessions — ADMIN-gated.
+ *
+ * The departing-employee case: signs a user out of every device at once,
+ * without deleting their account (which would take their audit trail and
+ * document authorship with it). Takes effect on that user's very next
+ * request, not whenever their 12-hour token happens to expire.
+ */
+async function revokeUserSessions(req, res, next) {
+  try {
+    const result = await InviteService.revokeUserSessions(req.tenantId, req.user, req.params.id);
+    res.json({ success: true, data: result });
+  } catch (err) {
+    next(err);
+  }
+}
+
+module.exports = { createInvite, listTeam, getInvitePreview, acceptInvite, revokeUserSessions };

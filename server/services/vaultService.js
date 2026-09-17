@@ -206,7 +206,11 @@ class VaultService {
    * @param {object} fields - the rest of the multipart form fields (folder_id,
    *   case_id, tags, allow_duplicate)
    */
-  static async initiateUpload(tenantId, userId, file, fields = {}) {
+  // actingUser is the full user record (not just the id) because the
+  // case_id check below is role-scoped: a CLIENT must not be able to
+  // attach an upload to another client's case. Callers that are already
+  // staff-gated may pass null, which scopes to the firm only.
+  static async initiateUpload(tenantId, userId, file, fields = {}, actingUser = null) {
     if (!file || !file.buffer) {
       throw new Error('No file content received.');
     }
@@ -258,8 +262,22 @@ class VaultService {
     // the documents row inserted below.
     const { storage_path_url, sha256 } = await FileService.saveUploadedFile(tenantId, docId, 1, fileName, file.buffer);
 
+    // A case_id on an upload must name a case that already exists and that
+    // this caller is allowed to see. This used to call db.ensureCase, which
+    // CREATED a case row for whatever string arrived — so an upload could
+    // mint a case outside CaseService.createCase (skipping its conflict
+    // check, id minting, role gate and audit entry), and a frontend bug
+    // that sent a click event instead of an id persisted a case literally
+    // keyed "[object PointerEvent]". Scoped through getCaseByIdForUser, so
+    // a CLIENT also cannot attach an upload to someone else's case.
     if (case_id) {
-      await db.ensureCase(tenantId, case_id, null, null);
+      const parentCase = await db.getCaseByIdForUser(tenantId, case_id, actingUser);
+      if (!parentCase) {
+        const err = new Error('That case does not exist, or you do not have access to it.');
+        err.status = 400;
+        err.code = 'UNKNOWN_CASE';
+        throw err;
+      }
     }
 
     const newDoc = await db.insertDocument({

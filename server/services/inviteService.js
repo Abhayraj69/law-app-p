@@ -150,6 +150,39 @@ class InviteService {
       invite_status: u.invite_status // 'active' | 'pending' | 'expired'
     }));
   }
+
+  /**
+   * Signs a user out of every device at once (ADMIN only — the route is
+   * gated with requireRole('ADMIN') in server/routes/api.js).
+   *
+   * Scoped to the acting admin's own firm: the target user is resolved
+   * with getUserByIdAndFirm, so an admin cannot revoke sessions for
+   * someone at another firm even with a valid user id.
+   */
+  static async revokeUserSessions(tenantId, actingUser, targetUserId) {
+    const target = await db.getUserByIdAndFirm(targetUserId, tenantId);
+    if (!target) {
+      const err = new Error('User not found.');
+      err.status = 404;
+      throw err;
+    }
+
+    const validFrom = await db.revokeAllSessionsForUser(target.id);
+
+    await db.insertAuditLog({
+      firmId: tenantId,
+      userId: actingUser.id,
+      action: 'REVOKE_SESSIONS',
+      details: { target_user_id: target.id, target_email: target.email, sessions_valid_from: validFrom }
+    });
+
+    return {
+      user_id: target.id,
+      email: target.email,
+      sessions_valid_from: validFrom,
+      message: `All sessions for ${target.email} have been signed out.`
+    };
+  }
 }
 
 module.exports = InviteService;

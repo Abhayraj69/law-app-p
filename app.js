@@ -35,6 +35,162 @@ const $ = (id) => document.getElementById(id);
 const $$ = (sel, ctx = document) => ctx.querySelectorAll(sel);
 
 // ══════════════════════════════════════
+// EVENT DELEGATION
+//
+// Every interactive element in this app is wired through data-action
+// attributes and the single delegated listener at the bottom of this
+// section, rather than inline onclick="..."/onsubmit="..." attributes.
+//
+// Two reasons, and the second is the one that actually matters:
+//
+// 1. Content-Security-Policy. The server sends a CSP with a script-src of
+//    'self' and no 'unsafe-inline' (see server/server.js). An inline
+//    handler attribute is script, so under that policy every one of them
+//    silently stops firing. Allowing 'unsafe-inline' instead would have
+//    given up most of what the CSP is for.
+//
+// 2. Stored XSS. The inline handlers these replaced interpolated live
+//    database values straight into executable attribute text — e.g. an
+//    onclick of   handleCaseAction('open', CASE_ID, CASE_NAME)   built by
+//    string interpolation. A case named
+//        O'Brien'); alert(1); ('
+//    closed the quoted argument and ran the rest as code
+//    for every user who loaded the Active Cases page. Passing the same
+//    values as data-* attributes makes them inert data: they are still
+//    escaped on the way in (escapeAttr below), but a break-out now
+//    produces a broken attribute, not execution.
+//
+// Handlers receive (element, event) and read their arguments off
+// element.dataset, so nothing user-supplied is ever parsed as code.
+// ══════════════════════════════════════
+
+const ACTION_HANDLERS = Object.create(null);
+
+// Registers one or many named actions. Called in small groups next to the
+// code each action belongs to, so a handler stays near its markup.
+function registerActions(handlers) {
+  for (const [name, fn] of Object.entries(handlers)) {
+    if (ACTION_HANDLERS[name]) {
+      console.warn(`[actions] duplicate action registration: ${name}`);
+    }
+    ACTION_HANDLERS[name] = fn;
+  }
+}
+
+// Escapes a value for safe interpolation into a double-quoted HTML
+// attribute. Same escaping as escapeHtml (which is defined further down
+// and hoists); named separately because the intent at the call site is
+// "this is going into an attribute", which is where the old inline
+// handlers went wrong.
+function escapeAttr(value) {
+  return escapeHtml(value);
+}
+
+// A data-action element that is also a link or a submit button would
+// otherwise navigate/submit as well as run its handler.
+function shouldPreventDefault(el) {
+  return el.tagName === 'A' || el.tagName === 'FORM' || el.type === 'submit';
+}
+
+function dispatchAction(event) {
+  const el = event.target.closest('[data-action]');
+  if (!el) return;
+
+  const name = el.dataset.action;
+  const handler = ACTION_HANDLERS[name];
+  if (!handler) {
+    console.warn(`[actions] no handler registered for "${name}"`);
+    return;
+  }
+
+  if (shouldPreventDefault(el)) event.preventDefault();
+
+  // data-stop-propagation="true" replaces the handful of old handlers
+  // that began with a literal event.stopPropagation() — e.g. a case-name
+  // link inside a row that is itself clickable.
+  if (el.dataset.stopPropagation === 'true') event.stopPropagation();
+
+  try {
+    handler(el, event);
+  } catch (err) {
+    console.error(`[actions] handler "${name}" threw:`, err);
+  }
+}
+
+function initEventDelegation() {
+  // Both listeners are attached once, at the document level, so markup
+  // rendered later (every innerHTML in this file) is wired automatically
+  // with no re-binding step.
+  document.addEventListener('click', dispatchAction);
+  document.addEventListener('submit', dispatchAction);
+}
+
+// Every action used anywhere in index.html or in this file's rendered
+// markup. Registered in one place so an unreferenced action or a typo in
+// a data-action is easy to spot; the handlers themselves are ordinary
+// function declarations defined further down and hoisted.
+registerActions({
+  // Navigation
+  'navigate': (el) => navigateToPage(el.dataset.page),
+
+  // Generic UI
+  'toast': (el) => showToast(el.dataset.message, el.dataset.tone || 'info'),
+  'toggle-actions-dropdown': (el, event) => toggleActionsDropdown(event, el.dataset.key),
+
+  // Communications
+  'send-comms-message': (el, event) => handleSendCommsMessage(event),
+  'comms-quick-action': (el, event) => handleInputQuickAction(el.dataset.quick, event),
+  'select-conversation': (el) => selectConversation(el.dataset.conversationId),
+  'clear-comms-attachment': () => clearPendingCommsAttachment(),
+
+  // Cases
+  'submit-new-case': (el, event) => handleNewCaseSubmit(event),
+  'submit-start-intake': (el, event) => handleStartIntakeSubmit(event),
+  'case-action': (el) => handleCaseAction(el.dataset.caseAction, el.dataset.caseId, el.dataset.caseName),
+  'set-cases-page': (el) => setCasesPage(Number(el.dataset.pageNumber)),
+  'open-case-detail': (el) => openCaseDetailModal(el.dataset.caseId, el.dataset.caseName),
+
+  // Billing
+  'submit-invoice': (el, event) => handleInvoiceSubmit(event),
+  'open-invoice-modal': (el) => openInvoiceModal(el.dataset.invoiceId),
+  'invoice-mark-paid': (el) => handleInvoiceMarkPaid(el.dataset.invoiceId, el.dataset.invoiceNumber),
+  'set-billing-page': (el) => setBillingPage(Number(el.dataset.pageNumber)),
+
+  // Trust accounting
+  'submit-trust-ledger': (el, event) => handleTrustLedgerSubmit(event),
+  'submit-trust-entry': (el, event) => handleTrustEntrySubmit(event),
+  'submit-trust-transfer': (el, event) => handleTrustTransferSubmit(event),
+  'open-trust-entry': (el) => openTrustEntryModal(el.dataset.ledgerId, el.dataset.entryType),
+  'open-trust-transfer': (el) => openTrustTransferModal(el.dataset.ledgerId),
+  'open-trust-history': (el) => openTrustHistoryModal(el.dataset.ledgerId),
+  'trust-reverse': (el) => handleTrustReverse(el.dataset.transactionId, el.dataset.ledgerId),
+
+  // Signatures
+  'submit-signature-request': (el, event) => handleSignatureRequestSubmit(event),
+
+  // Settings / admin
+  'submit-invite-user': (el, event) => handleInviteUserSubmit(event),
+  'set-audit-log-page': (el) => setAuditLogPage(Number(el.dataset.pageNumber)),
+
+  // Document vault
+  'preview-document': (el) => handlePreview(el.dataset.documentId),
+  'open-context-menu': (el, event) => openContextMenu(event, el.dataset.documentId),
+  'open-document-detail': (el) => openDocumentDetailModal(el.dataset.documentId, el.dataset.fileName),
+  'download-version': (el) => downloadDocumentVersion(el.dataset.versionId),
+  'select-folder': (el) => selectFolder(el.dataset.folderId, el.dataset.folderName),
+  'reset-folder': () => resetFolder(),
+  'remove-upload-file': (el) => removeUploadFile(Number(el.dataset.index)),
+  'vault-page-prev': () => { VaultState.currentPage--; loadVaultFiles(); },
+  'vault-page-next': () => { VaultState.currentPage++; loadVaultFiles(); },
+
+  // Modals and drawers
+  'close-vault-modal': (el) => closeVaultModal(el.dataset.modal),
+  'close-vault-drawer': (el) => closeVaultDrawer(el.dataset.drawer),
+  'close-share-drawer': () => closeShareDrawer(),
+  'close-copilot-drawer': () => closeCopilotDrawer(),
+});
+
+// ══════════════════════════════════════
 // AUTHENTICATION
 // The app previously had no login of any kind — the backend defaulted
 // every request to a hardcoded user. It now issues a signed JWT on login
@@ -211,6 +367,10 @@ function handleUnauthenticated() {
 }
 
 document.addEventListener('DOMContentLoaded', () => {
+  // First, before anything renders: every data-action in the app is dead
+  // markup until this runs. See the EVENT DELEGATION section above.
+  initEventDelegation();
+
   initAuth();
 
   const loginForm = $('loginForm');
@@ -258,8 +418,23 @@ document.addEventListener('DOMContentLoaded', () => {
 
   const signOutBtn = $('signOutBtn');
   if (signOutBtn) {
-    signOutBtn.addEventListener('click', (e) => {
+    signOutBtn.addEventListener('click', async (e) => {
       e.preventDefault();
+
+      // Revoke the token server-side BEFORE dropping it locally, so
+      // signing out actually ends the session everywhere rather than
+      // just forgetting it in this browser. Clearing localStorage alone
+      // left a copied token working for the rest of its 12-hour TTL.
+      //
+      // Best-effort: if the call fails (offline, server down) the local
+      // session is still cleared, because refusing to log someone out
+      // because the network is unavailable is the worse failure.
+      try {
+        await ApiClient.post('/api/v1/auth/logout', {});
+      } catch (err) {
+        console.warn('Server-side logout failed; clearing local session anyway.', err);
+      }
+
       Auth.clearSession();
       const dd = $('profileDropdown');
       if (dd) dd.classList.remove('open');
@@ -396,7 +571,7 @@ function showPlaceholderPage(title) {
       </div>
       <h2 style="font-size:22px; font-weight:600; color:var(--white); margin-bottom:8px;">${title} Section</h2>
       <p style="font-size:14px; color:var(--slate-400); max-width:400px; line-height:1.6; margin-bottom:24px;">This section is currently under active development. Check back soon for features like full vault indexing, client communications, and real-time ledger management.</p>
-      <button class="btn-primary" onclick="navigateToPage('dashboard')">Return to Dashboard</button>
+      <button class="btn-primary" data-action="navigate" data-page="dashboard">Return to Dashboard</button>
     </div>
   `;
 }
@@ -1151,31 +1326,31 @@ function renderCasesList() {
         </td>
         <td class="activity-time">${c.nextHearing}</td>
         <td class="actions-cell-wrap">
-          <button class="row-action-btn" aria-label="Actions for ${c.name}" onclick="toggleActionsDropdown(event, '${c.id}')">
+          <button class="row-action-btn" aria-label="Actions for ${c.name}" data-action="toggle-actions-dropdown" data-key="${escapeAttr(c.id)}">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
               <circle cx="12" cy="5" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="12" cy="19" r="1.5"/>
             </svg>
           </button>
           <div class="actions-dropdown-menu" id="dropdown-${c.id}">
-            <button class="actions-dropdown-item" onclick="handleCaseAction('open', '${c.id}', '${c.name}')">
+            <button class="actions-dropdown-item" data-action="case-action" data-case-action="open" data-case-id="${escapeAttr(c.id)}" data-case-name="${escapeAttr(c.name)}">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" style="width:14px;height:14px;stroke:currentColor;margin-right:2px"><path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6M15 3h6v6M10 14L21 3"/></svg>
               Open Case File
             </button>
-            <button class="actions-dropdown-item" onclick="handleCaseAction('upload', '${c.id}', '${c.name}')">
+            <button class="actions-dropdown-item" data-action="case-action" data-case-action="upload" data-case-id="${escapeAttr(c.id)}" data-case-name="${escapeAttr(c.name)}">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" style="width:14px;height:14px;stroke:currentColor;margin-right:2px"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M17 8l-5-5-5 5M12 3v12"/></svg>
               Upload to Document Index
             </button>
-            <button class="actions-dropdown-item" onclick="handleCaseAction('message', '${c.id}', '${c.name}')">
+            <button class="actions-dropdown-item" data-action="case-action" data-case-action="message" data-case-id="${escapeAttr(c.id)}" data-case-name="${escapeAttr(c.name)}">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" style="width:14px;height:14px;stroke:currentColor;margin-right:2px"><path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/></svg>
               Message via Client Portal
             </button>
-            <button class="actions-dropdown-item" onclick="handleCaseAction('intake', '${c.id}', '${c.name}')">
+            <button class="actions-dropdown-item" data-action="case-action" data-case-action="intake" data-case-id="${escapeAttr(c.id)}" data-case-name="${escapeAttr(c.name)}">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" style="width:14px;height:14px;stroke:currentColor;margin-right:2px"><path d="M12 2l8 4v6c0 5-3.5 8.5-8 10-4.5-1.5-8-5-8-10V6l8-4z"/><path d="M9 12l2 2 4-4"/></svg>
               Matter Intake
             </button>
             ${canArchive ? `
             <div style="height:1px; background:rgba(255,255,255,0.06); margin:4px 0;"></div>
-            <button class="actions-dropdown-item danger-item" onclick="handleCaseAction('archive', '${c.id}', '${c.name}')">
+            <button class="actions-dropdown-item danger-item" data-action="case-action" data-case-action="archive" data-case-id="${escapeAttr(c.id)}" data-case-name="${escapeAttr(c.name)}">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" style="width:14px;height:14px;stroke:currentColor;margin-right:2px"><path d="M21 8v13a2 2 0 01-2 2H5a2 2 0 01-2-2V8M22 3H2v5h20V3zM10 12h4"/></svg>
               Archive Case
             </button>
@@ -1198,7 +1373,7 @@ function renderCasesList() {
   let pageNumbersHtml = '';
   for (let i = 1; i <= totalPages; i++) {
     pageNumbersHtml += `
-      <button class="page-btn ${casesCurrentPage === i ? 'active' : ''}" onclick="setCasesPage(${i})">${i}</button>
+      <button class="page-btn ${casesCurrentPage === i ? 'active' : ''}" data-action="set-cases-page" data-page-number="${i}">${i}</button>
     `;
   }
   $('casesPageNumbers').innerHTML = pageNumbersHtml;
@@ -1576,7 +1751,7 @@ function renderCaseDetailDocuments(docs) {
             <td>${d.category || '—'}</td>
             <td>${d.author_name || '—'}</td>
             <td class="activity-time">${new Date(d.created_at).toLocaleDateString('en-US', { month: 'short', day: '2-digit', year: 'numeric' })}</td>
-            <td><button class="btn-ghost" style="padding:2px 8px; font-size:12px;" onclick="openDocumentDetailModal('${d.id}', '${(d.file_name || '').replace(/'/g, "\\'")}')">Version History</button></td>
+            <td><button class="btn-ghost" style="padding:2px 8px; font-size:12px;" data-action="open-document-detail" data-document-id="${escapeAttr(d.id)}" data-file-name="${escapeAttr(d.file_name || '')}">Version History</button></td>
           </tr>
         `).join('')}
       </tbody>
@@ -2062,7 +2237,7 @@ function renderBillingList() {
     const actions = [];
     if (canEdit && inv.status !== 'paid') {
       actions.push(`
-        <button class="actions-dropdown-item" onclick="openInvoiceModal('${inv.id}')">
+        <button class="actions-dropdown-item" data-action="open-invoice-modal" data-invoice-id="${escapeAttr(inv.id)}">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" style="width:14px;height:14px;stroke:currentColor;margin-right:2px"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
           Edit Invoice
         </button>
@@ -2070,7 +2245,7 @@ function renderBillingList() {
     }
     if (canMarkPaid && inv.status !== 'paid' && inv.status !== 'void') {
       actions.push(`
-        <button class="actions-dropdown-item" onclick="handleInvoiceMarkPaid('${inv.id}', '${inv.invoice_number}')">
+        <button class="actions-dropdown-item" data-action="invoice-mark-paid" data-invoice-id="${escapeAttr(inv.id)}" data-invoice-number="${escapeAttr(inv.invoice_number)}">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" style="width:14px;height:14px;stroke:currentColor;margin-right:2px"><path d="M20 6L9 17l-5-5"/></svg>
           Mark Paid
         </button>
@@ -2078,7 +2253,7 @@ function renderBillingList() {
     }
 
     const actionsHtml = !actions.length ? '' : `
-      <button class="row-action-btn" aria-label="Actions for ${inv.invoice_number}" onclick="toggleActionsDropdown(event, 'inv-${inv.id}')">
+      <button class="row-action-btn" aria-label="Actions for ${inv.invoice_number}" data-action="toggle-actions-dropdown" data-key="inv-${escapeAttr(inv.id)}">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
           <circle cx="12" cy="5" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="12" cy="19" r="1.5"/>
         </svg>
@@ -2109,7 +2284,7 @@ function renderBillingList() {
 
   let pageNumbersHtml = '';
   for (let i = 1; i <= totalPages; i++) {
-    pageNumbersHtml += `<button class="page-btn ${billingCurrentPage === i ? 'active' : ''}" onclick="setBillingPage(${i})">${i}</button>`;
+    pageNumbersHtml += `<button class="page-btn ${billingCurrentPage === i ? 'active' : ''}" data-action="set-billing-page" data-page-number="${i}">${i}</button>`;
   }
   $('billingPageNumbers').innerHTML = pageNumbersHtml;
 }
@@ -2363,10 +2538,10 @@ function renderTrustLedgers() {
       <td class="activity-time">${l.last_activity_at ? formatInvoiceDate(l.last_activity_at.slice(0, 10)) : '—'}</td>
       <td>
         <div style="display:flex; gap:6px; flex-wrap:wrap;">
-          <button class="btn-ghost" style="padding:4px 8px; font-size:12px;" onclick="openTrustEntryModal('${l.id}', 'DEPOSIT')">Deposit</button>
-          <button class="btn-ghost" style="padding:4px 8px; font-size:12px;" onclick="openTrustEntryModal('${l.id}', 'DISBURSEMENT')">Disburse</button>
-          <button class="btn-ghost" style="padding:4px 8px; font-size:12px;" onclick="openTrustTransferModal('${l.id}')">Pay Invoice</button>
-          <button class="btn-ghost" style="padding:4px 8px; font-size:12px;" onclick="openTrustHistoryModal('${l.id}')">History</button>
+          <button class="btn-ghost" style="padding:4px 8px; font-size:12px;" data-action="open-trust-entry" data-ledger-id="${escapeAttr(l.id)}" data-entry-type="DEPOSIT">Deposit</button>
+          <button class="btn-ghost" style="padding:4px 8px; font-size:12px;" data-action="open-trust-entry" data-ledger-id="${escapeAttr(l.id)}" data-entry-type="DISBURSEMENT">Disburse</button>
+          <button class="btn-ghost" style="padding:4px 8px; font-size:12px;" data-action="open-trust-transfer" data-ledger-id="${escapeAttr(l.id)}">Pay Invoice</button>
+          <button class="btn-ghost" style="padding:4px 8px; font-size:12px;" data-action="open-trust-history" data-ledger-id="${escapeAttr(l.id)}">History</button>
         </div>
       </td>
     </tr>
@@ -2597,7 +2772,7 @@ async function openTrustHistoryModal(ledgerId) {
         <td>${formatMoney(t.amount_cents)}</td>
         <td>${(t.memo || '').replace(/</g, '&lt;')}</td>
         <td>${t.created_by_name || '—'}</td>
-        <td>${t.type !== 'ADJUSTMENT_REVERSAL' ? `<button class="btn-ghost" style="padding:2px 8px; font-size:12px;" onclick="handleTrustReverse('${t.id}', '${ledgerId}')">Reverse</button>` : ''}</td>
+        <td>${t.type !== 'ADJUSTMENT_REVERSAL' ? `<button class="btn-ghost" style="padding:2px 8px; font-size:12px;" data-action="trust-reverse" data-transaction-id="${escapeAttr(t.id)}" data-ledger-id="${escapeAttr(ledgerId)}">Reverse</button>` : ''}</td>
       </tr>
     `).join('') : `<tr><td colspan="6" style="text-align:center;color:var(--slate-400)">No transactions yet</td></tr>`;
   } catch (err) {
@@ -2801,7 +2976,7 @@ function renderCommsSidebar() {
     const previewText = c.preview || 'No messages yet';
 
     return `
-      <div class="comms-conv-item ${c.id === activeConvId ? 'active' : ''}" onclick="selectConversation('${c.id}')">
+      <div class="comms-conv-item ${c.id === activeConvId ? 'active' : ''}" data-action="select-conversation" data-conversation-id="${escapeAttr(c.id)}">
         <div class="conv-avatar" style="background:${c.color}22; color:${c.color}">
           ${c.initials}
         </div>
@@ -3099,7 +3274,7 @@ function renderPendingCommsAttachment() {
   wrap.innerHTML = `
     <span style="display:inline-flex;align-items:center;gap:6px;font-size:12px;padding:4px 8px;border-radius:6px;background:rgba(255,255,255,0.08);">
       📎 ${pendingCommsAttachment.name}
-      <button type="button" onclick="clearPendingCommsAttachment()" style="background:none;border:none;color:inherit;cursor:pointer;opacity:0.7;padding:0;">✕</button>
+      <button type="button" data-action="clear-comms-attachment" style="background:none;border:none;color:inherit;cursor:pointer;opacity:0.7;padding:0;">✕</button>
     </span>
   `;
 }
@@ -3299,14 +3474,27 @@ function setSettingsTab(tab) {
 async function loadTeam() {
   const tbody = $('teamTableBody');
   if (!tbody) return;
+
+  // The roster is ADMIN-only and enforced server-side (requireRole('ADMIN')
+  // on GET /api/v1/admin/users), not just by the hidden invite button
+  // above. A non-ADMIN used to call it anyway and rely on the catch below
+  // to render the explanatory row — which worked, but spent a round trip
+  // to be told something already known and logged a permanent 403 in the
+  // browser console, where it sat masking real errors. The server-side
+  // check is still the one that matters; this just stops asking a
+  // question whose answer is already in hand.
+  if (!Auth.getUser() || Auth.getUser().role !== 'ADMIN') {
+    tbody.innerHTML = `<tr><td colspan="5" style="text-align:center;color:var(--slate-400)">Only firm administrators can view the team roster.</td></tr>`;
+    return;
+  }
+
   try {
-    // A non-ADMIN gets a 403 here — that's expected, not an error state;
-    // the roster is an admin-only view (server-enforced, not just the
-    // hidden invite button above).
     const team = await ApiClient.get('/api/v1/admin/users');
     renderTeamTable(team);
   } catch (err) {
-    tbody.innerHTML = `<tr><td colspan="5" style="text-align:center;color:var(--slate-400)">${Auth.getUser() && Auth.getUser().role === 'ADMIN' ? 'Error loading team roster' : 'Only firm administrators can view the team roster.'}</td></tr>`;
+    // Only an ADMIN reaches this now, so a failure here is a real error
+    // rather than the expected permission refusal it used to also cover.
+    tbody.innerHTML = `<tr><td colspan="5" style="text-align:center;color:var(--slate-400)">Error loading team roster</td></tr>`;
   }
 }
 
@@ -3428,12 +3616,35 @@ async function handleInviteUserSubmit(event) {
    this table can grow unbounded rather than staying a small seeded list.
    ════════════════════════════════════════════ */
 
+// Must stay in step with the audit_action enum in Postgres (db/schema.sql
+// plus every migration that ALTERs it). This list had drifted: the trust
+// ledger, conflict checks, matter intake, document versions and
+// e-signature actions were all writing audit rows that the filter dropdown
+// could not select, so those entries were invisible to anyone filtering by
+// action. Verified against `SELECT unnest(enum_range(NULL::audit_action))`.
 const AUDIT_ACTIONS = [
-  'UPLOAD', 'VIEW', 'PREVIEW', 'DOWNLOAD', 'SHARE', 'UPDATE_METADATA', 'DELETE',
-  'FLAG', 'UNFLAG', 'CREATE_FOLDER', 'COPILOT_MOVE', 'COPILOT_RENAME', 'COPILOT_TAG',
-  'COPILOT_DELETE', 'COPILOT_UPDATE_CASE', 'COPILOT_CREATE_CASE', 'CREATE_CASE',
-  'ARCHIVE_CASE', 'CREATE_USER_INVITE', 'CREATE_INVOICE', 'UPDATE_INVOICE',
-  'MARK_INVOICE_PAID', 'UPDATE_STORAGE_QUOTA'
+  // Documents
+  'UPLOAD', 'UPLOAD_VERSION', 'VIEW', 'PREVIEW', 'DOWNLOAD', 'SHARE',
+  'UPDATE_METADATA', 'DELETE', 'FLAG', 'UNFLAG', 'CREATE_FOLDER',
+  // AI Copilot
+  'COPILOT_MOVE', 'COPILOT_RENAME', 'COPILOT_TAG', 'COPILOT_DELETE',
+  'COPILOT_UPDATE_CASE', 'COPILOT_CREATE_CASE',
+  // Cases and matter intake
+  'CREATE_CASE', 'ARCHIVE_CASE', 'CASE_ACTIVATED', 'CASE_INTAKE_STARTED',
+  'CASE_INTAKE_CONFLICT_HOLD', 'CASE_INTAKE_CONFLICT_OVERRIDE',
+  'CASE_INTAKE_ENGAGEMENT_LETTER_SENT', 'CASE_INTAKE_ENGAGEMENT_LETTER_UPLOADED',
+  'CASE_INTAKE_SIGNED', 'CASE_INTAKE_RETAINER_LINKED',
+  'CASE_INTAKE_RETAINER_WAIVED', 'CASE_INTAKE_DECLINED',
+  'CONFLICT_CHECK_HIT', 'CONFLICT_CHECK_CLEAR', 'CONFLICT_CHECK_OVERRIDE',
+  // Billing
+  'CREATE_INVOICE', 'UPDATE_INVOICE', 'MARK_INVOICE_PAID',
+  // Trust accounting
+  'TRUST_DEPOSIT', 'TRUST_DISBURSEMENT', 'TRUST_TRANSFER_TO_OPERATING',
+  'TRUST_ADJUSTMENT', 'TRUST_RECONCILE',
+  // E-signature
+  'CREATE_SIGNATURE_REQUEST', 'COMPLETE_SIGNATURE_REQUEST', 'VOID_SIGNATURE_REQUEST',
+  // Users and sessions
+  'CREATE_USER_INVITE', 'LOGOUT', 'REVOKE_SESSIONS', 'UPDATE_STORAGE_QUOTA'
 ];
 
 const AuditLogState = { page: 1, pageSize: 20, total: 0, filterOptionsLoaded: false };
@@ -3530,7 +3741,7 @@ function renderAuditLogTable(logs) {
 
   let pageNumbersHtml = '';
   for (let i = 1; i <= totalPages; i++) {
-    pageNumbersHtml += `<button class="page-btn ${page === i ? 'active' : ''}" onclick="setAuditLogPage(${i})">${i}</button>`;
+    pageNumbersHtml += `<button class="page-btn ${page === i ? 'active' : ''}" data-action="set-audit-log-page" data-page-number="${i}">${i}</button>`;
   }
   $('auditLogPageNumbers').innerHTML = pageNumbersHtml;
 }
@@ -3775,7 +3986,7 @@ function renderVaultTree() {
       const fileCount = node.files ? node.files.length : 0;
 
       return `
-        <div class="tree-item ${isSelected ? 'active-item' : ''}" onclick="selectFolder('${node.id}', '${node.name}')">
+        <div class="tree-item ${isSelected ? 'active-item' : ''}" data-action="select-folder" data-folder-id="${escapeAttr(node.id)}" data-folder-name="${escapeAttr(node.name)}">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="arrow-icon" style="transform: ${hasChildren ? 'rotate(90deg)' : 'rotate(0)'}; opacity: ${hasChildren ? 1 : 0};"><path d="M9 18l6-6-6-6"/></svg>
           <svg viewBox="0 0 24 24" fill="none" stroke="${isSelected ? '#2DC8B0' : '#8A99AD'}" ${isSelected ? 'fill="rgba(45,200,176,0.2)"' : ''} stroke-width="2" class="folder-icon"><path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z"/></svg>
           <span class="tree-label ${isSelected ? 'green-label' : ''}">${node.name}</span>
@@ -3793,7 +4004,7 @@ function selectFolder(folderId, folderName) {
   VaultState.selectedFolderId = folderId;
   VaultState.currentPage = 1;
   $('vaultBreadcrumb').innerHTML = `
-    <span class="breadcrumb-item" onclick="resetFolder()">${VaultState.activeTab}</span>
+    <span class="breadcrumb-item" data-action="reset-folder">${VaultState.activeTab}</span>
     <span class="breadcrumb-sep">/</span>
     <span class="breadcrumb-item active">${folderName}</span>
   `;
@@ -3883,21 +4094,21 @@ function renderVaultTable() {
     return `
       <tr style="${doc.is_flagged ? 'border-left: 3px solid #E74C3C;' : ''}">
         <td class="col-chk"><input type="checkbox" value="${doc.id}" class="row-chk" ${isChecked ? 'checked' : ''} /></td>
-        <td class="col-name" onclick="handlePreview('${doc.id}')" style="cursor:pointer">
+        <td class="col-name" data-action="preview-document" data-document-id="${escapeAttr(doc.id)}" style="cursor:pointer">
           <div class="file-cell">
             <span class="file-icon-badge ${badgeCls}">${badgeText}</span>
             <span class="file-name-text">${doc.file_name}</span>
           </div>
         </td>
         <td class="col-case">${doc.case_id
-          ? `<a href="#" class="case-name-link" onclick="event.stopPropagation(); openCaseDetailModal('${doc.case_id}', '${(doc.case_name || '').replace(/'/g, "\\'")}'); return false;">${doc.case_name || doc.case_id}</a>`
+          ? `<a href="#" class="case-name-link" data-action="open-case-detail" data-stop-propagation="true" data-case-id="${escapeAttr(doc.case_id)}" data-case-name="${escapeAttr(doc.case_name || '')}">${doc.case_name || doc.case_id}</a>`
           : '—'}</td>
         <td class="col-author">${doc.author_name}</td>
         <td class="col-date">${dateStr}</td>
         <td class="col-size">${sizeMb}</td>
         <td class="col-tags">${tagsHtml}</td>
         <td class="col-action" style="position:relative">
-          <button class="doc-action-btn" onclick="openContextMenu(event, '${doc.id}')">
+          <button class="doc-action-btn" data-action="open-context-menu" data-document-id="${escapeAttr(doc.id)}">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="5" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="12" cy="19" r="1"/></svg>
           </button>
         </td>
@@ -3924,8 +4135,8 @@ function renderPagination() {
   const totalPages = Math.ceil(VaultState.totalItems / VaultState.pageSize);
   let html = `<span>Showing ${(VaultState.currentPage-1)*VaultState.pageSize + 1} to ${Math.min(VaultState.currentPage*VaultState.pageSize, VaultState.totalItems)} of ${VaultState.totalItems} files</span>`;
   html += `<div class="vault-pagination-btns">`;
-  html += `<button class="page-btn" ${VaultState.currentPage === 1 ? 'disabled' : ''} onclick="VaultState.currentPage--; loadVaultFiles()">&lt;</button>`;
-  html += `<button class="page-btn" ${VaultState.currentPage >= totalPages ? 'disabled' : ''} onclick="VaultState.currentPage++; loadVaultFiles()">&gt;</button>`;
+  html += `<button class="page-btn" ${VaultState.currentPage === 1 ? 'disabled' : ''} data-action="vault-page-prev">&lt;</button>`;
+  html += `<button class="page-btn" ${VaultState.currentPage >= totalPages ? 'disabled' : ''} data-action="vault-page-next">&gt;</button>`;
   html += `</div>`;
   $('vaultPagination').innerHTML = html;
 }
@@ -4187,7 +4398,7 @@ function renderDocumentVersions(versions) {
       <td>${v.uploaded_by_name || '—'}</td>
       <td class="activity-time">${new Date(v.uploaded_at).toLocaleDateString('en-US', { month: 'short', day: '2-digit', year: 'numeric' })}</td>
       <td>${v.comment || '—'}</td>
-      <td><button class="btn-ghost" style="padding:2px 8px; font-size:12px;" onclick="downloadDocumentVersion('${v.id}')">Download</button></td>
+      <td><button class="btn-ghost" style="padding:2px 8px; font-size:12px;" data-action="download-version" data-version-id="${escapeAttr(v.id)}">Download</button></td>
     </tr>
   `).join('');
 
@@ -4598,7 +4809,7 @@ function renderUploadList() {
           <div class="upload-progress-fill" style="width:${f.progress}%"></div>
         </div>
       </div>
-      <button class="upload-file-remove" onclick="removeUploadFile(${i})">&times;</button>
+      <button class="upload-file-remove" data-action="remove-upload-file" data-index="${i}">&times;</button>
     </div>
   `).join('');
 }
@@ -4749,7 +4960,7 @@ function renderVaultCalendar(deadlines) {
     const dlDate = new Date(d.deadline_date);
     const monthAbbr = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][dlDate.getMonth()];
     return `
-      <div class="deadline-item" style="display:flex;align-items:center;gap:10px;padding:8px 10px;background:rgba(255,255,255,0.03);border-radius:6px;margin-bottom:6px;border-left:3px solid ${d.badge_color || '#C9A84C'};cursor:pointer" onclick="showToast('${d.title.replace(/'/g, '')}','info')">
+      <div class="deadline-item" style="display:flex;align-items:center;gap:10px;padding:8px 10px;background:rgba(255,255,255,0.03);border-radius:6px;margin-bottom:6px;border-left:3px solid ${d.badge_color || '#C9A84C'};cursor:pointer" data-action="toast" data-message="${escapeAttr(d.title)}" data-tone="info">
         <div style="font-size:10px;color:var(--slate-400);text-align:center;line-height:1.2;min-width:32px">
           <div style="font-size:11px;font-weight:600;color:var(--white)">${monthAbbr}</div>
           <div style="font-size:14px;font-weight:700;color:var(--white)">${dlDate.getDate()}</div>
@@ -4782,7 +4993,7 @@ function renderVaultQuickAccess(quickAccess) {
       const ext = (f.extension || 'pdf').toLowerCase();
       const color = iconColors[ext] || '#8A99AD';
       html += `
-        <div class="quick-item" onclick="handlePreview('${f.id}')" style="cursor:pointer;display:flex;align-items:center;gap:10px;padding:8px;background:rgba(255,255,255,0.03);border-radius:6px;margin-bottom:6px;transition:background .2s" onmouseover="this.style.background='rgba(255,255,255,0.06)'" onmouseout="this.style.background='rgba(255,255,255,0.03)'">
+        <div class="quick-item" data-action="preview-document" data-document-id="${escapeAttr(f.id)}" style="margin-bottom:6px">
           <span class="file-icon-badge" style="background:${color}22;color:${color};font-size:9px;padding:3px 6px;border-radius:4px;font-weight:600">${ext.toUpperCase()}</span>
           <div style="flex:1;min-width:0">
             <div style="font-size:12px;font-weight:500;color:#fff;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${f.file_name}</div>
@@ -4797,7 +5008,7 @@ function renderVaultQuickAccess(quickAccess) {
     html += `<div class="quick-sec-label" style="font-size:10px;color:var(--slate-400);margin:14px 0 8px;text-transform:uppercase;letter-spacing:.5px">Frequent Folders</div>`;
     frequent_folders.forEach(f => {
       html += `
-        <div class="quick-item" onclick="selectFolder('${f.id}','${(f.folder_name || '').replace(/'/g, '')}')" style="cursor:pointer;display:flex;align-items:center;gap:10px;padding:8px;background:rgba(255,255,255,0.03);border-radius:6px;margin-bottom:6px;transition:background .2s" onmouseover="this.style.background='rgba(255,255,255,0.06)'" onmouseout="this.style.background='rgba(255,255,255,0.03)'">
+        <div class="quick-item" data-action="select-folder" data-folder-id="${escapeAttr(f.id)}" data-folder-name="${escapeAttr(f.folder_name || '')}" style="margin-bottom:6px">
           <svg viewBox="0 0 24 24" fill="none" stroke="#C9A84C" stroke-width="2" style="width:16px;height:16px;flex-shrink:0"><path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z"/></svg>
           <div style="flex:1;min-width:0">
             <div style="font-size:12px;font-weight:500;color:#fff;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${f.folder_name}</div>
@@ -4835,7 +5046,7 @@ function renderVaultClientMessages(messages) {
     const initials = m.client_avatar || m.client_name.split(' ').map(p => p[0]).join('').substring(0, 2).toUpperCase();
     const color = colorMap[initials] || avatarColors[i % avatarColors.length];
     return `
-      <div class="client-msg-card" onclick="navigateToPage('communications')" style="cursor:pointer;display:flex;align-items:center;gap:10px;padding:10px;background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.05);border-radius:8px;margin-bottom:8px;transition:background .2s" onmouseover="this.style.background='rgba(255,255,255,0.06)'" onmouseout="this.style.background='rgba(255,255,255,0.03)'">
+      <div class="client-msg-card hoverable-card" data-action="navigate" data-page="communications" style="cursor:pointer;display:flex;align-items:center;gap:10px;padding:10px;background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.05);border-radius:8px;margin-bottom:8px;transition:background .2s">
         <div style="width:30px;height:30px;border-radius:50%;background:${color}22;color:${color};display:flex;align-items:center;justify-content:center;font-weight:600;font-size:11px;flex-shrink:0">${initials}</div>
         <div style="flex:1;min-width:0">
           <div style="display:flex;justify-content:space-between;align-items:center">
