@@ -41,9 +41,49 @@ section before assuming a feature is wired up.
   Write endpoints also exist (`POST /api/v1/invoices`,
   `PATCH /api/v1/invoices/:id`, `PATCH /api/v1/invoices/:id/mark-paid`,
   gated by role) and back the staff Billing page.
-- **AI Copilot drawer** — search, summarize, manage-files, and case-update
-  tools under `/api/v1/copilot/*` (`server/controllers/copilotController.js`).
-  Mutative tools (`manageFiles`, `createOrUpdateCase`) use a human-in-the-loop
+- **AI Copilot** — a real conversational assistant, not a keyword matcher.
+  `POST /api/v1/copilot/chat` (`server/services/copilotAgent.js`) runs an
+  agentic tool-calling loop against the Anthropic Messages API, grounded in
+  `server/services/copilotSystemPrompt.js` — a carefully written system
+  prompt that, before this, nothing in the codebase actually imported. The
+  chat surface replaces what used to be a client-side `if`/`else` ladder in
+  `app.js` that matched keywords ('summarize', 'deadline', 'bill') against
+  one fixed endpoint per branch and could not combine two lookups or
+  remember the previous turn.
+
+  Every tool the loop can call (`server/services/copilotTools.js`) is
+  **read-only and individually role-scoped** through the same services the
+  HTTP routes use — `search_vault`, `read_document`, `list_cases`,
+  `get_case`, `list_conversations`, `read_conversation`. A mutating request
+  (rename a file, change a case status) comes back as a `propose_change`
+  the user must approve in the UI, which then goes through the pre-existing,
+  already role-gated `manageFiles`/`createOrUpdateCase` endpoints below —
+  the chat loop itself cannot write data even if the model tries to.
+  Billing and trust accounting have **no tool and no executor at all**,
+  enforced structurally rather than only by the prompt's instruction not to
+  touch them (`server/test/copilotChat.test.js` asserts this).
+
+  `summarizeDocument` now reads a document's actual text
+  (`server/services/documentTextExtractor.js` — plain text, PDF text layers
+  via `pdf-parse`, and `.docx` via `mammoth`) instead of summarizing only
+  its filename/size/tags. An unreadable document (a scan with no text
+  layer, a spreadsheet, an image) says so explicitly rather than returning
+  empty text a caller might mistake for "this document is empty"; every
+  summary response carries `content_read` so a metadata-only fallback can
+  never be presented as though the document had been reviewed.
+
+  Tool-calling is implemented against the Anthropic provider only — if a
+  deployment is configured for OpenAI or Vercel AI instead (both still work
+  for the metadata-summary fallback path), the chat endpoint returns 503
+  `COPILOT_AI_UNAVAILABLE` with a clear reason rather than silently
+  degrading to something that looks like a real answer.
+
+  The original discrete tool endpoints — `searchVault`, `summarizeDocument`,
+  `manageFiles`, `createOrUpdateCase`, all under `/api/v1/copilot/*`
+  (`server/controllers/copilotController.js`) — are unchanged in shape and
+  still directly callable; the chat endpoint is a new surface built on top
+  of them, not a replacement for them. Mutative tools (`manageFiles`,
+  `createOrUpdateCase`) use a human-in-the-loop
   approval step before committing any change. `createOrUpdateCase` writes
   to the real `cases` table via `CaseService.resolveAndApply`
   (`server/services/caseService.js`) — it resolves the caller's `case_id`

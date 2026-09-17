@@ -29,6 +29,8 @@
 const db = require('../db');
 const aiProvider = require('../services/aiProvider');
 const CaseService = require('../services/caseService');
+const CopilotAgent = require('../services/copilotAgent');
+const { extractText } = require('../services/documentTextExtractor');
 const { ROLE_HIERARCHY } = require('../middleware/auth');
 const {
   ToolInputs,
@@ -241,6 +243,10 @@ async function summarizeDocument(req, res, next) {
   }
 }
 
+// A description of the document's FILING METADATA — who uploaded it, when,
+// how big it is, how it's tagged. It is not a summary of the document's
+// contents and must never be presented as one; callers distinguish the two
+// via `content_read` on the response.
 function buildMetadataSummary(doc) {
   const date = new Date(doc.updated_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
   const sizeMb = (Number(doc.file_size_bytes) / (1024 * 1024)).toFixed(1);
@@ -253,6 +259,9 @@ function buildMetadataSummary(doc) {
     tags: doc.tags || [],
     size_mb: sizeMb,
     updated_at: doc.updated_at,
+    // Default false: this function never reads the document. A caller that
+    // DID read the text overrides this explicitly.
+    content_read: false,
     executive_summary: `${doc.file_name} is a ${doc.extension.toUpperCase()} document authored by ${doc.author_name} ` +
       `on the ${doc.case_name || 'firm'} matter, last updated ${date}. ` +
       `It carries ${doc.tags && doc.tags.length ? doc.tags.join(', ') + ' flags' : 'no special classifications'} ` +
@@ -270,27 +279,52 @@ function buildMetadataSummary(doc) {
 async function generateAiSummary(doc) {
   try {
     const sizeMb = (Number(doc.file_size_bytes) / (1024 * 1024)).toFixed(1);
-    const prompt = `You are a legal AI assistant. Summarize this document based on its metadata.
+
+    // Read the document's actual text. This used to send the model nothing
+    // but metadata — filename, extension, author, size, tags — and present
+    // the result as an "executive summary", which in a legal document vault
+    // reads as though someone reviewed the document when nobody had. If the
+    // text genuinely cannot be extracted (a scan with no text layer, a
+    // spreadsheet, an image), we fall back to the metadata summary, which is
+    // explicitly labelled as such rather than dressed up as a real summary.
+    const extracted = await extractText(doc);
+
+    if (!extracted.extractable) {
+      const fallback = buildMetadataSummary(doc);
+      return {
+        ...fallback,
+        content_read: false,
+        content_unavailable_reason: extracted.reason
+      };
+    }
+
+    const prompt = `Summarize the following legal document for the attorney who uploaded it.
 
 Document: ${doc.file_name}
 Type: ${doc.extension.toUpperCase()}
 Case: ${doc.case_name || 'N/A'}
-Author: ${doc.author_name}
+Uploaded by: ${doc.author_name}
 Size: ${sizeMb} MB
 Tags: ${(doc.tags || []).join(', ') || 'None'}
-Flagged: ${doc.is_flagged ? 'Yes' : 'No'}
-Last Updated: ${new Date(doc.updated_at).toLocaleDateString()}
+${extracted.truncated ? `\nNOTE: only the first portion of this document is shown (it is ${extracted.total_chars} characters in total). Say so in your summary if it matters.\n` : ''}
+═══ DOCUMENT TEXT ═══
+${extracted.text}
+═══ END DOCUMENT TEXT ═══
+
+Base your summary strictly on the text above. Do not speculate about
+anything not present in it. If the text is too fragmentary to summarize
+meaningfully, say that instead of guessing.
 
 Provide:
-1. A concise executive summary (2-3 sentences)
-2. 4-5 key points as bullet points
+1. A concise executive summary (2-3 sentences) of what this document actually says
+2. 4-5 key points drawn from its contents
 
 Return ONLY a JSON object with keys: executive_summary, key_points (array of strings).`;
 
     const response = await aiProvider.chatCompletion([
       { role: 'system', content: 'You are a legal document summarizer. Output only valid JSON.' },
       { role: 'user', content: prompt }
-    ], { temperature: 0.1, maxTokens: 1000 });
+    ], { temperature: 0.1, maxTokens: 1500 });
 
     // Parse AI response
     let aiData;
@@ -304,6 +338,11 @@ Return ONLY a JSON object with keys: executive_summary, key_points (array of str
     const fallback = buildMetadataSummary(doc);
     return {
       ...fallback,
+      // content_read distinguishes a summary of the document's real text
+      // from the metadata-only fallback, so a caller (and the UI) can be
+      // honest with the user about which one they are looking at.
+      content_read: true,
+      truncated: extracted.truncated,
       executive_summary: aiData.executive_summary || fallback.executive_summary,
       key_points: Array.isArray(aiData.key_points) ? aiData.key_points : fallback.key_points
     };
@@ -617,10 +656,60 @@ async function logAuditTrail(req, action, targetId, targetType, details) {
   console.log(`[AUDIT LOG] Copilot Action: ${action} | User: ${req.user ? req.user.full_name : 'unknown'} | Target: ${targetId} (${targetType})`);
 }
 
+// ════════════════════════════════════════════════════════════════════════════
+// 5. chat — the conversational Copilot (READ-ONLY tool loop)
+//
+// POST /api/v1/copilot/chat
+//
+// Replaces what used to be a client-side if/else ladder in app.js that
+// matched keywords ('summarize' / 'deadline' / 'bill') and called one fixed
+// endpoint per branch. This runs a real tool-calling loop under
+// COPILOT_SYSTEM_PROMPT — which, until now, nothing in the codebase
+// imported at all.
+//
+// Every tool the loop can call is read-only and role-scoped (see
+// server/services/copilotTools.js). Mutating requests come back as
+// PROPOSALS for the user to approve; approving one goes through the
+// existing manageFiles / createOrUpdateCase endpoints above, which keep
+// their own role checks and human-in-the-loop step. Nothing about this
+// endpoint can write data.
+// ════════════════════════════════════════════════════════════════════════════
+async function chat(req, res, next) {
+  try {
+    const { message, history } = req.body || {};
+
+    if (!message || !String(message).trim()) {
+      return res.status(400).json({ success: false, error: 'A message is required.' });
+    }
+
+    // Degrade honestly rather than erroring: if no Anthropic key is
+    // configured, say so in a form the frontend can act on, so it can fall
+    // back to its built-in commands instead of showing a dead drawer.
+    if (!CopilotAgent.isAvailable()) {
+      return res.status(503).json({
+        success: false,
+        code: 'COPILOT_AI_UNAVAILABLE',
+        error: CopilotAgent.unavailableReason()
+      });
+    }
+
+    const result = await CopilotAgent.runChatTurn(
+      { tenantId: req.tenantId, user: req.user },
+      history,
+      message
+    );
+
+    res.json({ success: true, data: result });
+  } catch (err) {
+    next(err);
+  }
+}
+
 module.exports = {
   searchVault,
   summarizeDocument,
   manageFiles,
   createOrUpdateCase,
+  chat,
   validateToolInput,
 };

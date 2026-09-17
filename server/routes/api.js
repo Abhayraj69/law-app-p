@@ -332,6 +332,14 @@ router.post('/copilot/summarize', copilotController.validateToolInput('summarize
 router.post('/copilot/manage-files', copilotController.validateToolInput('manageFiles'), copilotController.manageFiles);
 router.post('/copilot/cases', copilotController.validateToolInput('createOrUpdateCase'), copilotController.createOrUpdateCase);
 
+// The conversational Copilot. No requireRole for the same reason as the
+// tools above — and, more to the point, because every tool this endpoint
+// can reach is READ-ONLY and individually role-scoped inside
+// server/services/copilotTools.js. A mutating request comes back as a
+// proposal the user must approve, which then goes through the two
+// already-gated routes above. See server/services/copilotAgent.js.
+router.post('/copilot/chat', copilotController.chat);
+
 // ═════════════════════════════════════════════════════════════════════
 // J. GLOBAL SEARCH (OMNIBOX)
 // Read-only, open to any authenticated staff role (no requireRole) —

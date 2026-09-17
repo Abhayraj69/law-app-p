@@ -61,17 +61,17 @@ function getModel() {
   const provider = getProvider();
 
   if (provider === 'anthropic') {
-    return process.env.ANTHROPIC_MODEL || 'claude-3-5-sonnet-20241022';
+    return process.env.ANTHROPIC_MODEL || 'claude-sonnet-5';
   }
   if (provider === 'openai') {
     return process.env.OPENAI_MODEL || 'gpt-4o';
   }
   if (provider === 'vercel-ai') {
-    return process.env.VERCEL_AI_MODEL || 'anthropic/claude-3-5-sonnet-20241022';
+    return process.env.VERCEL_AI_MODEL || 'anthropic/claude-sonnet-5';
   }
 
   // Default fallback
-  return 'claude-3-5-sonnet-20241022';
+  return 'claude-sonnet-5';
 }
 
 /**

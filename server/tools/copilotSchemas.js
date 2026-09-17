@@ -64,6 +64,15 @@ const SummarizeDocumentOutput = z.object({
     updated_at: z.string(),
     executive_summary: z.string(),
     key_points: SummaryKeyPoints,
+    // Whether the summary is based on the document's ACTUAL text or only
+    // on its metadata. Summaries used to be metadata-only while being
+    // presented as though the document had been read; these two fields
+    // exist so the response can no longer be ambiguous about which it is.
+    // Optional because z.object() strips unknown keys — omitting them here
+    // would silently delete them from the response.
+    content_read: z.boolean().optional(),
+    content_unavailable_reason: z.string().nullable().optional(),
+    truncated: z.boolean().optional(),
   }),
 });
 

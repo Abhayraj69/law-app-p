@@ -5106,105 +5106,161 @@ function closeCopilotDrawer() {
   setTimeout(() => overlay.classList.add('hidden'), 250);
 }
 
+// ══════════════════════════════════════
+// COPILOT CHAT
+//
+// This used to be a client-side if/else ladder: the prompt was lowercased
+// and matched against 'summarize' / 'deadline' / 'bill' / 'search', each
+// branch calling one fixed endpoint. It could not answer a question that
+// did not contain one of those words, could not combine two lookups, and
+// had no memory of the previous turn — and the carefully written
+// COPILOT_SYSTEM_PROMPT on the server was imported by nothing.
+//
+// It now posts to POST /api/v1/copilot/chat, which runs a real tool-calling
+// loop over read-only, role-scoped tools. See server/services/copilotAgent.js.
+// ══════════════════════════════════════
+
+// The transcript sent back to the server each turn (the API is stateless).
+// Capped server-side too; this just avoids sending an ever-growing body.
+let copilotHistory = [];
+
 async function handleCopilotChat(prompt) {
   if (!prompt.trim()) return;
 
   appendChatMessage('user', prompt);
   $('copilotChatInput').value = '';
 
-  // Show typing indicator
   const typingId = 'typing-' + Date.now();
   appendChatMessage('assistant', '<em>Thinking…</em>', typingId);
 
   try {
-    // Simple intent detection based on keywords
-    const lowerPrompt = prompt.toLowerCase();
+    const res = await ApiClient.post('/api/v1/copilot/chat', {
+      message: prompt,
+      history: copilotHistory
+    });
 
-    if (lowerPrompt.includes('summarize') || lowerPrompt.includes('summary')) {
-      // Extract document name, then resolve it to a real document_id via
-      // search before calling /copilot/summarize (which requires an id,
-      // not a name) — the chat surface is now the only place this runs,
-      // so it has to do that resolution itself.
-      const docName = prompt.replace(/^(summarize|summary)\s+(of\s+)?/i, '').trim();
-      if (docName) {
-        await respondWithSummary(docName);
-        removeChatMessage(typingId);
-        return;
-      }
-    }
-
-    if (lowerPrompt.includes('deadline') || lowerPrompt.includes('upcoming')) {
-      const data = await ApiClient.get('/api/v1/vault/deadlines');
-      const upcoming = data.upcoming?.slice(0, 5) || [];
-      let response = upcoming.length
-        ? `Here are your upcoming deadlines:\n\n${upcoming.map(d => `• **${d.title}** — ${d.deadline_date} (${d.location})`).join('\n')}`
-        : 'No upcoming deadlines found.';
-      removeChatMessage(typingId);
-      appendChatMessage('assistant', response);
-      return;
-    }
-
-    if (lowerPrompt.includes('bill') || lowerPrompt.includes('invoice') || lowerPrompt.includes('trust account')) {
-      removeChatMessage(typingId);
-      appendChatMessage('assistant', "I don't have access to billing or trust accounting — please use the **Billing** page for that.");
-      return;
-    }
-
-    // Search terms: strip a leading "search for"/"find"/"look for" if
-    // present, otherwise fall back to the whole prompt as the query — this
-    // also covers the default (no keyword matched) case.
-    const searchTerms = lowerPrompt.includes('search') || lowerPrompt.includes('find') || lowerPrompt.includes('look for')
-      ? prompt.replace(/^(search|find|look for)\s+(for\s+)?/i, '').trim() || prompt
-      : prompt;
-
-    await respondWithSearchResults(searchTerms);
     removeChatMessage(typingId);
+
+    const data = res.data || {};
+    const reply = data.reply || 'I don\'t have anything to add to that.';
+
+    appendChatMessage('assistant', renderAssistantMarkdown(reply));
+
+    // Only record turns that actually completed, so a failed turn doesn't
+    // poison the context of the next one.
+    copilotHistory.push({ role: 'user', content: prompt });
+    copilotHistory.push({ role: 'assistant', content: reply });
+    if (copilotHistory.length > 40) copilotHistory = copilotHistory.slice(-40);
+
+    // A mutating request comes back as a proposal, never as a completed
+    // change — see the human-in-the-loop rule in copilotSystemPrompt.js.
+    if (Array.isArray(data.proposals) && data.proposals.length) {
+      data.proposals.forEach(renderCopilotProposal);
+    }
   } catch (err) {
     removeChatMessage(typingId);
+
+    // The server says explicitly when conversational mode is unavailable
+    // (no Anthropic key configured, or a non-Anthropic provider). Say that
+    // plainly instead of showing a generic error, and point at what still
+    // works, rather than silently degrading to something that looks like an
+    // answer.
+    if (err && /COPILOT_AI_UNAVAILABLE/.test(err.message || '')) {
+      appendChatMessage('assistant', escapeHtml(err.message));
+      return;
+    }
     console.error('Copilot chat error:', err);
-    appendChatMessage('assistant', `Sorry, I encountered an error: ${err.message}`);
+    appendChatMessage('assistant', `Sorry, I ran into an error: ${escapeHtml(err.message || 'unknown error')}`);
   }
 }
 
-// Runs a vault search and renders the results directly into the chat
-// transcript — replaces the old dedicated Search tab/panel, which this
-// posted results into instead (see copilotSystemPrompt.js and the removal
-// of the Search/Summarize/Manage Files/Cases tabs).
-async function respondWithSearchResults(query) {
-  const results = await ApiClient.post('/api/v1/copilot/search', { query, scope: 'all', limit: 5 });
-  if (results.data?.results?.length) {
-    const topResults = results.data.results.slice(0, 3);
-    let response = `I found ${results.data.total} result${results.data.total === 1 ? '' : 's'}. Here ${results.data.total === 1 ? 'it is' : 'are the top matches'}:\n\n`;
-    topResults.forEach(r => {
-      response += `• **${r.title}** (${r.type}) — ${r.meta}\n  ${r.snippet}\n\n`;
-    });
-    appendChatMessage('assistant', response);
-  } else {
-    appendChatMessage('assistant', `I couldn't find anything matching "${query}". Try different keywords.`);
-  }
+// Renders a pending change for the user to approve. The Copilot cannot
+// apply changes itself — approving here is what calls the already-gated,
+// human-in-the-loop endpoints that do.
+function renderCopilotProposal(proposal) {
+  const container = $('copilotChatMessages');
+  if (!container) return;
+
+  const id = 'proposal-' + Date.now() + '-' + Math.random().toString(36).slice(2, 7);
+  container.insertAdjacentHTML('beforeend', `
+    <div class="chat-proposal" id="${id}" style="margin:8px 0 8px 38px;padding:10px 12px;border:1px solid rgba(201,168,76,.35);background:rgba(201,168,76,.08);border-radius:8px">
+      <div style="font-size:10px;text-transform:uppercase;letter-spacing:.5px;color:#C9A84C;font-weight:600;margin-bottom:4px">Awaiting your approval</div>
+      <div style="font-size:13px;color:var(--slate-300);line-height:1.5">${escapeHtml(proposal.summary || 'Proposed change')}</div>
+      <div style="font-size:11px;color:var(--slate-400);margin-top:4px">Target: ${escapeHtml(proposal.target_id || '—')}</div>
+      <div style="display:flex;gap:8px;margin-top:10px">
+        <button class="btn-primary" style="padding:4px 12px;font-size:12px" data-action="copilot-approve" data-proposal-id="${escapeAttr(id)}">Approve</button>
+        <button class="btn-ghost" style="padding:4px 12px;font-size:12px" data-action="copilot-dismiss" data-proposal-id="${escapeAttr(id)}">Dismiss</button>
+      </div>
+    </div>
+  `);
+  container.scrollTop = container.scrollHeight;
+
+  // Stashed on the element rather than in the markup so the payload is
+  // never re-parsed out of HTML.
+  const el = $(id);
+  if (el) el._proposal = proposal;
 }
 
-// Resolves a document by name via search, then summarizes the best match
-// — replaces the old dedicated Summarize tab/panel.
-async function respondWithSummary(docName) {
-  const results = await ApiClient.post('/api/v1/copilot/search', { query: docName, scope: 'documents', limit: 1 });
-  const match = results.data?.results?.[0];
-  if (!match) {
-    appendChatMessage('assistant', `I couldn't find a document matching "${docName}".`);
-    return;
-  }
+async function handleCopilotProposalApprove(el) {
+  const box = $(el.dataset.proposalId);
+  const proposal = box && box._proposal;
+  if (!proposal) return;
+
+  box.querySelectorAll('button').forEach(b => { b.disabled = true; });
 
   try {
-    const summary = await ApiClient.post('/api/v1/copilot/summarize', { document_id: match.id });
-    const { file_name, executive_summary, key_points } = summary.data || {};
-    let response = `**${file_name || match.title}**\n\n${executive_summary || ''}`;
-    if (key_points?.length) {
-      response += `\n\n${key_points.map(p => `• ${p}`).join('\n')}`;
+    if (proposal.action === 'update_case') {
+      await ApiClient.post('/api/v1/copilot/cases', {
+        case_id: proposal.target_id,
+        ...(proposal.details || {}),
+        approved: true
+      });
+    } else if (proposal.action === 'manage_file') {
+      const details = proposal.details || {};
+      await ApiClient.post('/api/v1/copilot/manage-files', {
+        action: details.operation || details.action,
+        target_id: proposal.target_id,
+        target_type: details.target_type || 'file',
+        payload: details,
+        approved: true
+      });
+    } else {
+      throw new Error(`Unsupported proposal type: ${proposal.action}`);
     }
-    appendChatMessage('assistant', response);
+
+    box.innerHTML = `<div style="font-size:12px;color:#2DC8B0">✓ Applied: ${escapeHtml(proposal.summary || '')}</div>`;
+    showToast('Change applied.', 'success');
+    if (typeof loadCases === 'function') loadCases();
   } catch (err) {
-    appendChatMessage('assistant', `Found "${match.title}", but couldn't generate a summary: ${err.message}`);
+    box.querySelectorAll('button').forEach(b => { b.disabled = false; });
+    showToast(`Could not apply: ${err.message}`, 'error');
   }
+}
+
+function handleCopilotProposalDismiss(el) {
+  const box = $(el.dataset.proposalId);
+  if (box) box.remove();
+}
+
+registerActions({
+  'copilot-approve': (el) => handleCopilotProposalApprove(el),
+  'copilot-dismiss': (el) => handleCopilotProposalDismiss(el),
+});
+
+// Minimal, allow-list markdown for assistant replies.
+//
+// IMPORTANT: the text is HTML-escaped FIRST, then a small, fixed set of
+// formatting patterns is re-introduced. Model output is untrusted input
+// like any other — it can quote a document that itself contains markup —
+// and appendChatMessage writes its argument as innerHTML. Escaping first
+// and formatting second means no path exists from model text to live HTML.
+function renderAssistantMarkdown(text) {
+  const escaped = escapeHtml(text);
+  return escaped
+    .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+    .replace(/\`([^\`]+)\`/g, '<code style="background:rgba(255,255,255,.08);padding:1px 4px;border-radius:3px">$1</code>')
+    .replace(/^[-•]\s+(.*)$/gm, '<div style="margin-left:10px">• $1</div>')
+    .replace(/\n/g, '<br>');
 }
 
 function appendChatMessage(role, content, id = null) {
