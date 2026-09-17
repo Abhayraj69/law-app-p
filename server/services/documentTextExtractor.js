@@ -1,5 +1,4 @@
 const fs = require('fs/promises');
-const path = require('path');
 const { resolveStoragePath } = require('./fileService');
 const baseLogger = require('../utils/logger');
 
@@ -61,6 +60,75 @@ const KNOWN_UNREADABLE = {
 // enough to matter, so cap it well below the 50MB upload limit. Same
 // reasoning as fileService's MAX_DIFFABLE_BYTES.
 const MAX_EXTRACTABLE_BYTES = 10 * 1024 * 1024; // 10MB
+
+// A ceiling on how long a single PDF/DOCX parse is allowed to run, found
+// worth adding during a security review: the size cap above bounds INPUT
+// size, but not parse TIME — a small, adversarially structured PDF can
+// still make some parsers spend a very long time on it, and the Copilot's
+// read_document tool can now trigger this parsing repeatedly (once per
+// tool call, up to MAX_TOOL_ITERATIONS times) within a single chat turn
+// with nothing else bounding it.
+//
+// A function, not a frozen module-level const, matching how
+// aiProvider.js's equivalent (AI_REQUEST_TIMEOUT_MS, read inside
+// getRequestConfig()) is resolved fresh on every call rather than once at
+// require time — the same reason server/utils/logger.js reads NODE_ENV
+// lazily. Baking this into a top-level const would mean whatever
+// EXTRACTION_TIMEOUT_MS happened to be set to the moment this module was
+// first required is what every extraction gets for the lifetime of the
+// process, with no way to override it per-call (a test wanting to force a
+// fast timeout, for instance) or to see a later env change take effect.
+function getExtractionTimeoutMs() {
+  return parseInt(process.env.EXTRACTION_TIMEOUT_MS, 10) || 15000;
+}
+
+// Races a parse against a timer. Proven, not assumed, to actually work
+// for mammoth (DOCX): raced a genuinely large real .docx (20,000
+// paragraphs) against a 5ms timer and the timer fired right on schedule
+// — mammoth's parse yields control back to the event loop during a long
+// parse, so a same-thread race can genuinely preempt it.
+//
+// pdf-parse is a different story, and this is worth being honest about
+// rather than assuming the fix generalizes: the same style of test — race
+// a large real PDF (2000 pages, a ~1 second parse) against a 5ms timer —
+// showed the timer never fires, not once across repeated runs. pdf-parse's
+// Node.js parse runs as one long blocking stretch with nothing yielding
+// control, so withTimeout below does not actually bound PDF parse time in
+// the way it looks like it does; it will "expire" and reject once the
+// blocking parse finally finishes and control returns to the event loop,
+// which is too late to have prevented anything.
+//
+// A worker thread — spawning pdf-parse on a separate OS thread that
+// worker.terminate() can kill from the outside regardless of whether the
+// code inside ever yields — is the mechanism that actually fixes this,
+// and an earlier version of this file did exactly that. It was reverted:
+// under this project's own concurrent test suite (many test files each
+// opening their own Postgres pool, running together), spawning a worker
+// thread crashed the whole test process outright — reproduced 4/4 times,
+// and confirmed with a diagnostic worker that didn't even touch pdf-parse
+// (just posted a message back immediately), which crashed just as
+// consistently. That points at worker-thread creation itself being
+// unstable under this environment's concurrent load, not a bug in the
+// worker code — but "probably fine in a normal deployment" isn't
+// something provable from here, and shipping a fix that can bring down
+// the process it's supposed to be protecting is a worse outcome than the
+// gap it was meant to close. Real worker-based protection needs a small
+// persistent worker POOL (workers created once, reused, and only
+// respawned on an actual timeout) rather than a worker spawned per parse
+// — a larger, separately-scoped piece of work, not attempted here.
+//
+// What PDF parsing keeps in the meantime: the MAX_EXTRACTABLE_BYTES size
+// cap (the primary defense — bounds how much there is to parse at all),
+// and this same withTimeout wrapper as a best-effort measure that is
+// honestly documented as non-blocking for PDF specifically, not silently
+// left implying protection it cannot provide.
+function withTimeout(promise, ms, label) {
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
 
 // How much text is handed back to a caller. A model's context window is
 // finite and a legal document can be enormous; truncating here — visibly,
@@ -182,20 +250,22 @@ async function extractText(doc, log = baseLogger) {
     }
 
     if (isPdf) {
-      // Required lazily: pdf-parse pulls in a sizeable dependency tree, and
-      // most requests in this app never touch a PDF.
-      //
-      // NOTE the API shape: pdf-parse v2 exports a PDFParse CLASS. The v1
+      // pdf-parse v2 exports a PDFParse CLASS. The v1
       // `require('pdf-parse')(buffer)` callable that most examples online
-      // still show is not a function here and throws immediately.
+      // still show is not a function there and throws immediately.
+      //
+      // withTimeout here is a best-effort measure only — see its own
+      // comment above for the proof that it does NOT actually bound PDF
+      // parse time the way it does for DOCX. A timeout and a genuine parse
+      // failure (corrupt PDF, etc.) both reach the outer catch block below,
+      // which already distinguishes them by message and gives the timeout
+      // case its own, more specific, user-facing reason.
       const { PDFParse } = require('pdf-parse');
       const parser = new PDFParse({ data: buffer });
       let parsed;
       try {
-        parsed = await parser.getText();
+        parsed = await withTimeout(parser.getText(), getExtractionTimeoutMs(), 'PDF parse');
       } finally {
-        // Frees the underlying pdf.js document; skipping this leaks worker
-        // resources across repeated extractions.
         if (typeof parser.destroy === 'function') await parser.destroy();
       }
       const normalized = normalizeWhitespace(parsed.text);
@@ -221,7 +291,7 @@ async function extractText(doc, log = baseLogger) {
 
     if (isDocx) {
       const mammoth = require('mammoth');
-      const parsed = await mammoth.extractRawText({ buffer });
+      const parsed = await withTimeout(mammoth.extractRawText({ buffer }), getExtractionTimeoutMs(), 'DOCX parse');
       const normalized = normalizeWhitespace(parsed.value);
       if (!normalized) {
         return unreadable('This Word document contains no readable text.');
@@ -231,10 +301,15 @@ async function extractText(doc, log = baseLogger) {
     }
   } catch (err) {
     // A corrupt or password-protected file is a normal thing to encounter,
-    // not a server fault — report it as unreadable rather than a 500.
+    // not a server fault — report it as unreadable rather than a 500. A
+    // timeout (see withTimeout/EXTRACTION_TIMEOUT_MS above) gets its own,
+    // more specific message rather than being lumped in as "corrupt".
     log.error('failed to extract document text', {
       context: 'EXTRACT', document_id: doc.id, file_name: doc.file_name, error: err.message
     });
+    if (/timed out after/.test(err.message)) {
+      return unreadable('This document took too long to parse and was skipped rather than left running indefinitely.');
+    }
     return unreadable(`This file could not be parsed — it may be corrupt or password-protected.`);
   }
 
@@ -248,5 +323,7 @@ module.exports = {
   PLAIN_TEXT_EXTENSIONS,
   KNOWN_UNREADABLE,
   MAX_EXTRACTABLE_BYTES,
-  MAX_TEXT_CHARS
+  MAX_TEXT_CHARS,
+  getExtractionTimeoutMs,
+  withTimeout
 };

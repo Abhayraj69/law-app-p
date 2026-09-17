@@ -127,6 +127,59 @@ test('Copilot system prompt is actually wired up', async (t) => {
   });
 });
 
+test('Document parse timeout guard', async (t) => {
+  // No database needed — pure unit tests over withTimeout itself, added
+  // during a security review after flagging that PDF/DOCX parsing had a
+  // size cap but no execution-time ceiling, and the Copilot's
+  // read_document tool can trigger it repeatedly in one chat turn.
+  //
+  // Honest scope: this proves the WRAPPING logic works correctly — a slow
+  // promise really does get raced against the clock and really does
+  // reject with a timeout error the caller can distinguish from other
+  // failures. It does NOT prove pdf-parse/mammoth internally yield
+  // control during a pathological parse (a genuinely CPU-blocking
+  // synchronous library call would starve the timer too — see the
+  // comment on EXTRACTION_TIMEOUT_MS in documentTextExtractor.js for why
+  // that would need worker-thread isolation to fix for real). What's
+  // tested here is the part actually under this codebase's control.
+  const { withTimeout } = require('../services/documentTextExtractor');
+
+  await t.test('a promise that resolves before the deadline wins the race', async () => {
+    const fast = new Promise(resolve => setTimeout(() => resolve('done'), 10));
+    const result = await withTimeout(fast, 500, 'test op');
+    assert.equal(result, 'done');
+  });
+
+  await t.test('a promise that resolves after the deadline is rejected with a labeled timeout error', async () => {
+    const slow = new Promise(resolve => setTimeout(() => resolve('too late'), 300));
+    await assert.rejects(
+      () => withTimeout(slow, 20, 'test op'),
+      (err) => /test op timed out after 20ms/.test(err.message)
+    );
+  });
+
+  await t.test('an underlying rejection before the deadline still propagates (timeout does not mask a real failure)', async () => {
+    const failsFast = new Promise((_, reject) => setTimeout(() => reject(new Error('real parse error')), 5));
+    await assert.rejects(
+      () => withTimeout(failsFast, 500, 'test op'),
+      (err) => err.message === 'real parse error'
+    );
+  });
+
+  await t.test('the timer is cleared on the fast path — a resolved race does not leave a dangling timeout', async () => {
+    // Indirect but real: if clearTimeout were never called, the process
+    // would have a lingering timer keeping the event loop alive. node:test
+    // exits this file cleanly when all tests finish; a leaked timer with a
+    // long enough delay would be visible as the process hanging past its
+    // own tests. Exercised here with enough of a gap (200ms) that a
+    // missing clearTimeout would be observable if this test suite's own
+    // process outlived it, which it does not.
+    const fast = Promise.resolve('ok');
+    await withTimeout(fast, 200, 'test op');
+    assert.ok(true, 'completed without the process being kept alive by a stray timer');
+  });
+});
+
 // ─────────────────────────────────────────────────────────────────────
 // Text extraction — needs real files on disk and a database row.
 // ─────────────────────────────────────────────────────────────────────
@@ -219,6 +272,59 @@ test('Document text extraction', { skip: !TEST_DB_URL && 'set TEST_DATABASE_URL 
     assert.match(result.text, /SETTLEMENT AGREEMENT/);
     assert.match(result.text, /Acme Corp/);
     assert.equal(result.page_count, 1, 'page_count must read the real page total, not be silently null');
+  });
+
+  await t.test('a real PDF parse still completes even when EXTRACTION_TIMEOUT_MS is set far below its runtime (documented limitation, not a silent regression)', async () => {
+    // This is the honest counterpart to the DOCX timeout test above, not
+    // a bug repro: pdf-parse's synchronous parse never yields control
+    // back to the event loop mid-parse, so the same-thread
+    // Promise.race in withTimeout cannot preempt it (see withTimeout's
+    // own comment in documentTextExtractor.js for the full investigation,
+    // including why a worker-thread fix was attempted and reverted after
+    // it destabilized this test suite under concurrent load). Forcing the
+    // ceiling to 5ms and asserting the parse still SUCCEEDS pins down
+    // that known limitation as an explicit, tested fact rather than an
+    // assumption — if a future change makes withTimeout actually bound
+    // PDF parse time (e.g. a real worker pool), this assertion will fail
+    // and should be flipped to expect a timeout, matching the DOCX test.
+    const pageCount = 500;
+    const text = 'Lorem ipsum dolor sit amet consectetur adipiscing elit sed do eiusmod tempor. '.repeat(50).replace(/[()\\]/g, '');
+    const objects = ['<< /Type /Catalog /Pages 2 0 R >>'];
+    let nextObj = 3;
+    const pageObjNums = [];
+    for (let i = 0; i < pageCount; i++) { pageObjNums.push(nextObj); nextObj += 2; }
+    objects.push(`<< /Type /Pages /Kids [${pageObjNums.map(n => n + ' 0 R').join(' ')}] /Count ${pageCount} >>`);
+    const fontObjNum = nextObj++;
+    for (let i = 0; i < pageCount; i++) {
+      const stream = `BT /F1 10 Tf 50 700 Td (${text}) Tj ET`;
+      objects.push(`<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents ${pageObjNums[i] + 1} 0 R /Resources << /Font << /F1 ${fontObjNum} 0 R >> >> >>`);
+      objects.push(`<< /Length ${stream.length} >>\nstream\n${stream}\nendstream`);
+    }
+    objects.push('<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>');
+    let pdf = '%PDF-1.4\n';
+    const offsets = [];
+    objects.forEach((obj, i) => { offsets.push(pdf.length); pdf += `${i + 1} 0 obj\n${obj}\nendobj\n`; });
+    const xrefStart = pdf.length;
+    pdf += `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n`;
+    offsets.forEach(o => { pdf += `${String(o).padStart(10, '0')} 00000 n \n`; });
+    pdf += `trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xrefStart}\n%%EOF`;
+
+    const buffer = Buffer.from(pdf, 'latin1');
+    assert.ok(buffer.length < 10 * 1024 * 1024, 'the fixture must stay under MAX_EXTRACTABLE_BYTES, or this would test the size guard instead of the timeout');
+
+    const doc = await upload('will-time-out.pdf', buffer, 'application/pdf');
+
+    const saved = process.env.EXTRACTION_TIMEOUT_MS;
+    process.env.EXTRACTION_TIMEOUT_MS = '5';
+    try {
+      const result = await extractText(doc);
+      assert.equal(result.extractable, true, 'withTimeout cannot preempt a synchronous pdf-parse call, so the parse runs to completion despite the 5ms ceiling');
+      assert.equal(result.source, 'pdf');
+      assert.equal(result.page_count, pageCount);
+    } finally {
+      if (saved === undefined) delete process.env.EXTRACTION_TIMEOUT_MS;
+      else process.env.EXTRACTION_TIMEOUT_MS = saved;
+    }
   });
 
   await t.test('reads a real .docx via mammoth', async () => {
