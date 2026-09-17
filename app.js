@@ -913,20 +913,20 @@ function renderCaseTable() {
   tbody.innerHTML = slice.map(c => `
     <tr>
       <td>
-        <div class="case-name" title="${c.name}">${c.name}</div>
-        <div style="font-size:11px;color:var(--slate-400);margin-top:2px">${c.id}</div>
+        <div class="case-name" title="${escapeAttr(c.name)}">${escapeHtml(c.name)}</div>
+        <div style="font-size:11px;color:var(--slate-400);margin-top:2px">${escapeHtml(c.id)}</div>
       </td>
-      <td class="case-client">${c.client}</td>
+      <td class="case-client">${escapeHtml(c.client)}</td>
       <td><span class="status-badge ${c.status}">${getStatusLabel(c.status)}</span></td>
       <td>
         <div class="attorney-cell">
-          <div class="attorney-avatar" style="background:${c.color}22;color:${c.color}">${c.initials}</div>
-          ${c.attorney}
+          <div class="attorney-avatar" style="background:${c.color}22;color:${c.color}">${escapeHtml(c.initials)}</div>
+          ${escapeHtml(c.attorney)}
         </div>
       </td>
-      <td class="activity-time">${c.activity}</td>
+      <td class="activity-time">${escapeHtml(c.activity)}</td>
       <td>
-        <button class="row-action" aria-label="More actions for ${c.name}">
+        <button class="row-action" aria-label="More actions for ${escapeAttr(c.name)}">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <circle cx="12" cy="5" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="12" cy="19" r="1"/>
           </svg>
@@ -1313,20 +1313,20 @@ function renderCasesList() {
     return `
       <tr>
         <td class="case-title-cell">
-          <div>${c.name}</div>
-          <div class="case-id-sub">${c.id}</div>
+          <div>${escapeHtml(c.name)}</div>
+          <div class="case-id-sub">${escapeHtml(c.id)}</div>
         </td>
-        <td class="client-name-cell">${c.client}</td>
+        <td class="client-name-cell">${escapeHtml(c.client)}</td>
         <td class="opposing-counsel-cell">
-          <div>${c.opposingParty}</div>
-          <div class="opposing-firm-sub">${c.opposingCounsel}</div>
+          <div>${escapeHtml(c.opposingParty)}</div>
+          <div class="opposing-firm-sub">${escapeHtml(c.opposingCounsel)}</div>
         </td>
         <td>
           <span class="status-badge ${c.status}">${statusLabels[c.status] || c.status}</span>
         </td>
-        <td class="activity-time">${c.nextHearing}</td>
+        <td class="activity-time">${escapeHtml(c.nextHearing)}</td>
         <td class="actions-cell-wrap">
-          <button class="row-action-btn" aria-label="Actions for ${c.name}" data-action="toggle-actions-dropdown" data-key="${escapeAttr(c.id)}">
+          <button class="row-action-btn" aria-label="Actions for ${escapeAttr(c.name)}" data-action="toggle-actions-dropdown" data-key="${escapeAttr(c.id)}">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
               <circle cx="12" cy="5" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="12" cy="19" r="1.5"/>
             </svg>
@@ -2394,7 +2394,7 @@ async function openInvoiceModal(invoiceId) {
   // last shown (a case created after page load, etc).
   const caseSelect = $('invoiceCase');
   caseSelect.innerHTML = '<option value="">No linked case</option>' +
-    CASES.map(c => `<option value="${c.id}">${c.id} — ${c.name}</option>`).join('');
+    CASES.map(c => `<option value="${escapeAttr(c.id)}">${escapeHtml(c.id)} — ${escapeHtml(c.name)}</option>`).join('');
 
   $('invoiceLineItemsSection').classList.add('hidden');
   $('invoiceLineItemsList').innerHTML = '';
@@ -2763,7 +2763,7 @@ function openTimeEntryModal(entryId) {
 
   const caseSelect = $('timeEntryCase');
   caseSelect.innerHTML = '<option value="">Select a case…</option>' +
-    CASES.map(c => `<option value="${c.id}">${c.id} — ${c.name}</option>`).join('');
+    CASES.map(c => `<option value="${escapeAttr(c.id)}">${escapeHtml(c.id)} — ${escapeHtml(c.name)}</option>`).join('');
 
   if (entry) {
     $('timeEntryModalTitle').textContent = 'Edit Time Entry';
@@ -4319,7 +4319,7 @@ async function loadVaultCaseFilterOptions() {
     const select = $('vaultCaseFilter');
     const current = select.value;
     select.innerHTML = `<option value="">All Cases</option>` +
-      CASES.map(c => `<option value="${c.id}">${c.id} — ${c.name}</option>`).join('');
+      CASES.map(c => `<option value="${escapeAttr(c.id)}">${escapeHtml(c.id)} — ${escapeHtml(c.name)}</option>`).join('');
     select.value = current;
   } catch (err) {
     console.error('Case filter options load error', err);

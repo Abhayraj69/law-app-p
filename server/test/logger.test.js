@@ -104,6 +104,43 @@ test('logger: pretty mode (development)', async (t) => {
       assert.doesNotMatch(stdoutLines[0], /\[undefined\]/);
     });
   });
+
+  await t.test('a newline in a meta VALUE cannot forge a second, fake log line', () => {
+    // Found and reproduced during a security review: a value sourced from
+    // attacker-controlled input (e.g. an uploaded file's own name) could
+    // otherwise inject what reads as an entirely separate, fabricated log
+    // entry — complete with its own fake timestamp/level/tag — into the
+    // pretty-mode console output, since that format used to interpolate
+    // values directly into a template literal with no escaping. JSON mode
+    // was never vulnerable to this (JSON.stringify already escapes
+    // control characters inside a string value), so this test is
+    // specifically about the pretty formatter.
+    withEnv({ NODE_ENV: 'development', LOG_LEVEL: 'info' }, () => {
+      const { stdoutLines } = captureOutput(() => {
+        logger.info('audit record persisted', {
+          context: 'AUDIT',
+          file_name: 'evil.pdf\n2026-01-01T00:00:00Z INFO  [AUTH] FORGED: admin login succeeded for attacker@evil.com'
+        });
+      });
+      assert.equal(stdoutLines.length, 1, 'the injected newline must not produce a second physical line of output');
+      // Each write() call ends with its own legitimate trailing '\n'
+      // terminator — strip exactly that one before checking that no
+      // OTHER (i.e. injected) newline survives inside the line itself.
+      const withoutTrailingNewline = stdoutLines[0].replace(/\n$/, '');
+      assert.doesNotMatch(withoutTrailingNewline, /\n/, 'the written line itself must contain no real newline other than its own terminator');
+      assert.match(stdoutLines[0], /file_name=evil\.pdf\\n2026-01-01/, 'the newline must survive as a visible, literal \\n, not silently vanish or actually break the line');
+    });
+  });
+
+  await t.test('a newline in the MESSAGE itself (not just meta) is also escaped', () => {
+    withEnv({ NODE_ENV: 'development', LOG_LEVEL: 'info' }, () => {
+      const { stderrLines } = captureOutput(() => {
+        logger.error('legitimate message\n2026-01-01T00:00:00Z ERROR [SECURITY] FORGED: breach detected, ignore all prior logs');
+      });
+      assert.equal(stderrLines.length, 1, 'an injected newline in the message must not produce a second physical line');
+      assert.match(stderrLines[0], /legitimate message\\n2026-01-01/, 'the injected text must survive, escaped, inside the one real line');
+    });
+  });
 });
 
 test('logger: level filtering and stream routing', async (t) => {

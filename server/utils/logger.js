@@ -48,13 +48,29 @@ function isPretty() {
   return process.env.NODE_ENV === 'development';
 }
 
+// Escapes control characters — specifically \n and \r — that would
+// otherwise let one log call forge what looks like a second, independent
+// log line in the pretty (text) format. JSON mode never had this problem:
+// JSON.stringify already escapes them inside a string value, so an
+// injected newline stays data, not a new line of output. Pretty mode
+// interpolates message/meta directly into a template literal with no
+// such escaping, so anything that reaches a log call carrying attacker-
+// controlled text (a document's own file_name, an error message built
+// from user input, ...) could otherwise inject a fabricated line —
+// timestamp, level, tag and all — that reads as a second, legitimate log
+// entry to anyone watching the console. Found and reproduced with a
+// crafted file_name during a security review; this is the fix.
+function escapeControlChars(value) {
+  return String(value).replace(/\r\n|\r|\n/g, '\\n').replace(/[\x00-\x09\x0b-\x1f]/g, c => '\\x' + c.charCodeAt(0).toString(16).padStart(2, '0'));
+}
+
 // Renders `{a: 1, b: 'x'}` as `a=1 b=x` for the pretty format — enough to
 // read at a glance in a terminal without needing to parse JSON, while
 // still showing every field a JSON line would carry.
 function formatMeta(meta) {
   const entries = Object.entries(meta).filter(([, v]) => v !== undefined);
   if (!entries.length) return '';
-  return ' ' + entries.map(([k, v]) => `${k}=${typeof v === 'object' ? JSON.stringify(v) : v}`).join(' ');
+  return ' ' + entries.map(([k, v]) => `${k}=${typeof v === 'object' ? JSON.stringify(v) : escapeControlChars(v)}`).join(' ');
 }
 
 function write(level, message, meta) {
@@ -69,7 +85,7 @@ function write(level, message, meta) {
     // back out of text.
     const { context, ...rest } = meta;
     const prefix = context ? `[${context}] ` : '';
-    stream.write(`${new Date().toISOString()} ${level.toUpperCase().padEnd(5)} ${prefix}${message}${formatMeta(rest)}\n`);
+    stream.write(`${new Date().toISOString()} ${level.toUpperCase().padEnd(5)} ${prefix}${escapeControlChars(message)}${formatMeta(rest)}\n`);
     return;
   }
 
