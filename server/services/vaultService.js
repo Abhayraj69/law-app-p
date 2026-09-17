@@ -87,77 +87,32 @@ class VaultService {
       limit = 10
     } = params;
 
-    let docs = await db.listActiveDocuments(tenantId, user);
+    const pageNum = Math.max(1, parseInt(page, 10) || 1);
+    const limitNum = Math.max(1, parseInt(limit, 10) || 10);
 
-    // Filter by tab_category or folder_id
-    if (folder_id) {
-      docs = docs.filter(d => d.folder_id === folder_id);
-    } else if (tab_category) {
-      docs = docs.filter(d => d.category === tab_category);
-    }
-
-    // Filter by search query
-    if (q) {
-      const searchLower = q.toLowerCase();
-      docs = docs.filter(d =>
-        (d.file_name && d.file_name.toLowerCase().includes(searchLower)) ||
-        (d.case_name && d.case_name.toLowerCase().includes(searchLower)) ||
-        (d.author_name && d.author_name.toLowerCase().includes(searchLower))
-      );
-    }
-
-    // Filter by tag — tag names aren't case-normalized in the tags table
-    // (e.g. "CONFIDENTIAL" vs "Engagement Letter"), so match exactly as
-    // stored rather than forcing .toUpperCase() on every tag.
-    if (tag) {
-      docs = docs.filter(d => d.tags && d.tags.includes(tag));
-    }
-
-    // Filter by case
-    if (case_id) {
-      docs = docs.filter(d => d.case_id === case_id);
-    }
-
-    // Filter by file type (extension)
-    if (extension) {
-      docs = docs.filter(d => d.extension === extension.toLowerCase());
-    }
-
-    // Sort
-    docs.sort((a, b) => {
-      let valA = a[sort] || a.created_at;
-      let valB = b[sort] || b.created_at;
-
-      if (sort === 'name' || sort === 'file_name') {
-        valA = a.file_name.toLowerCase();
-        valB = b.file_name.toLowerCase();
-      } else if (sort === 'author') {
-        valA = (a.author_name || '').toLowerCase();
-        valB = (b.author_name || '').toLowerCase();
-      } else if (sort === 'size') {
-        valA = Number(a.file_size_bytes);
-        valB = Number(b.file_size_bytes);
-      }
-
-      if (valA < valB) return order === 'asc' ? -1 : 1;
-      if (valA > valB) return order === 'asc' ? 1 : -1;
-      return 0;
-    });
-
-    // Pagination
-    const totalCount = docs.length;
-    const pageNum = parseInt(page, 10);
-    const limitNum = parseInt(limit, 10);
-    const startIndex = (pageNum - 1) * limitNum;
-    const paginatedDocs = docs.slice(startIndex, startIndex + limitNum);
+    // Real, DB-level filtering/sorting/pagination — see
+    // db.listActiveDocumentsPaginated's own header comment for why this
+    // isn't just db.listActiveDocuments with a slice() on top the way it
+    // used to be: fetching every active document in the firm on every
+    // request, just to filter and paginate it in JS, doesn't scale with a
+    // real document library the way this app's other list endpoints
+    // (Audit Log, since its first version) already didn't have that problem.
+    // folderId takes precedence over tabCategory inside
+    // db.buildDocumentFilter itself (same precedence the old in-memory
+    // filter used) — both are passed through unconditionally here.
+    const { documents, total } = await db.listActiveDocumentsPaginated(
+      tenantId, user,
+      { folderId: folder_id, tabCategory: tab_category, q, tag, caseId: case_id, extension },
+      sort, order, limitNum, (pageNum - 1) * limitNum
+    );
 
     return {
-      documents: paginatedDocs,
+      documents,
       pagination: {
-        total: totalCount,
+        total,
         page: pageNum,
         limit: limitNum,
-        total_pages: Math.ceil(totalCount / limitNum)
+        total_pages: Math.ceil(total / limitNum) || 1
       }
     };
   }

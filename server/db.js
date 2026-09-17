@@ -419,6 +419,66 @@ function scopeDocumentsToUser(query, values, user) {
   return query;
 }
 
+// Builds the real SQL WHERE clause the Document Vault's filter/search bar
+// maps to, for listActiveDocumentsPaginated below. Reuses
+// scopeDocumentsToUser (not a re-implementation of it) so the
+// CLIENT-ownership rule stays defined in exactly one place regardless of
+// which query path applies it.
+function buildDocumentFilter(firmId, user, filters = {}) {
+  const { folderId, tabCategory, q, tag, caseId, extension } = filters;
+  const values = [firmId];
+  let where = 'd.firm_id = $1 AND d.is_deleted = FALSE';
+  where = scopeDocumentsToUser(where, values, user);
+
+  // Matches VaultService.getFiles' existing precedence: a specific folder
+  // narrows to that folder; only when none is given does the broader
+  // category tab apply.
+  if (folderId) {
+    values.push(folderId);
+    where += ` AND d.folder_id = $${values.length}`;
+  } else if (tabCategory) {
+    values.push(tabCategory);
+    where += ` AND fo.category = $${values.length}`;
+  }
+  if (q) {
+    values.push(`%${q}%`);
+    const idx = values.length;
+    where += ` AND (d.file_name ILIKE $${idx} OR c.case_name ILIKE $${idx} OR u.full_name ILIKE $${idx})`;
+  }
+  if (tag) {
+    // EXISTS against document_tags/tags directly, rather than filtering
+    // on DOCUMENT_SELECT's aggregated `tags` array (a HAVING clause on an
+    // array_agg column) — simpler, and doesn't require the tag join to
+    // participate in the outer query's GROUP BY reasoning at all.
+    values.push(tag);
+    where += ` AND EXISTS (SELECT 1 FROM document_tags dt2 JOIN tags t2 ON t2.id = dt2.tag_id WHERE dt2.document_id = d.id AND t2.name = $${values.length})`;
+  }
+  if (caseId) {
+    values.push(caseId);
+    where += ` AND d.case_id = $${values.length}`;
+  }
+  if (extension) {
+    values.push(String(extension).toLowerCase());
+    where += ` AND d.extension = $${values.length}`;
+  }
+
+  return { where, values };
+}
+
+// Allowlist only — `sort` arrives as a caller-supplied string (an API
+// query param), and interpolating it directly into ORDER BY would be a
+// SQL injection path. An unrecognized key silently falls back to
+// updated_at rather than erroring, matching how the previous in-memory
+// sort ignored an unknown key (`a[sort] || a.created_at`).
+const DOCUMENT_SORT_COLUMNS = {
+  name: 'd.file_name',
+  file_name: 'd.file_name',
+  author: 'u.full_name',
+  size: 'd.file_size_bytes',
+  updated_at: 'd.updated_at',
+  created_at: 'd.created_at'
+};
+
 async function listActiveDocuments(firmId, user) {
   const values = [firmId];
   let query = `${DOCUMENT_SELECT} WHERE d.firm_id = $1 AND d.is_deleted = FALSE`;
@@ -426,6 +486,54 @@ async function listActiveDocuments(firmId, user) {
   query += ' GROUP BY d.id, u.full_name, u.initials, c.case_name, fo.category';
   const { rows } = await pool.query(query, values);
   return rows.map(normalizeDocumentRow);
+}
+
+// The real, DB-level query behind the Document Vault's filter/search bar
+// and its pagination (VaultService.getFiles). Distinct from
+// listActiveDocuments above rather than a mode/flag on it, because that
+// function's contract — "every active document this user can see, as a
+// plain array" — is depended on exactly as-is by five other call sites
+// (copilotController's doc listing, integrationService, searchService's
+// full-text search, and two other reads inside vaultService itself);
+// changing its shape or adding filtering there would have meant auditing
+// and re-verifying every one of those for a change none of them asked for.
+// This function instead does real WHERE/ORDER BY/LIMIT/OFFSET filtering
+// in Postgres, so a search or a later page of results doesn't require
+// pulling the entire firm's document table into Node on every request —
+// which is exactly what VaultService.getFiles used to do before this,
+// despite its API contract already looking paginated (page/limit params,
+// a `pagination` object in the response) — the pagination was real at the
+// HTTP layer and fake underneath it, slicing an array that had already
+// been fetched and filtered in full.
+async function listActiveDocumentsPaginated(firmId, user, filters, sort, order, limit, offset) {
+  const { where, values } = buildDocumentFilter(firmId, user, filters);
+
+  const { rows: countRows } = await pool.query(
+    `SELECT COUNT(*)::int AS n
+     FROM documents d
+     LEFT JOIN users u ON u.id = d.author_id
+     LEFT JOIN cases c ON c.id = d.case_id
+     LEFT JOIN folders fo ON fo.id = d.folder_id
+     WHERE ${where}`,
+    values
+  );
+
+  const sortColumn = DOCUMENT_SORT_COLUMNS[sort] || DOCUMENT_SORT_COLUMNS.updated_at;
+  const direction = order === 'asc' ? 'ASC' : 'DESC';
+  const listValues = [...values, limit, offset];
+  const limitIdx = listValues.length - 1;
+  const offsetIdx = listValues.length;
+
+  const { rows } = await pool.query(
+    `${DOCUMENT_SELECT}
+     WHERE ${where}
+     GROUP BY d.id, u.full_name, u.initials, c.case_name, fo.category
+     ORDER BY ${sortColumn} ${direction} NULLS LAST, d.id
+     LIMIT $${limitIdx} OFFSET $${offsetIdx}`,
+    listValues
+  );
+
+  return { documents: rows.map(normalizeDocumentRow), total: countRows[0].n };
 }
 
 async function getDocumentById(firmId, docId, user) {
@@ -2102,6 +2210,7 @@ module.exports = {
   deleteFolder,
   setDocumentTags,
   listActiveDocuments,
+  listActiveDocumentsPaginated,
   listDistinctDocumentTags,
   getDocumentById,
   listDocumentsByCase,
