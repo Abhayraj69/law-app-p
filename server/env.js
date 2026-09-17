@@ -35,5 +35,13 @@ const path = require('path');
       process.env[key] = val;
     }
   }
+  // Deliberately still a raw console.log, not server/utils/logger.js: this
+  // IIFE runs at require time, before this module has even returned — a
+  // require('./utils/logger') here would work (logger.js reads
+  // process.env.NODE_ENV lazily per call, not at require time, precisely
+  // so this ordering isn't a trap), but env.js's entire job is being the
+  // very first thing every entry point requires, and giving it a
+  // dependency of its own is an unnecessary complication for one
+  // diagnostic line that only ever fires once, at the very start of boot.
   console.log(`[ENV] Loaded environment from ${path.basename(file)}`);
 })();

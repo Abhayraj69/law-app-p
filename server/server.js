@@ -9,6 +9,8 @@ const apiRoutes = require('./routes/api');
 const authRoutes = require('./routes/auth');
 const healthController = require('./controllers/healthController');
 
+const logger = require('./utils/logger');
+const requestContext = require('./middleware/requestContext');
 const { securityHeaders } = require('./middleware/securityHeaders');
 const { checkConnection } = require('./db/pool');
 const { runMigrations } = require('./db/migrate');
@@ -17,6 +19,13 @@ const { checkMessageEncryptionRequirement } = require('./services/encryption/mes
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+
+// ── Request context ────────────────────────────────────────────────────────
+// Mounted before absolutely everything else — including security headers —
+// so that even a request rejected by CORS or refused before it reaches a
+// route still gets a request id and an access-log line. See
+// server/middleware/requestContext.js.
+app.use(requestContext);
 
 // ── Security headers ──────────────────────────────────────────────────────
 // Mounted first, ahead of CORS, static files and every route, so that even
@@ -68,7 +77,16 @@ app.use('/api/v1', apiRoutes);
 
 // Global Error Handler
 app.use((err, req, res, next) => {
-  console.error('[API ERROR]', err);
+  // req.log is always present (server/middleware/requestContext.js is the
+  // very first thing mounted), so even an error thrown before
+  // authMiddleware resolves an identity is still correlated by request_id.
+  (req.log || logger).error('unhandled request error', {
+    context: 'API',
+    error: err.message,
+    stack: err.stack,
+    method: req.method,
+    path: req.originalUrl
+  });
 
   // Multer throws a plain Error with a multer-specific `code` and no
   // .status/.statusCode — map the common cases to sensible HTTP statuses
@@ -111,19 +129,19 @@ app.get('*', (req, res) => {
 async function start() {
   try {
     await checkConnection();
-    console.log('[DB] Connected to PostgreSQL.');
+    logger.info('Connected to PostgreSQL.', { context: 'DB' });
   } catch (err) {
-    console.error('[DB] FATAL: could not connect to PostgreSQL.');
-    console.error(`[DB] ${err.message}`);
-    console.error('[DB] Set DATABASE_URL, or PGHOST/PGUSER/PGPASSWORD/PGDATABASE, in .env.local.');
+    logger.error('FATAL: could not connect to PostgreSQL.', {
+      context: 'DB', error: err.message,
+      hint: 'Set DATABASE_URL, or PGHOST/PGUSER/PGPASSWORD/PGDATABASE, in .env.local.'
+    });
     process.exit(1);
   }
 
   try {
     await runMigrations();
   } catch (err) {
-    console.error('[DB] FATAL: migration failed.');
-    console.error(`[DB] ${err.message}`);
+    logger.error('FATAL: migration failed.', { context: 'DB', error: err.message });
     process.exit(1);
   }
 
@@ -136,11 +154,10 @@ async function start() {
   try {
     await checkClamAvRequirement();
     if (process.env.NODE_ENV !== 'development') {
-      console.log('[SECURITY] ClamAV is reachable — malware scanning is active.');
+      logger.info('ClamAV is reachable — malware scanning is active.', { context: 'SECURITY' });
     }
   } catch (err) {
-    console.error('[SECURITY] FATAL: malware scanning requirement not met.');
-    console.error(`[SECURITY] ${err.message}`);
+    logger.error('FATAL: malware scanning requirement not met.', { context: 'SECURITY', error: err.message });
     process.exit(1);
   }
 
@@ -153,20 +170,17 @@ async function start() {
   try {
     await checkMessageEncryptionRequirement();
     if (process.env.NODE_ENV !== 'development') {
-      console.log('[SECURITY] Message encryption key provider is reachable — messages are encrypted at rest.');
+      logger.info('Message encryption key provider is reachable — messages are encrypted at rest.', { context: 'SECURITY' });
     }
   } catch (err) {
-    console.error('[SECURITY] FATAL: message encryption requirement not met.');
-    console.error(`[SECURITY] ${err.message}`);
+    logger.error('FATAL: message encryption requirement not met.', { context: 'SECURITY', error: err.message });
     process.exit(1);
   }
 
   app.listen(PORT, () => {
-    console.log(`=======================================================`);
-    console.log(` SLF Practice Management Document Vault API Running`);
-    console.log(` Listening on: http://localhost:${PORT}`);
-    console.log(` API Endpoint: http://localhost:${PORT}/api/v1/vault/stats`);
-    console.log(`=======================================================`);
+    logger.info('SLF Practice Management Document Vault API Running', {
+      context: 'SERVER', port: PORT, url: `http://localhost:${PORT}`
+    });
   });
 }
 

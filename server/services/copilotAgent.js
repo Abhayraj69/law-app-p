@@ -2,6 +2,7 @@ const Anthropic = require('@anthropic-ai/sdk');
 const aiProvider = require('./aiProvider');
 const { COPILOT_SYSTEM_PROMPT } = require('./copilotSystemPrompt');
 const { TOOL_DEFINITIONS, executeTool } = require('./copilotTools');
+const baseLogger = require('../utils/logger');
 
 /**
  * AI Copilot — Agentic Chat Loop
@@ -102,7 +103,10 @@ function textFrom(content) {
 /**
  * Runs one Copilot chat turn to completion.
  *
- * @param {object} ctx  { tenantId, user }
+ * @param {object} ctx  { tenantId, user, log? } — log is optional (defaults
+ *   to the request-less base logger); pass the calling request's req.log
+ *   so a tool failure mid-turn is correlated to the request/user that
+ *   triggered it.
  * @param {Array}  history  prior turns as [{role, content}]
  * @param {string} message  the new user message
  * @returns {Promise<{reply: string, tool_calls: Array, proposals: Array}>}
@@ -111,6 +115,8 @@ async function runChatTurn(ctx, history, message) {
   if (!isAvailable()) {
     throw unavailable(unavailableReason(), 'COPILOT_AI_UNAVAILABLE');
   }
+
+  const log = ctx.log || baseLogger;
 
   const client = buildClient();
   const model = aiProvider.getModel();
@@ -188,7 +194,7 @@ async function runChatTurn(ctx, history, message) {
       try {
         result = await executeTool(block.name, block.input, ctx);
       } catch (err) {
-        console.error(`[COPILOT] tool ${block.name} threw:`, err.message);
+        log.error('copilot tool threw', { context: 'COPILOT', tool: block.name, error: err.message });
         return {
           type: 'tool_result',
           tool_use_id: block.id,

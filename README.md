@@ -254,6 +254,22 @@ section before assuming a feature is wired up.
 - **Rate limiting on authentication endpoints** — login and invite-accept
   are throttled per IP (`express-rate-limit`) to slow down credential
   stuffing and invite-token brute-forcing.
+- **Structured logging with request correlation** — every one of the 40+
+  scattered `console.log`/`console.error` calls that used to make up the
+  server's entire logging story (`server/utils/logger.js`,
+  `server/middleware/requestContext.js`) is now one small logger with
+  levels, JSON output in anything but `NODE_ENV=development` (readable
+  `[TAG] message` text in dev, matching what this project's own console
+  output always looked like), and a `request_id` attached to every line
+  for a given request — visible to the client too, as an `X-Request-Id`
+  response header, so a reported bug can be matched to its exact server
+  logs. `authMiddleware` enriches it further with `user_id`/`firm_id` the
+  moment it resolves an identity, so an authenticated request's logs are
+  correlated to who made it without every call site passing those ids
+  around by hand. One access-log line is written per completed request
+  (method, path, status, duration) — there was no access logging of any
+  kind before this. See `server/test/logger.test.js` and
+  `server/test/requestContext.test.js`.
 - **"Open Case File," "Upload to Document Index," and "Message via
   Client Portal"** (Active Cases page row actions) all do something real
   now, reusing existing views rather than each getting its own: "Open

@@ -1,4 +1,5 @@
 const { Pool, types } = require('pg');
+const logger = require('../utils/logger');
 
 /**
  * PostgreSQL Connection Pool
@@ -73,7 +74,7 @@ function getPool() {
       // A pooled client emitting an error (e.g. connection dropped while idle)
       // must not crash the process — just log it. Queries in flight already
       // get their own rejected promise.
-      console.error('[DB] Unexpected error on idle client:', err.message);
+      logger.error('Unexpected error on idle client', { context: 'DB', error: err.message });
     });
   }
   return realPool;

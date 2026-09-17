@@ -25,11 +25,14 @@ function logAuditAction(actionType, docIdOverride = null, extraDetails = {}) {
           userAgent: req.headers['user-agent'] || 'System API Client',
           details: extraDetails
         }).then(() => {
-          console.log(`[AUDIT LOG] Action: ${actionType} | User: ${req.user ? req.user.full_name : 'unknown'} | DocID: ${documentId}`);
+          req.log.info('audit record persisted', {
+            context: 'AUDIT', action: actionType,
+            user: req.user ? req.user.full_name : 'unknown', document_id: documentId
+          });
         }).catch((err) => {
           // Audit logging must never crash the request it's attached to —
           // the response has already been sent by the time this runs.
-          console.error('[AUDIT LOG] Failed to persist audit record:', err.message);
+          req.log.error('failed to persist audit record', { context: 'AUDIT', error: err.message });
         });
       }
     });

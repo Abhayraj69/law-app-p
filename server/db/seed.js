@@ -4,6 +4,7 @@ const bcrypt = require('bcryptjs');
 const crypto = require('crypto');
 const { pool } = require('./pool');
 const { runMigrations } = require('./migrate');
+const logger = require('../utils/logger');
 
 /**
  * Seed Script (npm run seed)
@@ -344,14 +345,21 @@ async function seed() {
     await seedConversations(client);
 
     if (printed.length) {
+      // Deliberately raw console.log, not the structured logger: these
+      // lines carry real plaintext passwords, shown once for the operator
+      // running this script to read and store. logger.js's JSON mode is
+      // meant for output that goes to a log aggregator in a real
+      // deployment — piping a plaintext password through that would be a
+      // real secrets-in-logs exposure, not a formatting choice. This is
+      // direct operator-facing CLI output, not a log event.
       console.log('\n[SEED] Demo account credentials (shown once — store them now):');
       printed.forEach(({ email, password }) => console.log(`  ${email}  →  ${password}`));
       console.log('');
     } else {
-      console.log('[SEED] All demo users already exist; no new passwords generated.');
+      logger.info('All demo users already exist; no new passwords generated.', { context: 'SEED' });
     }
 
-    console.log('[SEED] Firm, folders, users, cases, deadlines, invoices, time entries, and conversations are seeded.');
+    logger.info('Firm, folders, users, cases, deadlines, invoices, time entries, and conversations are seeded.', { context: 'SEED' });
   } finally {
     client.release();
   }
@@ -364,7 +372,7 @@ if (require.main === module) {
     .then(() => pool.end())
     .then(() => process.exit(0))
     .catch((err) => {
-      console.error('[SEED] Failed:', err.message);
+      logger.error('Seed run failed', { context: 'SEED', error: err.message });
       pool.end().finally(() => process.exit(1));
     });
 }

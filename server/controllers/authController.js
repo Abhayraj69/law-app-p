@@ -52,7 +52,7 @@ async function logout(req, res, next) {
     const match = /^Bearer\s+(.+)$/i.exec(header.trim());
     const token = match ? match[1] : null;
 
-    if (token) await authService.revokeToken(token);
+    if (token) await authService.revokeToken(token, req.log);
 
     await db.insertAuditLog({
       firmId: req.tenantId,

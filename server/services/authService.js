@@ -1,4 +1,5 @@
 const jwt = require('jsonwebtoken');
+const baseLogger = require('../utils/logger');
 const crypto = require('node:crypto');
 const bcrypt = require('bcryptjs');
 const db = require('../db');
@@ -85,8 +86,12 @@ function unauthorized(message) {
  * Ends one session: the presented token stops working immediately,
  * everywhere, rather than only being forgotten by one browser.
  * Idempotent — logging out twice is not an error.
+ *
+ * `log` is optional (defaults to the request-less base logger) — pass the
+ * calling request's req.log so the cleanup sweep's failure, if any, is
+ * correlated back to the logout request that triggered it.
  */
-async function revokeToken(token) {
+async function revokeToken(token, log = baseLogger) {
   let payload;
   try {
     payload = jwt.verify(token, getJwtSecret());
@@ -114,7 +119,7 @@ async function revokeToken(token) {
   // Opportunistic sweep; this app has no scheduled job runner, and
   // logout is the natural moment to do it.
   db.cleanupExpiredRevocations().catch(err => {
-    console.error('[AUTH] failed to clean up expired token revocations:', err.message);
+    log.error('failed to clean up expired token revocations', { context: 'AUTH', error: err.message });
   });
 
   return { revoked: true, reason: 'token_revoked' };

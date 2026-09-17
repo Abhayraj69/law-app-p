@@ -1,6 +1,7 @@
 const fs = require('fs/promises');
 const path = require('path');
 const { resolveStoragePath } = require('./fileService');
+const baseLogger = require('../utils/logger');
 
 /**
  * Document Text Extractor
@@ -108,8 +109,13 @@ function unreadable(reason) {
  * Always resolves; never throws for an unreadable document. A caller that
  * gets `extractable: false` should surface `reason` rather than proceeding
  * as though the document were empty.
+ *
+ * `log` is optional and defaults to the request-less base logger — pass
+ * the calling request's `req.log` (server/middleware/requestContext.js)
+ * when one is available, so a parse failure is correlated to the request
+ * and user that triggered it instead of appearing as an anonymous line.
  */
-async function extractText(doc) {
+async function extractText(doc, log = baseLogger) {
   if (!doc) return unreadable('Document not found.');
 
   const ext = extensionOf(doc.file_name);
@@ -226,7 +232,9 @@ async function extractText(doc) {
   } catch (err) {
     // A corrupt or password-protected file is a normal thing to encounter,
     // not a server fault — report it as unreadable rather than a 500.
-    console.error(`[EXTRACT] failed to read ${doc.id || doc.file_name}:`, err.message);
+    log.error('failed to extract document text', {
+      context: 'EXTRACT', document_id: doc.id, file_name: doc.file_name, error: err.message
+    });
     return unreadable(`This file could not be parsed — it may be corrupt or password-protected.`);
   }
 

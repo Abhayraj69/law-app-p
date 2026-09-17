@@ -32,6 +32,7 @@ const CaseService = require('../services/caseService');
 const CopilotAgent = require('../services/copilotAgent');
 const { extractText } = require('../services/documentTextExtractor');
 const { ROLE_HIERARCHY } = require('../middleware/auth');
+const logger = require('../utils/logger');
 const {
   ToolInputs,
   SearchVaultOutput,
@@ -228,7 +229,7 @@ async function summarizeDocument(req, res, next) {
     let summary;
     if (aiProvider.isConfigured()) {
       // Use AI-enhanced summarization
-      summary = await generateAiSummary(doc);
+      summary = await generateAiSummary(doc, req.log);
     } else {
       // Fallback to metadata-based summary
       summary = buildMetadataSummary(doc);
@@ -276,7 +277,7 @@ function buildMetadataSummary(doc) {
   };
 }
 
-async function generateAiSummary(doc) {
+async function generateAiSummary(doc, log) {
   try {
     const sizeMb = (Number(doc.file_size_bytes) / (1024 * 1024)).toFixed(1);
 
@@ -287,7 +288,7 @@ async function generateAiSummary(doc) {
     // text genuinely cannot be extracted (a scan with no text layer, a
     // spreadsheet, an image), we fall back to the metadata summary, which is
     // explicitly labelled as such rather than dressed up as a real summary.
-    const extracted = await extractText(doc);
+    const extracted = await extractText(doc, log);
 
     if (!extracted.extractable) {
       const fallback = buildMetadataSummary(doc);
@@ -324,7 +325,7 @@ Return ONLY a JSON object with keys: executive_summary, key_points (array of str
     const response = await aiProvider.chatCompletion([
       { role: 'system', content: 'You are a legal document summarizer. Output only valid JSON.' },
       { role: 'user', content: prompt }
-    ], { temperature: 0.1, maxTokens: 1500 });
+    ], { temperature: 0.1, maxTokens: 1500, log });
 
     // Parse AI response
     let aiData;
@@ -347,7 +348,9 @@ Return ONLY a JSON object with keys: executive_summary, key_points (array of str
       key_points: Array.isArray(aiData.key_points) ? aiData.key_points : fallback.key_points
     };
   } catch (err) {
-    console.error('[Copilot] AI summarization failed, using fallback:', err.message);
+    (log || logger).error('AI summarization failed, using metadata fallback', {
+      context: 'COPILOT', document_id: doc.id, error: err.message
+    });
     return buildMetadataSummary(doc);
   }
 }
@@ -653,7 +656,10 @@ async function logAuditTrail(req, action, targetId, targetType, details) {
     userAgent: req.headers['user-agent'] || 'AI Copilot',
     details: { target_type: targetType, ...details }
   });
-  console.log(`[AUDIT LOG] Copilot Action: ${action} | User: ${req.user ? req.user.full_name : 'unknown'} | Target: ${targetId} (${targetType})`);
+  req.log.info('copilot audit action', {
+    context: 'AUDIT', copilot_action: action,
+    user: req.user ? req.user.full_name : 'unknown', target_id: targetId, target_type: targetType
+  });
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -694,7 +700,7 @@ async function chat(req, res, next) {
     }
 
     const result = await CopilotAgent.runChatTurn(
-      { tenantId: req.tenantId, user: req.user },
+      { tenantId: req.tenantId, user: req.user, log: req.log },
       history,
       message
     );

@@ -9,6 +9,7 @@
  */
 
 const { DEFAULT_FIRM_ID } = require('../db');
+const baseLogger = require('../utils/logger');
 
 /**
  * Get the configured AI provider from environment
@@ -115,10 +116,13 @@ function getStatus() {
 /**
  * Execute a chat completion with the configured provider
  * @param {Array<{role: string, content: string}>} messages - Chat messages
- * @param {Object} options - Override options
+ * @param {Object} options - Override options. `options.log` (optional) is
+ *   the calling request's req.log, so a failure here is correlated back
+ *   to the request/user that triggered it rather than logging anonymously.
  * @returns {Promise<string>} - The assistant's response
  */
 async function chatCompletion(messages, options = {}) {
+  const log = options.log || baseLogger;
   const provider = getProvider();
   const apiKey = getApiKey();
   const model = options.model || getModel();
@@ -140,7 +144,7 @@ async function chatCompletion(messages, options = {}) {
     }
     throw new Error(`Unsupported provider: ${provider}`);
   } catch (err) {
-    console.error('[AI Provider] Chat completion failed:', err.message);
+    log.error('chat completion failed', { context: 'AI_PROVIDER', provider, error: err.message });
     throw err;
   }
 }

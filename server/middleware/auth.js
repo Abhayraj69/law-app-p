@@ -33,6 +33,10 @@ async function authMiddleware(req, res, next) {
 
     req.user = user;
     req.tenantId = user.firm_id;
+    // Every log line for the rest of this request (including the access-log
+    // line requestContext's res.on('finish') writes) now carries who made
+    // it, without every call site passing user/firm ids individually.
+    if (req.log) req.log = req.log.child({ user_id: user.id, firm_id: user.firm_id });
     next();
   } catch (err) {
     res.status(err.status || 401).json({ error: err.message, code: 'UNAUTHENTICATED' });

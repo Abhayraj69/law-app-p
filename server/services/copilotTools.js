@@ -169,7 +169,7 @@ function clampLimit(value, fallback, max) {
  * whole turn collapsing.
  */
 async function executeTool(name, input = {}, ctx) {
-  const { tenantId, user } = ctx;
+  const { tenantId, user, log } = ctx;
 
   switch (name) {
     case 'search_vault': {
@@ -188,7 +188,7 @@ async function executeTool(name, input = {}, ctx) {
         return { error: 'No document with that id is visible to you.' };
       }
 
-      const extracted = await extractText(doc);
+      const extracted = await extractText(doc, log);
       if (!extracted.extractable) {
         // Deliberately shaped so the model cannot mistake this for content:
         // there is no `text` key at all on the failure path.

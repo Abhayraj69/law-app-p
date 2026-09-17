@@ -2,6 +2,7 @@ require('../env');
 
 const { pool } = require('../db/pool');
 const messageEncryption = require('../services/encryption/messageEncryptionService');
+const logger = require('../utils/logger');
 
 /**
  * Backfill Script — encrypts every pre-existing plaintext
@@ -30,7 +31,7 @@ const messageEncryption = require('../services/encryption/messageEncryptionServi
 const BATCH_SIZE = parseInt(process.env.BACKFILL_BATCH_SIZE, 10) || 200;
 
 async function backfill() {
-  console.log(`[BACKFILL] Encrypting plaintext conversation_messages rows in batches of ${BATCH_SIZE}...`);
+  logger.info('Encrypting plaintext conversation_messages rows', { context: 'BACKFILL', batch_size: BATCH_SIZE });
 
   let totalEncrypted = 0;
   let batchCount;
@@ -53,7 +54,7 @@ async function backfill() {
 
     totalEncrypted += batchCount;
     if (batchCount > 0) {
-      console.log(`[BACKFILL] Encrypted ${batchCount} message(s) this batch (${totalEncrypted} total so far)...`);
+      logger.info('Encrypted a batch of messages', { context: 'BACKFILL', batch_count: batchCount, total_so_far: totalEncrypted });
     }
   } while (batchCount === BATCH_SIZE); // a short/empty batch means we've drained the table
 
@@ -61,15 +62,19 @@ async function backfill() {
     `SELECT COUNT(*)::int AS n FROM conversation_messages WHERE body IS NOT NULL AND body_ciphertext IS NULL`
   );
 
-  console.log(`[BACKFILL] Done. ${totalEncrypted} message(s) encrypted this run.`);
-  console.log(`[BACKFILL] ${remaining[0].n} plaintext rows remaining.`);
+  logger.info('Backfill run complete', { context: 'BACKFILL', total_encrypted: totalEncrypted, remaining_plaintext_rows: remaining[0].n });
   if (remaining[0].n === 0) {
-    console.log('[BACKFILL] All messages are encrypted. Once you are confident there is no need to keep the ' +
-      'plaintext body column, run db/manual-migrations/0007_drop_plaintext_message_body.sql by hand — see that ' +
-      "file's own checklist first.");
+    logger.info(
+      'All messages are encrypted. Once you are confident there is no need to keep the plaintext body column, ' +
+      'run db/manual-migrations/0007_drop_plaintext_message_body.sql by hand — see that file\'s own checklist first.',
+      { context: 'BACKFILL' }
+    );
   } else {
-    console.log('[BACKFILL] Re-run this script to continue (rows may remain if they were locked by another ' +
-      'process, or if BACKFILL_BATCH_SIZE was reached mid-table and another pass is needed).');
+    logger.info(
+      'Re-run this script to continue (rows may remain if they were locked by another process, or if ' +
+      'BACKFILL_BATCH_SIZE was reached mid-table and another pass is needed).',
+      { context: 'BACKFILL' }
+    );
   }
 }
 
@@ -123,7 +128,7 @@ if (require.main === module) {
     .then(() => pool.end())
     .then(() => process.exit(0))
     .catch((err) => {
-      console.error('[BACKFILL] Failed:', err.message);
+      logger.error('Backfill run failed', { context: 'BACKFILL', error: err.message });
       pool.end().finally(() => process.exit(1));
     });
 }

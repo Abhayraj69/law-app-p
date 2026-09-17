@@ -3,6 +3,7 @@ require('../env');
 const fs = require('fs');
 const path = require('path');
 const { pool } = require('./pool');
+const logger = require('../utils/logger');
 
 /**
  * Migration Runner
@@ -41,7 +42,7 @@ async function applyFile(client, name, absolutePath) {
     await client.query(sql);
     await client.query('INSERT INTO schema_migrations (name) VALUES ($1)', [name]);
     await client.query('COMMIT');
-    console.log(`[MIGRATE] Applied ${name}`);
+    logger.info('Applied migration', { context: 'MIGRATE', file: name });
   } catch (err) {
     await client.query('ROLLBACK');
     throw new Error(`Migration '${name}' failed and was rolled back: ${err.message}`);
@@ -90,7 +91,7 @@ async function runMigrations() {
       await applyFile(client, file, path.join(MIGRATIONS_DIR, file));
     }
 
-    console.log('[MIGRATE] Database schema is up to date.');
+    logger.info('Database schema is up to date.', { context: 'MIGRATE' });
   } finally {
     await client.query('SELECT pg_advisory_unlock($1)', [MIGRATION_LOCK_KEY]).catch(() => {});
     client.release();
@@ -104,7 +105,7 @@ if (require.main === module) {
     .then(() => pool.end())
     .then(() => process.exit(0))
     .catch((err) => {
-      console.error('[MIGRATE] Failed:', err.message);
+      logger.error('Migration run failed', { context: 'MIGRATE', error: err.message });
       pool.end().finally(() => process.exit(1));
     });
 }
