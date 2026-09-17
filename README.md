@@ -141,6 +141,40 @@ section before assuming a feature is wired up.
   same case list. A `CLIENT`-role caller can't discover another client's
   case, document, or name through it. This replaces what used to be a
   hardcoded `SEARCH_DATA` array in `app.js`.
+- **Time tracking + invoice line items** — invoices used to be a single
+  flat `amount_cents` with no record of what the number was actually for.
+  `time_entries` (`db/migrations/0021_time_tracking_and_invoice_line_items.sql`,
+  `server/services/timeEntryService.js`, `/api/v1/time-entries`) lets staff
+  log billable hours against a case; `POST /api/v1/invoices/from-time-entries`
+  rolls a chosen set of unbilled entries into a real, itemized invoice
+  (`invoice_line_items`) atomically — the invoice, its line items, and each
+  entry's `status`/`invoice_line_item_id` update all succeed or fail
+  together. Every entry must belong to the same case, be billable, and
+  still be `unbilled`, or the whole request is refused rather than
+  silently billing a partial set. Time is stored as whole minutes and
+  every money figure in whole cents — the same no-float rule as
+  `trust_transactions` below — and a rate is captured on the row at the
+  moment it's logged, so a later rate change never retroactively changes
+  what an already-invoiced hour claims it billed at.
+
+  Role scoping (`PARALEGAL` floor, one level above `CLIENT`, since logging
+  your own time is a normal task for every staff role): a `PARALEGAL` sees
+  and may edit/delete only their own unbilled entries; `ASSOCIATE`+ sees
+  the whole firm's and may correct anyone's unbilled entry, but may still
+  only ever create an entry under their own id — nobody logs time on
+  someone else's behalf. Once an entry is invoiced it becomes immutable —
+  no edit, no delete, no re-invoicing — enforced the same way an already-created
+  `trust_transactions` row is: a correction happens by a new action, not by
+  mutating history. `InvoiceService.updateInvoice` refuses to change
+  `amount_cents` directly on an invoice that has real line items, so the
+  two can never desync. The staff Billing page's "Time Entries" tab
+  supports logging time, bulk-selecting unbilled entries from a single
+  case, and generating the invoice in one action; an invoice generated
+  this way shows its line items read-only in the Edit Invoice modal with
+  the Amount field disabled. See `server/test/timeTracking.test.js`,
+  including a genuine concurrency test that drives the underlying
+  transaction directly to prove a race against an already-invoiced entry
+  rolls back cleanly rather than double-billing it.
 - **Trust Accounting** — client trust funds (retainers), deliberately kept
   structurally separate from `invoices`/operating revenue rather than
   just a column on the same table: `trust_accounts`,

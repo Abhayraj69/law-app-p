@@ -1324,7 +1324,7 @@
     <!-- BILLING PAGE -->
     <main class="content hidden" id="billingPage">
       <div class="page-header-row">
-        <h2 class="cases-page-title">Invoices</h2>
+        <h2 class="cases-page-title">Billing &amp; Time Tracking</h2>
         <button class="btn-primary hidden" id="billingPageNewBtn">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
             style="width: 14px; height: 14px; vertical-align: middle; margin-right: 4px;">
@@ -1333,8 +1333,23 @@
           </svg>
           + New Invoice
         </button>
+        <button class="btn-primary" id="timeEntryNewBtn">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+            style="width: 14px; height: 14px; vertical-align: middle; margin-right: 4px;">
+            <line x1="12" y1="5" x2="12" y2="19" />
+            <line x1="5" y1="12" x2="19" y2="12" />
+          </svg>
+          + Log Time
+        </button>
       </div>
 
+      <div class="billing-tabs" style="margin-bottom:16px;">
+        <button class="tab-btn active" data-billing-tab="invoices">Invoices</button>
+        <button class="tab-btn" data-billing-tab="time">Time Entries</button>
+      </div>
+
+      <!-- INVOICES TAB -->
+      <div id="billingInvoicesTab">
       <!-- Command Bar -->
       <div class="command-bar">
         <div class="search-box">
@@ -1431,6 +1446,91 @@
           </div>
         </div>
       </div>
+      </div>
+      <!-- /INVOICES TAB -->
+
+      <!-- TIME ENTRIES TAB -->
+      <div id="billingTimeTab" class="hidden">
+        <!-- Command Bar -->
+        <div class="command-bar">
+          <div class="search-box">
+            <svg class="search-box-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <circle cx="11" cy="11" r="8" />
+              <path d="M21 21l-4.35-4.35" />
+            </svg>
+            <input type="text" id="timeEntrySearch" placeholder="Search by case or description..."
+              autocomplete="off" />
+          </div>
+          <div class="filter-row">
+            <div class="filter-group">
+              <span class="filter-label">Status:</span>
+              <div class="pill-group" id="timeEntryStatusFilterPills">
+                <button class="pill active" data-value="all">All</button>
+                <button class="pill" data-value="unbilled">Unbilled</button>
+                <button class="pill" data-value="invoiced">Invoiced</button>
+                <button class="pill" data-value="written_off">Written Off</button>
+              </div>
+            </div>
+            <div class="filter-group hidden" id="timeEntryScopeFilterGroup">
+              <span class="filter-label">Show:</span>
+              <div class="pill-group" id="timeEntryScopeFilterPills">
+                <button class="pill active" data-value="mine">My Entries</button>
+                <button class="pill" data-value="firm">Whole Firm</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Bulk Action Bar — appears once 1+ unbilled, billable rows (all
+             the same case) are checked; see updateTimeEntryBulkBar in app.js -->
+        <div class="bulk-action-bar hidden" id="timeEntryBulkBar">
+          <span class="bulk-count" id="timeEntryBulkCount">0 selected</span>
+          <div class="bulk-actions">
+            <button class="bulk-btn" id="timeEntryGenerateInvoiceBtn" data-action="generate-invoice-from-time">
+              Generate Invoice
+            </button>
+            <button class="bulk-btn" id="timeEntryBulkCancel" data-action="clear-time-entry-selection">
+              &times; Clear
+            </button>
+          </div>
+        </div>
+        <p class="hidden" id="timeEntryMixedCaseWarning"
+          style="color:#E74C3C; font-size:12px; margin:-8px 0 12px;">
+          Selected entries span more than one case — an invoice can only be generated from entries under a single
+          case. Narrow your selection.
+        </p>
+
+        <div class="panel table-panel edge-to-edge">
+          <div class="table-container">
+            <table class="cases-large-table" id="timeEntryTable">
+              <thead>
+                <tr>
+                  <th style="width:34px;"><input type="checkbox" id="timeEntrySelectAll" /></th>
+                  <th>Date</th>
+                  <th>Case</th>
+                  <th>Staff</th>
+                  <th>Description</th>
+                  <th>Hours</th>
+                  <th>Rate</th>
+                  <th>Amount</th>
+                  <th>Status</th>
+                  <th style="width: 80px;">Actions</th>
+                </tr>
+              </thead>
+              <tbody id="timeEntryTableBody">
+                <!-- Rendered Dynamically -->
+              </tbody>
+            </table>
+          </div>
+
+          <div class="empty-state-container hidden" id="timeEntryEmptyState">
+            <h3 class="empty-state-title">No time entries found</h3>
+            <p class="empty-state-description">Log billable time against a case, then roll it up into an invoice
+              once you're ready to bill.</p>
+          </div>
+        </div>
+      </div>
+      <!-- /TIME ENTRIES TAB -->
     </main>
 
     <!-- TRUST ACCOUNTING PAGE -->
@@ -1883,11 +1983,74 @@
               <input type="date" id="invoiceIssuedDate" />
             </div>
           </div>
+          <!-- Shown only for an invoice generated from time entries — see
+               openInvoiceModal in app.js. Its amount is derived from these
+               rows (server-enforced: InvoiceService.updateInvoice refuses
+               to change amount_cents on one of these), so the Amount field
+               above is disabled instead. -->
+          <div class="hidden" id="invoiceLineItemsSection" style="margin-top:4px;">
+            <label style="display:block; font-size:12px; color:var(--slate-400); margin-bottom:6px;">
+              Line items (generated from time entries — amount is derived, not editable)
+            </label>
+            <div id="invoiceLineItemsList" style="border:1px solid rgba(255,255,255,0.08); border-radius:8px; overflow:hidden;"></div>
+          </div>
           <div class="modal-footer">
             <button type="button" class="btn-ghost" id="invoiceModalCancelBtn">Cancel</button>
             <button type="submit" class="btn-primary" id="invoiceSubmitBtn"
               style="background: var(--gold-500); color: var(--navy-950); font-weight: 600; border: none;">Create
               Invoice</button>
+          </div>
+        </form>
+      </div>
+    </div>
+  </div>
+
+  <!-- LOG TIME MODAL -->
+  <div class="modal-overlay hidden" id="timeEntryModal">
+    <div class="modal-box">
+      <div class="modal-header">
+        <h3 class="modal-title" id="timeEntryModalTitle">Log Time</h3>
+        <button class="modal-close-btn" id="timeEntryModalCloseBtn">&times;</button>
+      </div>
+      <div class="modal-body">
+        <form id="timeEntryForm" data-action="submit-time-entry">
+          <div class="form-row-two">
+            <div class="form-group-modal">
+              <label for="timeEntryCase">Case</label>
+              <select id="timeEntryCase" required>
+                <option value="">Select a case…</option>
+              </select>
+            </div>
+            <div class="form-group-modal">
+              <label for="timeEntryDate">Date</label>
+              <input type="date" id="timeEntryDate" required />
+            </div>
+          </div>
+          <div class="form-row-two">
+            <div class="form-group-modal">
+              <label for="timeEntryHours">Hours</label>
+              <input type="number" id="timeEntryHours" required min="0.1" max="24" step="0.1" placeholder="e.g. 1.5" />
+            </div>
+            <div class="form-group-modal">
+              <label for="timeEntryRate">Rate (USD / hour)</label>
+              <input type="number" id="timeEntryRate" required min="0" step="0.01" placeholder="e.g. 350.00" />
+            </div>
+          </div>
+          <div class="form-group-modal">
+            <label for="timeEntryDescription">Description of work</label>
+            <textarea id="timeEntryDescription" rows="3" required placeholder="What did you work on?"></textarea>
+          </div>
+          <div class="form-group-modal">
+            <label style="display:flex; align-items:center; gap:8px; font-weight:400;">
+              <input type="checkbox" id="timeEntryBillable" checked style="width:auto;" />
+              Billable
+            </label>
+          </div>
+          <div class="modal-footer">
+            <button type="button" class="btn-ghost" id="timeEntryModalCancelBtn">Cancel</button>
+            <button type="submit" class="btn-primary" id="timeEntrySubmitBtn"
+              style="background: var(--gold-500); color: var(--navy-950); font-weight: 600; border: none;">Log
+              Time</button>
           </div>
         </form>
       </div>

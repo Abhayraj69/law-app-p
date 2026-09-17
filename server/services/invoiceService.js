@@ -137,6 +137,18 @@ class InvoiceService {
       updates.caseId = payload.case_id;
     }
     if (payload.amount_cents !== undefined) {
+      // An invoice generated from time entries (server/services/timeEntryService.js)
+      // has its amount_cents derived from the sum of real invoice_line_items
+      // rows — allowing a direct edit here would silently desync the two,
+      // leaving the invoice claiming an amount its own itemized breakdown
+      // no longer supports. A flat invoice (no line items) is unaffected.
+      const lineItems = await db.getInvoiceLineItems(tenantId, invoiceId);
+      if (lineItems.length > 0) {
+        throw badRequest(
+          'This invoice was generated from time entries — its amount is the sum of its line items and cannot be edited directly.',
+          'AMOUNT_DERIVED_FROM_LINE_ITEMS'
+        );
+      }
       updates.amountCents = validateAmount(payload.amount_cents);
     }
     if (payload.due_date !== undefined) {

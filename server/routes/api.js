@@ -30,6 +30,7 @@ const searchController = require('../controllers/searchController');
 const trustController = require('../controllers/trustController');
 const matterIntakeController = require('../controllers/matterIntakeController');
 const signatureController = require('../controllers/signatureController');
+const timeEntryController = require('../controllers/timeEntryController');
 
 // Apply Global Tenant Authentication & User Context
 router.use(authMiddleware);
@@ -247,6 +248,26 @@ router.get('/invoices', invoiceController.listInvoices);
 router.post('/invoices', requireRole('ASSOCIATE'), invoiceController.createInvoice);
 router.patch('/invoices/:id', requireRole('ASSOCIATE'), invoiceController.updateInvoice);
 router.patch('/invoices/:id/mark-paid', requireRole('PARTNER'), invoiceController.markInvoicePaid);
+router.get('/invoices/:id/line-items', timeEntryController.getInvoiceLineItems);
+// Rolls a set of unbilled time entries up into a new invoice, atomically
+// (see db.insertInvoiceFromTimeEntries). Same ASSOCIATE+ floor as creating
+// an invoice directly above — this IS creating an invoice, just from time
+// entries instead of a typed amount.
+router.post('/invoices/from-time-entries', requireRole('ASSOCIATE'), timeEntryController.generateInvoiceFromTimeEntries);
+
+// ═════════════════════════════════════════════════════════════════════
+// G2b. TIME TRACKING
+// requireRole('PARALEGAL') — the lowest staff role, one level above
+// CLIENT — because logging YOUR OWN billable time is a normal task for
+// every staff role, not a privileged action. The privilege distinction
+// (own entries only vs. the whole firm's; who may edit/delete once
+// entered) is enforced inside TimeEntryService, not by the route floor —
+// see that file's header comment for the exact rules.
+// ═════════════════════════════════════════════════════════════════════
+router.get('/time-entries', requireRole('PARALEGAL'), timeEntryController.listTimeEntries);
+router.post('/time-entries', requireRole('PARALEGAL'), timeEntryController.createTimeEntry);
+router.patch('/time-entries/:id', requireRole('PARALEGAL'), timeEntryController.updateTimeEntry);
+router.delete('/time-entries/:id', requireRole('PARALEGAL'), timeEntryController.deleteTimeEntry);
 
 // ═════════════════════════════════════════════════════════════════════
 // G3. TRUST ACCOUNTING

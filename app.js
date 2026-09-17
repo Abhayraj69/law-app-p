@@ -2146,13 +2146,36 @@ const BILLING_PAGE_SIZE = 8;
 let billingListenersInitialized = false;
 let currentInvoiceEditId = null;
 
+let billingActiveTab = 'invoices';
+
 function initBillingPage() {
   const allowed = canManageBilling();
   if ($('billingPageNewBtn')) $('billingPageNewBtn').classList.toggle('hidden', !allowed);
   if ($('billingEmptyStateNewBtn')) $('billingEmptyStateNewBtn').classList.toggle('hidden', !allowed);
+  // billingPageNewBtn's visibility is also toggled per-tab below (only
+  // shown on the Invoices tab) — Log Time has no such gate (any staff role
+  // may log their own time), so timeEntryNewBtn stays visible unconditionally.
 
   setupBillingPageListeners();
+  setBillingTab(billingActiveTab);
   loadInvoices();
+}
+
+function setBillingTab(tab) {
+  billingActiveTab = tab;
+  $$('#billingPage [data-billing-tab]').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.billingTab === tab);
+  });
+  $('billingInvoicesTab').classList.toggle('hidden', tab !== 'invoices');
+  $('billingTimeTab').classList.toggle('hidden', tab !== 'time');
+
+  const showNewInvoiceBtn = tab === 'invoices' && canManageBilling();
+  if ($('billingPageNewBtn')) $('billingPageNewBtn').classList.toggle('hidden', !showNewInvoiceBtn);
+  if ($('timeEntryNewBtn')) $('timeEntryNewBtn').classList.toggle('hidden', tab !== 'time');
+
+  if (tab === 'time' && !timeEntriesLoadedOnce) {
+    initTimeEntriesTab();
+  }
 }
 
 async function loadInvoices() {
@@ -2333,6 +2356,10 @@ function setupBillingPageListeners() {
     if (btn) btn.addEventListener('click', () => openInvoiceModal(null));
   });
 
+  $$('#billingPage [data-billing-tab]').forEach(btn => {
+    btn.addEventListener('click', () => setBillingTab(btn.dataset.billingTab));
+  });
+
   $('invoiceModalCloseBtn').addEventListener('click', closeInvoiceModal);
   $('invoiceModalCancelBtn').addEventListener('click', closeInvoiceModal);
   $('invoiceModal').addEventListener('click', (e) => {
@@ -2358,7 +2385,7 @@ function setupBillingPageListeners() {
 // invoices — so the status <select>'s options (which deliberately exclude
 // 'paid', matching updateInvoice's server-side rejection of that value)
 // never need to represent one.
-function openInvoiceModal(invoiceId) {
+async function openInvoiceModal(invoiceId) {
   closeAllActionsDropdowns();
   const invoice = invoiceId ? INVOICES.find(i => i.id === invoiceId) : null;
   currentInvoiceEditId = invoice ? invoice.id : null;
@@ -2369,6 +2396,10 @@ function openInvoiceModal(invoiceId) {
   caseSelect.innerHTML = '<option value="">No linked case</option>' +
     CASES.map(c => `<option value="${c.id}">${c.id} — ${c.name}</option>`).join('');
 
+  $('invoiceLineItemsSection').classList.add('hidden');
+  $('invoiceLineItemsList').innerHTML = '';
+  $('invoiceAmount').disabled = false;
+
   if (invoice) {
     $('invoiceModalTitle').textContent = 'Edit Invoice';
     $('invoiceSubmitBtn').textContent = 'Save Changes';
@@ -2378,6 +2409,27 @@ function openInvoiceModal(invoiceId) {
     $('invoiceDueDate').value = invoice.due_date || '';
     // issued_date isn't editable after creation (see InvoiceService.updateInvoice)
     $('invoiceIssuedDateGroup').classList.add('hidden');
+
+    // An invoice generated from time entries has real line items and a
+    // server-enforced amount (InvoiceService.updateInvoice refuses to
+    // change amount_cents once line items exist — see
+    // AMOUNT_DERIVED_FROM_LINE_ITEMS). Reflect that in the UI instead of
+    // letting someone edit a field the server will just reject.
+    try {
+      const lineItems = await ApiClient.get(`/api/v1/invoices/${invoice.id}/line-items`);
+      if (lineItems.length) {
+        $('invoiceAmount').disabled = true;
+        $('invoiceLineItemsSection').classList.remove('hidden');
+        $('invoiceLineItemsList').innerHTML = lineItems.map(li => `
+          <div style="display:flex; justify-content:space-between; gap:12px; padding:8px 12px; border-bottom:1px solid rgba(255,255,255,0.06); font-size:12px;">
+            <span style="color:var(--slate-300);">${escapeHtml(li.description)}</span>
+            <span style="color:var(--slate-400); white-space:nowrap;">${(li.quantity_minutes / 60).toFixed(1)}h × ${formatMoney(li.rate_cents)}/h = <strong style="color:#fff;">${formatMoney(li.amount_cents)}</strong></span>
+          </div>
+        `).join('');
+      }
+    } catch (err) {
+      console.error('Could not load invoice line items', err);
+    }
   } else {
     $('invoiceForm').reset();
     $('invoiceModalTitle').textContent = 'New Invoice';
@@ -2426,9 +2478,15 @@ async function handleInvoiceSubmit(e) {
 
   try {
     if (isEdit) {
-      await ApiClient.patch(`/api/v1/invoices/${currentInvoiceEditId}`, {
-        case_id: caseId, amount_cents: amountCents, status, due_date: dueDate
-      });
+      const patchBody = { case_id: caseId, status, due_date: dueDate };
+      // The Amount field is disabled (see openInvoiceModal) for an invoice
+      // generated from time entries — its amount is derived from real
+      // line items, and the server refuses AMOUNT_DERIVED_FROM_LINE_ITEMS
+      // if amount_cents is present at all on the PATCH, even unchanged. So
+      // this key is simply left off rather than sent and rejected.
+      if (!$('invoiceAmount').disabled) patchBody.amount_cents = amountCents;
+
+      await ApiClient.patch(`/api/v1/invoices/${currentInvoiceEditId}`, patchBody);
       showToast('Invoice updated successfully.', 'success');
     } else {
       const { ok, json } = await ApiClient.post('/api/v1/invoices', {
@@ -2461,6 +2519,416 @@ async function handleInvoiceMarkPaid(invoiceId, invoiceNumber) {
     showToast(err.message || 'Failed to mark invoice as paid.', 'error');
   }
 }
+
+/* ════════════════════════════════════════════
+   TIME TRACKING (TIME ENTRIES TAB)
+   Backs POST/GET/PATCH/DELETE /api/v1/time-entries and
+   POST /api/v1/invoices/from-time-entries — see
+   server/services/timeEntryService.js for the ownership/immutability
+   rules this UI reflects (a PARALEGAL manages only their own entries; an
+   ASSOCIATE+ sees and may correct anyone's unbilled entry; an invoiced
+   entry can no longer be edited or deleted).
+   ════════════════════════════════════════════ */
+
+let TIME_ENTRIES = [];
+let timeEntriesLoadedOnce = false;
+let timeEntrySearchQuery = '';
+let timeEntryStatusFilter = 'all';
+// 'mine' vs 'firm' — only meaningful for ASSOCIATE+ (a PARALEGAL's list is
+// always their own regardless of this value; the toggle itself is hidden
+// for them). Mirrors TimeEntryService.listTimeEntries's own scoping: the
+// server enforces "own entries only" for a PARALEGAL unconditionally, this
+// is purely a client-side convenience for staff who CAN see everyone's.
+let timeEntryScopeFilter = 'mine';
+let timeEntryListenersInitialized = false;
+let currentTimeEntryEditId = null;
+const selectedTimeEntryIds = new Set();
+
+function initTimeEntriesTab() {
+  timeEntriesLoadedOnce = true;
+  // A PARALEGAL has no firm-wide view — hide the toggle rather than show
+  // one option that would always behave like the other.
+  $('timeEntryScopeFilterGroup').classList.toggle('hidden', isParalegal());
+  setupTimeEntryListeners();
+  loadTimeEntries();
+}
+
+async function loadTimeEntries() {
+  try {
+    const params = new URLSearchParams();
+    if (!isParalegal() && timeEntryScopeFilter === 'mine') {
+      params.set('user_id', Auth.getUser().id);
+    }
+    const qs = params.toString();
+    TIME_ENTRIES = await ApiClient.get(`/api/v1/time-entries${qs ? '?' + qs : ''}`);
+    selectedTimeEntryIds.clear();
+    renderTimeEntryTable();
+  } catch (err) {
+    console.error('Time entries load error', err);
+    const tbody = $('timeEntryTableBody');
+    if (tbody) tbody.innerHTML = `<tr><td colspan="10" style="text-align:center;color:var(--slate-400)">Error loading time entries</td></tr>`;
+  }
+}
+
+function filteredTimeEntries() {
+  const q = timeEntrySearchQuery.toLowerCase();
+  return TIME_ENTRIES.filter(t => {
+    const matchesSearch = !q ||
+      (t.case_name || '').toLowerCase().includes(q) ||
+      (t.case_id || '').toLowerCase().includes(q) ||
+      (t.description || '').toLowerCase().includes(q);
+    const matchesStatus = timeEntryStatusFilter === 'all' || t.status === timeEntryStatusFilter;
+    return matchesSearch && matchesStatus;
+  });
+}
+
+const TIME_ENTRY_STATUS_BADGE_CLASS = { unbilled: 'pending', invoiced: 'active', written_off: 'closed' };
+const TIME_ENTRY_STATUS_LABEL = { unbilled: 'Unbilled', invoiced: 'Invoiced', written_off: 'Written Off' };
+
+function formatHours(minutes) {
+  return (minutes / 60).toFixed(1) + 'h';
+}
+
+function renderTimeEntryTable() {
+  const tbody = $('timeEntryTableBody');
+  const emptyState = $('timeEntryEmptyState');
+  const table = $('timeEntryTable');
+  if (!tbody) return;
+
+  const results = filteredTimeEntries();
+
+  if (results.length === 0) {
+    emptyState.classList.remove('hidden');
+    table.classList.add('hidden');
+    updateTimeEntryBulkBar();
+    return;
+  } else {
+    emptyState.classList.add('hidden');
+    table.classList.remove('hidden');
+  }
+
+  const currentUserId = Auth.getUser() && Auth.getUser().id;
+  const supervisor = canManageBilling(); // ASSOCIATE+ — see its own comment above
+
+  tbody.innerHTML = results.map(t => {
+    const isOwn = t.user_id === currentUserId;
+    const canEditOrDelete = t.status === 'unbilled' && (isOwn || supervisor);
+    const selectable = t.status === 'unbilled' && t.billable;
+
+    const actions = [];
+    if (canEditOrDelete) {
+      actions.push(`
+        <button class="actions-dropdown-item" data-action="open-time-entry-modal" data-entry-id="${escapeAttr(t.id)}">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" style="width:14px;height:14px;stroke:currentColor;margin-right:2px"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+          Edit
+        </button>
+        <button class="actions-dropdown-item danger-item" data-action="delete-time-entry" data-entry-id="${escapeAttr(t.id)}" data-entry-description="${escapeAttr(t.description)}">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" style="width:14px;height:14px;stroke:currentColor;margin-right:2px"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14H6L5 6"/></svg>
+          Delete
+        </button>
+      `);
+    }
+    const actionsHtml = !actions.length ? '' : `
+      <button class="row-action-btn" aria-label="Actions for entry" data-action="toggle-actions-dropdown" data-key="te-${escapeAttr(t.id)}">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <circle cx="12" cy="5" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="12" cy="19" r="1.5"/>
+        </svg>
+      </button>
+      <div class="actions-dropdown-menu" id="dropdown-te-${t.id}">${actions.join('')}</div>
+    `;
+
+    return `
+      <tr>
+        <td>${selectable ? `<input type="checkbox" class="time-entry-checkbox" data-entry-id="${escapeAttr(t.id)}" data-case-id="${escapeAttr(t.case_id)}" ${selectedTimeEntryIds.has(t.id) ? 'checked' : ''} />` : ''}</td>
+        <td class="activity-time">${formatInvoiceDate(t.entry_date)}</td>
+        <td>${t.case_name || t.case_id}</td>
+        <td>${t.user_full_name}${!t.billable ? ' <span style="color:var(--slate-400);font-size:11px;">(non-billable)</span>' : ''}</td>
+        <td style="max-width:280px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title="${escapeAttr(t.description)}">${escapeHtml(t.description)}</td>
+        <td>${formatHours(t.minutes)}</td>
+        <td>${formatMoney(t.rate_cents)}/h</td>
+        <td>${formatMoney(t.amount_cents)}</td>
+        <td><span class="status-badge ${TIME_ENTRY_STATUS_BADGE_CLASS[t.status] || 'closed'}">${TIME_ENTRY_STATUS_LABEL[t.status] || t.status}</span></td>
+        <td class="actions-cell-wrap">${actionsHtml}</td>
+      </tr>
+    `;
+  }).join('');
+
+  // Selection is re-attached fresh each render (checkbox change is
+  // delegated for the row-level boxes below, but "select all" needs a
+  // direct listener since it isn't a per-row data-action).
+  updateTimeEntryBulkBar();
+}
+
+function setupTimeEntryListeners() {
+  if (timeEntryListenersInitialized) return;
+
+  $('timeEntrySearch').addEventListener('input', (e) => {
+    timeEntrySearchQuery = e.target.value;
+    renderTimeEntryTable();
+  });
+
+  $$('#timeEntryStatusFilterPills .pill').forEach(pill => {
+    pill.addEventListener('click', () => {
+      $$('#timeEntryStatusFilterPills .pill').forEach(p => p.classList.remove('active'));
+      pill.classList.add('active');
+      timeEntryStatusFilter = pill.dataset.value;
+      renderTimeEntryTable();
+    });
+  });
+
+  $$('#timeEntryScopeFilterPills .pill').forEach(pill => {
+    pill.addEventListener('click', () => {
+      $$('#timeEntryScopeFilterPills .pill').forEach(p => p.classList.remove('active'));
+      pill.classList.add('active');
+      timeEntryScopeFilter = pill.dataset.value;
+      loadTimeEntries();
+    });
+  });
+
+  $('timeEntryNewBtn').addEventListener('click', () => openTimeEntryModal(null));
+  $('timeEntryModalCloseBtn').addEventListener('click', closeTimeEntryModal);
+  $('timeEntryModalCancelBtn').addEventListener('click', closeTimeEntryModal);
+  $('timeEntryModal').addEventListener('click', (e) => {
+    if (e.target === $('timeEntryModal')) closeTimeEntryModal();
+  });
+
+  $('timeEntrySelectAll').addEventListener('change', (e) => {
+    const boxes = $$('#timeEntryTableBody .time-entry-checkbox');
+    boxes.forEach(box => {
+      box.checked = e.target.checked;
+      if (e.target.checked) selectedTimeEntryIds.add(box.dataset.entryId);
+      else selectedTimeEntryIds.delete(box.dataset.entryId);
+    });
+    updateTimeEntryBulkBar();
+  });
+
+  // Per-row checkboxes are re-rendered on every table draw, so this is
+  // delegated at the tbody level rather than bound per-checkbox.
+  $('timeEntryTableBody').addEventListener('change', (e) => {
+    if (!e.target.classList.contains('time-entry-checkbox')) return;
+    if (e.target.checked) selectedTimeEntryIds.add(e.target.dataset.entryId);
+    else selectedTimeEntryIds.delete(e.target.dataset.entryId);
+    updateTimeEntryBulkBar();
+  });
+
+  timeEntryListenersInitialized = true;
+}
+
+// Shows/hides the "Generate Invoice" bulk bar, and the mixed-case warning
+// when the current selection spans more than one case — generateInvoice
+// only accepts entries from a single case (TimeEntryService.
+// generateInvoiceFromTimeEntries's CASE_MISMATCH rule), so this is caught
+// and explained before the user ever submits, not just left to the
+// server's refusal.
+function updateTimeEntryBulkBar() {
+  const bar = $('timeEntryBulkBar');
+  const warning = $('timeEntryMixedCaseWarning');
+  const generateBtn = $('timeEntryGenerateInvoiceBtn');
+  if (!bar) return;
+
+  const count = selectedTimeEntryIds.size;
+  $('timeEntrySelectAll').indeterminate = count > 0 && count < $$('#timeEntryTableBody .time-entry-checkbox').length;
+  $('timeEntrySelectAll').checked = count > 0 && count === $$('#timeEntryTableBody .time-entry-checkbox').length;
+
+  if (count === 0) {
+    bar.classList.add('hidden');
+    warning.classList.add('hidden');
+    return;
+  }
+
+  bar.classList.remove('hidden');
+  $('timeEntryBulkCount').textContent = `${count} selected`;
+
+  const selectedEntries = TIME_ENTRIES.filter(t => selectedTimeEntryIds.has(t.id));
+  const caseIds = new Set(selectedEntries.map(t => t.case_id));
+  const mixed = caseIds.size > 1;
+  warning.classList.toggle('hidden', !mixed);
+  generateBtn.disabled = mixed;
+  generateBtn.style.opacity = mixed ? '0.5' : '1';
+}
+
+function clearTimeEntrySelection() {
+  selectedTimeEntryIds.clear();
+  $$('#timeEntryTableBody .time-entry-checkbox').forEach(box => { box.checked = false; });
+  updateTimeEntryBulkBar();
+}
+
+// `entryId` is null for "Log Time" (create mode) or a real entry id for
+// "Edit" (row action, only ever offered for an unbilled entry the caller
+// is allowed to edit — see renderTimeEntryTable's canEditOrDelete).
+function openTimeEntryModal(entryId) {
+  closeAllActionsDropdowns();
+  const entry = entryId ? TIME_ENTRIES.find(t => t.id === entryId) : null;
+  currentTimeEntryEditId = entry ? entry.id : null;
+
+  const caseSelect = $('timeEntryCase');
+  caseSelect.innerHTML = '<option value="">Select a case…</option>' +
+    CASES.map(c => `<option value="${c.id}">${c.id} — ${c.name}</option>`).join('');
+
+  if (entry) {
+    $('timeEntryModalTitle').textContent = 'Edit Time Entry';
+    $('timeEntrySubmitBtn').textContent = 'Save Changes';
+    caseSelect.value = entry.case_id;
+    $('timeEntryDate').value = entry.entry_date;
+    $('timeEntryHours').value = (entry.minutes / 60).toFixed(2).replace(/\.?0+$/, '') || '0';
+    $('timeEntryRate').value = (entry.rate_cents / 100).toFixed(2);
+    $('timeEntryDescription').value = entry.description;
+    $('timeEntryBillable').checked = entry.billable;
+  } else {
+    $('timeEntryForm').reset();
+    $('timeEntryModalTitle').textContent = 'Log Time';
+    $('timeEntrySubmitBtn').textContent = 'Log Time';
+    caseSelect.value = '';
+    $('timeEntryDate').value = new Date().toISOString().slice(0, 10);
+    $('timeEntryBillable').checked = true;
+    // Prefill from the signed-in user's own default rate, if one is set
+    // (see users.default_rate_cents) — still freely editable per entry.
+    const user = Auth.getUser();
+    if (user && user.default_rate_cents !== undefined && user.default_rate_cents !== null) {
+      $('timeEntryRate').value = (user.default_rate_cents / 100).toFixed(2);
+    } else {
+      $('timeEntryRate').value = '';
+    }
+  }
+
+  const modal = $('timeEntryModal');
+  modal.classList.remove('hidden');
+  setTimeout(() => modal.classList.add('active'), 10);
+}
+
+function closeTimeEntryModal() {
+  const modal = $('timeEntryModal');
+  if (modal) {
+    modal.classList.remove('active');
+    setTimeout(() => modal.classList.add('hidden'), 300);
+    $('timeEntryForm').reset();
+    currentTimeEntryEditId = null;
+  }
+}
+
+async function handleTimeEntrySubmit(e) {
+  e.preventDefault();
+
+  const caseId = $('timeEntryCase').value;
+  const hours = parseFloat($('timeEntryHours').value);
+  const rateDollars = parseFloat($('timeEntryRate').value);
+  const description = $('timeEntryDescription').value.trim();
+  const billable = $('timeEntryBillable').checked;
+  const entryDate = $('timeEntryDate').value || null;
+
+  if (!caseId) {
+    showToast('Select a case.', 'error');
+    return;
+  }
+  if (!Number.isFinite(hours) || hours <= 0) {
+    showToast('Enter a valid number of hours.', 'error');
+    return;
+  }
+  if (!Number.isFinite(rateDollars) || rateDollars < 0) {
+    showToast('Enter a valid, non-negative rate.', 'error');
+    return;
+  }
+  if (!description) {
+    showToast('Enter a description of the work performed.', 'error');
+    return;
+  }
+
+  // Hours -> whole minutes on the wire, same reasoning as amount_cents:
+  // see db/migrations/0021_time_tracking_and_invoice_line_items.sql's
+  // comment on why time is stored as an exact integer, not a float hour.
+  const minutes = Math.round(hours * 60);
+  const rateCents = Math.round(rateDollars * 100);
+
+  const isEdit = !!currentTimeEntryEditId;
+  const submitBtn = $('timeEntrySubmitBtn');
+  submitBtn.disabled = true;
+  submitBtn.textContent = isEdit ? 'Saving…' : 'Logging…';
+
+  try {
+    if (isEdit) {
+      await ApiClient.patch(`/api/v1/time-entries/${currentTimeEntryEditId}`, {
+        case_id: caseId, entry_date: entryDate, minutes, rate_cents: rateCents, description, billable
+      });
+      showToast('Time entry updated.', 'success');
+    } else {
+      await ApiClient.post('/api/v1/time-entries', {
+        case_id: caseId, entry_date: entryDate, minutes, rate_cents: rateCents, description, billable
+      });
+      showToast('Time logged.', 'success');
+    }
+
+    closeTimeEntryModal();
+    await loadTimeEntries();
+  } catch (err) {
+    showToast(err.message || 'Failed to save time entry.', 'error');
+  } finally {
+    submitBtn.disabled = false;
+    submitBtn.textContent = isEdit ? 'Save Changes' : 'Log Time';
+  }
+}
+
+async function handleDeleteTimeEntry(entryId, description) {
+  closeAllActionsDropdowns();
+  const confirmed = confirm(`Delete this time entry ("${description}")? This cannot be undone.`);
+  if (!confirmed) return;
+
+  try {
+    await ApiClient.del(`/api/v1/time-entries/${entryId}`);
+    showToast('Time entry deleted.', 'success');
+    await loadTimeEntries();
+  } catch (err) {
+    showToast(err.message || 'Failed to delete time entry.', 'error');
+  }
+}
+
+async function handleGenerateInvoiceFromTime() {
+  const selectedEntries = TIME_ENTRIES.filter(t => selectedTimeEntryIds.has(t.id));
+  if (!selectedEntries.length) return;
+
+  const caseIds = new Set(selectedEntries.map(t => t.case_id));
+  if (caseIds.size > 1) return; // button is disabled in this state; belt and suspenders
+
+  const caseId = [...caseIds][0];
+  const totalHours = selectedEntries.reduce((sum, t) => sum + t.minutes, 0) / 60;
+  const totalAmount = selectedEntries.reduce((sum, t) => sum + t.amount_cents, 0);
+  const caseLabel = selectedEntries[0].case_name || caseId;
+
+  const confirmed = confirm(
+    `Generate an invoice for ${selectedEntries.length} time ${selectedEntries.length === 1 ? 'entry' : 'entries'} ` +
+    `(${totalHours.toFixed(1)}h, ${formatMoney(totalAmount)}) against ${caseLabel}?`
+  );
+  if (!confirmed) return;
+
+  const btn = $('timeEntryGenerateInvoiceBtn');
+  btn.disabled = true;
+  btn.textContent = 'Generating…';
+
+  try {
+    const { ok, json } = await ApiClient.post('/api/v1/invoices/from-time-entries', {
+      case_id: caseId,
+      time_entry_ids: [...selectedTimeEntryIds]
+    });
+    if (!ok) throw new Error(json.error || 'Failed to generate invoice.');
+
+    showToast(`Invoice ${json.data.invoice_number} generated (${formatMoney(json.data.amount_cents)}).`, 'success');
+    clearTimeEntrySelection();
+    await loadTimeEntries();
+    await loadInvoices();
+  } catch (err) {
+    showToast(err.message || 'Failed to generate invoice.', 'error');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Generate Invoice';
+  }
+}
+
+registerActions({
+  'submit-time-entry': (el, event) => handleTimeEntrySubmit(event),
+  'open-time-entry-modal': (el) => openTimeEntryModal(el.dataset.entryId),
+  'delete-time-entry': (el) => handleDeleteTimeEntry(el.dataset.entryId, el.dataset.entryDescription),
+  'generate-invoice-from-time': () => handleGenerateInvoiceFromTime(),
+  'clear-time-entry-selection': () => clearTimeEntrySelection(),
+});
 
 /* ════════════════════════════════════════════
    TRUST ACCOUNTING PAGE

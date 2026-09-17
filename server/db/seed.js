@@ -36,12 +36,16 @@ const SEED_USERS = [
   // users (see server/services/inviteService.js). No other seed user has
   // the ADMIN role, so this account is required for the invite flow to be
   // reachable at all on a freshly seeded database.
-  { id: 'a1100ac1-58cc-4372-a567-0e02b2c3d479', email: 'a.morgan@slf.law', fullName: 'Alex Morgan', role: 'ADMIN', initials: 'AM', envVar: 'SEED_MORGAN_PASSWORD' },
-  { id: 'a1101ac1-58cc-4372-a567-0e02b2c3d479', email: 's.jennings@slf.law', fullName: 'Sarah Jennings', role: 'SENIOR_PARTNER', initials: 'SJ', envVar: 'SEED_JENNINGS_PASSWORD' },
-  { id: 'a1102ac1-58cc-4372-a567-0e02b2c3d479', email: 'm.ross@slf.law', fullName: 'Marcus Ross', role: 'ASSOCIATE', initials: 'MR', envVar: 'SEED_ROSS_PASSWORD' },
-  { id: 'a1103ac1-58cc-4372-a567-0e02b2c3d479', email: 'p.nair@slf.law', fullName: 'Priya Nair', role: 'ASSOCIATE', initials: 'PN', envVar: 'SEED_NAIR_PASSWORD' },
-  { id: 'a1104ac1-58cc-4372-a567-0e02b2c3d479', email: 'j.anderson@client.slf.law', fullName: 'James Anderson', role: 'CLIENT', initials: 'JA', envVar: 'SEED_ANDERSON_PASSWORD' },
-  { id: 'a1105ac1-58cc-4372-a567-0e02b2c3d479', email: 'e.davies@client.slf.law', fullName: 'Emily Davies', role: 'CLIENT', initials: 'ED', envVar: 'SEED_DAVIES_PASSWORD' }
+  // defaultRateCents: prefills a new time entry's rate (see
+  // db/migrations/0021_time_tracking_and_invoice_line_items.sql) — null
+  // for CLIENT-role users, who never log billable time. Figures are a
+  // plausible seniority ladder (partner > associate), not a real rate card.
+  { id: 'a1100ac1-58cc-4372-a567-0e02b2c3d479', email: 'a.morgan@slf.law', fullName: 'Alex Morgan', role: 'ADMIN', initials: 'AM', envVar: 'SEED_MORGAN_PASSWORD', defaultRateCents: 45000 },
+  { id: 'a1101ac1-58cc-4372-a567-0e02b2c3d479', email: 's.jennings@slf.law', fullName: 'Sarah Jennings', role: 'SENIOR_PARTNER', initials: 'SJ', envVar: 'SEED_JENNINGS_PASSWORD', defaultRateCents: 65000 },
+  { id: 'a1102ac1-58cc-4372-a567-0e02b2c3d479', email: 'm.ross@slf.law', fullName: 'Marcus Ross', role: 'ASSOCIATE', initials: 'MR', envVar: 'SEED_ROSS_PASSWORD', defaultRateCents: 35000 },
+  { id: 'a1103ac1-58cc-4372-a567-0e02b2c3d479', email: 'p.nair@slf.law', fullName: 'Priya Nair', role: 'ASSOCIATE', initials: 'PN', envVar: 'SEED_NAIR_PASSWORD', defaultRateCents: 32500 },
+  { id: 'a1104ac1-58cc-4372-a567-0e02b2c3d479', email: 'j.anderson@client.slf.law', fullName: 'James Anderson', role: 'CLIENT', initials: 'JA', envVar: 'SEED_ANDERSON_PASSWORD', defaultRateCents: null },
+  { id: 'a1105ac1-58cc-4372-a567-0e02b2c3d479', email: 'e.davies@client.slf.law', fullName: 'Emily Davies', role: 'CLIENT', initials: 'ED', envVar: 'SEED_DAVIES_PASSWORD', defaultRateCents: null }
 ];
 
 const ATTORNEY_IDS = {
@@ -114,6 +118,20 @@ const SEED_INVOICES = [
   { caseId: 'LC-2026-005', invoiceNumber: 'INV-2026-084', amountCents: 840000, status: 'overdue', issuedDate: '2026-06-01', dueDate: '2026-06-30' }
 ];
 
+// A handful of unbilled time entries so the "generate invoice from time
+// entries" flow has real data to demonstrate on a fresh seed — deliberately
+// left unbilled (not run through generateInvoiceFromTimeEntries here),
+// since seeding an already-invoiced entry would also require seeding the
+// invoice_line_item it points to, and that coupling belongs to the real
+// generation path, not to fixture data.
+const SEED_TIME_ENTRIES = [
+  { caseId: 'LC-2026-001', userId: ATTORNEY_IDS.jennings, entryDate: daysFromNow(-3), minutes: 90, description: 'Reviewed Meridian contract amendments and drafted response memo.' },
+  { caseId: 'LC-2026-001', userId: ATTORNEY_IDS.jennings, entryDate: daysFromNow(-2), minutes: 45, description: 'Client call re: settlement counter-offer strategy.' },
+  { caseId: 'LC-2026-002', userId: ATTORNEY_IDS.ross, entryDate: daysFromNow(-4), minutes: 120, description: 'Prepared motion to suppress evidence from traffic stop.' },
+  { caseId: 'LC-2026-005', userId: ATTORNEY_IDS.ross, entryDate: daysFromNow(-1), minutes: 60, description: 'IP dispute research — prior art search for Omni Media filing.' },
+  { caseId: 'LC-2026-004', userId: ATTORNEY_IDS.nair, entryDate: daysFromNow(-5), minutes: 30, description: 'Reviewed Garrison trust documents for probate filing.' }
+];
+
 const CONVERSATION_IDS = {
   anderson: 'c0000001-0000-4000-8000-000000000001',
   davies: 'c0000002-0000-4000-8000-000000000002'
@@ -182,14 +200,15 @@ async function seedUsers(client) {
     const passwordHash = bcrypt.hashSync(password, 10);
 
     await client.query(
-      `INSERT INTO users (id, firm_id, email, full_name, role, initials, password_hash)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)
+      `INSERT INTO users (id, firm_id, email, full_name, role, initials, password_hash, default_rate_cents)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
        ON CONFLICT (id) DO UPDATE SET
          full_name = EXCLUDED.full_name,
          role = EXCLUDED.role,
-         initials = EXCLUDED.initials
+         initials = EXCLUDED.initials,
+         default_rate_cents = EXCLUDED.default_rate_cents
          ${providedPassword ? ', password_hash = EXCLUDED.password_hash' : ''}`,
-      [u.id, DEFAULT_FIRM_ID, u.email, u.fullName, u.role, u.initials, passwordHash]
+      [u.id, DEFAULT_FIRM_ID, u.email, u.fullName, u.role, u.initials, passwordHash, u.defaultRateCents ?? null]
     );
 
     // Only print a password when we actually set one just now: either this
@@ -260,6 +279,23 @@ async function seedInvoices(client) {
   }
 }
 
+async function seedTimeEntries(client) {
+  const rateByUserId = Object.fromEntries(SEED_USERS.map(u => [u.id, u.defaultRateCents]));
+
+  for (const t of SEED_TIME_ENTRIES) {
+    const existing = await client.query(
+      'SELECT id FROM time_entries WHERE firm_id = $1 AND case_id = $2 AND user_id = $3 AND entry_date = $4 AND description = $5',
+      [DEFAULT_FIRM_ID, t.caseId, t.userId, t.entryDate, t.description]
+    );
+    if (existing.rowCount > 0) continue; // don't duplicate on re-run
+    await client.query(
+      `INSERT INTO time_entries (firm_id, case_id, user_id, entry_date, minutes, rate_cents, description)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+      [DEFAULT_FIRM_ID, t.caseId, t.userId, t.entryDate, t.minutes, rateByUserId[t.userId], t.description]
+    );
+  }
+}
+
 async function seedConversations(client) {
   for (const conv of SEED_CONVERSATIONS) {
     await client.query(
@@ -304,6 +340,7 @@ async function seed() {
     await seedCases(client);
     await seedDeadlines(client);
     await seedInvoices(client);
+    await seedTimeEntries(client);
     await seedConversations(client);
 
     if (printed.length) {
@@ -314,7 +351,7 @@ async function seed() {
       console.log('[SEED] All demo users already exist; no new passwords generated.');
     }
 
-    console.log('[SEED] Firm, folders, users, cases, deadlines, invoices, and conversations are seeded.');
+    console.log('[SEED] Firm, folders, users, cases, deadlines, invoices, time entries, and conversations are seeded.');
   } finally {
     client.release();
   }

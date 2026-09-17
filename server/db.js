@@ -1170,6 +1170,206 @@ async function listInvoicesForUser(firmId, user) {
   return rows.map(r => ({ ...r, amount_cents: Number(r.amount_cents) }));
 }
 
+// ═════════════════════════════════════════════════════════════════════
+// TIME TRACKING (db/migrations/0021_time_tracking_and_invoice_line_items.sql)
+// ═════════════════════════════════════════════════════════════════════
+
+const TIME_ENTRY_SELECT = `SELECT time_entries.*, cases.case_name, users.full_name AS user_full_name, users.initials AS user_initials
+     FROM time_entries
+     JOIN cases ON cases.id = time_entries.case_id
+     JOIN users ON users.id = time_entries.user_id`;
+
+function toTimeEntryRow(r) {
+  return { ...r, minutes: Number(r.minutes), rate_cents: Number(r.rate_cents) };
+}
+
+async function getTimeEntryById(firmId, entryId) {
+  const { rows } = await pool.query(
+    `${TIME_ENTRY_SELECT} WHERE time_entries.firm_id = $1 AND time_entries.id = $2`,
+    [firmId, entryId]
+  );
+  return rows[0] ? toTimeEntryRow(rows[0]) : null;
+}
+
+// Firm-wide read (ASSOCIATE+ — see requireRole on the route). Optional
+// filters narrow by case, status, or the user who logged the time.
+async function listTimeEntriesForFirm(firmId, { caseId, status, userId } = {}) {
+  const values = [firmId];
+  let query = `${TIME_ENTRY_SELECT} WHERE time_entries.firm_id = $1`;
+  if (caseId) { values.push(caseId); query += ` AND time_entries.case_id = $${values.length}`; }
+  if (status) { values.push(status); query += ` AND time_entries.status = $${values.length}`; }
+  if (userId) { values.push(userId); query += ` AND time_entries.user_id = $${values.length}`; }
+  query += ' ORDER BY time_entries.entry_date DESC, time_entries.created_at DESC';
+  const { rows } = await pool.query(query, values);
+  return rows.map(toTimeEntryRow);
+}
+
+// A PARALEGAL's own-entries-only read — same query shape as above with the
+// user_id filter forced to their own id, kept as a separate function
+// (rather than a flag on the one above) so the "own entries only" scoping
+// can never accidentally be bypassed by a caller forgetting to pass userId.
+async function listTimeEntriesForOwner(firmId, userId, { caseId, status } = {}) {
+  return listTimeEntriesForFirm(firmId, { caseId, status, userId });
+}
+
+async function insertTimeEntry({ firmId, caseId, userId, entryDate, minutes, rateCents, description, billable }) {
+  const { rows } = await pool.query(
+    `INSERT INTO time_entries (firm_id, case_id, user_id, entry_date, minutes, rate_cents, description, billable)
+     VALUES ($1, $2, $3, COALESCE($4, CURRENT_DATE), $5, $6, $7, COALESCE($8, TRUE))
+     RETURNING id`,
+    [firmId, caseId, userId, entryDate || null, minutes, rateCents, description, billable]
+  );
+  return getTimeEntryById(firmId, rows[0].id);
+}
+
+// General field update — deliberately excludes `status` and
+// `invoice_line_item_id`, which only ever change via
+// generateInvoiceFromTimeEntries below (an entry cannot be marked
+// 'invoiced' by any other path). Callers (TimeEntryService) additionally
+// refuse to call this at all once an entry's status is already 'invoiced'.
+async function updateTimeEntryFields(firmId, entryId, updates = {}) {
+  const fieldMap = {
+    caseId: 'case_id', entryDate: 'entry_date', minutes: 'minutes',
+    rateCents: 'rate_cents', description: 'description', billable: 'billable'
+  };
+  const setClauses = [];
+  const values = [];
+  let i = 1;
+  for (const [key, column] of Object.entries(fieldMap)) {
+    if (updates[key] !== undefined) {
+      setClauses.push(`${column} = $${i}`);
+      values.push(updates[key]);
+      i++;
+    }
+  }
+  if (!setClauses.length) return getTimeEntryById(firmId, entryId);
+
+  setClauses.push('updated_at = CURRENT_TIMESTAMP');
+  values.push(firmId, entryId);
+  await pool.query(
+    `UPDATE time_entries SET ${setClauses.join(', ')} WHERE firm_id = $${i} AND id = $${i + 1}`,
+    values
+  );
+  return getTimeEntryById(firmId, entryId);
+}
+
+// Hard delete — an unbilled time entry is a genuine draft (see the
+// migration's own comment on why this differs from the trust ledger's
+// append-only posture); TimeEntryService refuses to call this once an
+// entry's status is 'invoiced'. Returns the row count so the caller can
+// distinguish "deleted" from "no such row in this firm".
+async function deleteTimeEntryRow(firmId, entryId) {
+  const { rowCount } = await pool.query(
+    'DELETE FROM time_entries WHERE firm_id = $1 AND id = $2',
+    [firmId, entryId]
+  );
+  return rowCount;
+}
+
+async function getInvoiceLineItems(firmId, invoiceId) {
+  const { rows } = await pool.query(
+    `SELECT * FROM invoice_line_items WHERE firm_id = $1 AND invoice_id = $2 ORDER BY sort_order ASC, created_at ASC`,
+    [firmId, invoiceId]
+  );
+  return rows.map(r => ({ ...r, quantity_minutes: Number(r.quantity_minutes), rate_cents: Number(r.rate_cents), amount_cents: Number(r.amount_cents) }));
+}
+
+// Generates a new invoice from a set of unbilled time entries, atomically:
+// the invoice row, every line item, and every time entry's
+// status/invoice_line_item_id update happen in one transaction, so a
+// failure partway through can never leave a line item referencing an
+// invoice that doesn't exist, or a time entry marked 'invoiced' with
+// nothing actually billed. Mirrors the same all-or-nothing shape
+// insertTrustTransferAndMarkInvoicePaid uses for the trust/invoice
+// boundary.
+//
+// `entries` must already be the caller's own validated, role-scoped list
+// (TimeEntryService.generateInvoiceFromTimeEntries fetches and checks them
+// before this is called) — this function trusts its input and only
+// re-derives amounts from what it's given, it does not re-validate
+// ownership or case membership itself.
+async function insertInvoiceFromTimeEntries({ firmId, caseId, invoiceNumber, entries, issuedDate, dueDate }) {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    // The invoice is created with amount_cents = 0 and corrected once every
+    // entry is confirmed claimed below — see why in the per-entry loop.
+    const invoiceResult = await client.query(
+      `INSERT INTO invoices (firm_id, case_id, invoice_number, amount_cents, status, issued_date, due_date)
+       VALUES ($1, $2, $3, 0, 'draft', COALESCE($4, CURRENT_DATE), $5)
+       RETURNING id`,
+      [firmId, caseId, invoiceNumber, issuedDate || null, dueDate || null]
+    );
+    const invoiceId = invoiceResult.rows[0].id;
+
+    let sortOrder = 0;
+    let totalCents = 0;
+
+    for (const entry of entries) {
+      // CLAIM the entry FIRST, before creating anything that depends on
+      // it, and check the result immediately.
+      //
+      // An earlier version of this function created the line item first
+      // and updated the entry afterward with a WHERE status = 'unbilled'
+      // guard, then did one bulk "did everything transition" check at the
+      // end using `status != 'invoiced'`. That check was wrong: it cannot
+      // tell "this transaction just invoiced it" apart from "some earlier,
+      // unrelated transaction had already invoiced it before this one even
+      // started" — both read back as status = 'invoiced'. A time entry
+      // that was already invoiced by someone else therefore passed the
+      // check, and its stale amount got silently added into a SECOND
+      // invoice's total, with an orphaned, unlinked line item left behind
+      // for it. Caught by a test that manually invoiced one of two entries
+      // out from under the call before invoking it.
+      //
+      // Claiming with RETURNING id makes the failure visible at the exact
+      // row that failed, synchronously, so the transaction can abort
+      // before any line item or total is built from bad input.
+      const claim = await client.query(
+        `UPDATE time_entries SET status = 'invoiced', updated_at = CURRENT_TIMESTAMP
+         WHERE firm_id = $1 AND id = $2 AND status = 'unbilled'
+         RETURNING id`,
+        [firmId, entry.id]
+      );
+      if (claim.rowCount === 0) {
+        await client.query('ROLLBACK');
+        return null;
+      }
+
+      const amountCents = Math.round((entry.minutes / 60) * entry.rate_cents);
+      totalCents += amountCents;
+
+      const lineItemResult = await client.query(
+        `INSERT INTO invoice_line_items (firm_id, invoice_id, description, quantity_minutes, rate_cents, amount_cents, sort_order)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)
+         RETURNING id`,
+        [firmId, invoiceId, entry.description, entry.minutes, entry.rate_cents, amountCents, sortOrder]
+      );
+      const lineItemId = lineItemResult.rows[0].id;
+
+      await client.query(
+        `UPDATE time_entries SET invoice_line_item_id = $1 WHERE firm_id = $2 AND id = $3`,
+        [lineItemId, firmId, entry.id]
+      );
+      sortOrder += 1;
+    }
+
+    await client.query(
+      `UPDATE invoices SET amount_cents = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2`,
+      [totalCents, invoiceId]
+    );
+
+    await client.query('COMMIT');
+    return getInvoiceById(firmId, invoiceId);
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
 // Monthly totals for the billing chart plus overdue invoice stats for the
 // dashboard KPI card. Done as two small queries rather than pulling every
 // invoice row and summing in JS, since this is meant to scale with real
@@ -1932,6 +2132,14 @@ module.exports = {
   getMaxCaseNumber,
   listInvoicesByFirm,
   listInvoicesForUser,
+  getTimeEntryById,
+  listTimeEntriesForFirm,
+  listTimeEntriesForOwner,
+  insertTimeEntry,
+  updateTimeEntryFields,
+  deleteTimeEntryRow,
+  getInvoiceLineItems,
+  insertInvoiceFromTimeEntries,
   getInvoiceById,
   getMaxInvoiceNumber,
   insertInvoice,
