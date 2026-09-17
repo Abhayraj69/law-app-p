@@ -643,6 +643,10 @@ const MessagesView = {
         ${conv.messages.map(m => `
           <div class="portal-msg ${m.sender === 'client' ? 'portal-msg-mine' : 'portal-msg-theirs'}">
             ${escapeHtml(m.text)}
+            ${m.attachment ? `
+              <a class="portal-msg-attachment" href="/api/v1/files/${encodeURIComponent(m.attachment.documentId)}/download"
+                 target="_blank" rel="noopener">📎 ${escapeHtml(m.attachment.name)}</a>
+            ` : ''}
             <span class="portal-msg-meta">${escapeHtml(m.sender === 'client' ? 'You' : (m.senderName || 'Staff'))} · ${escapeHtml(m.time || '')}</span>
           </div>`).join('') || '<div class="portal-empty">No messages yet.</div>'}
       </div>

@@ -43,13 +43,12 @@ CREATE TABLE IF NOT EXISTS case_intake (
     conflict_override_reason TEXT,
     engagement_letter_document_id UUID REFERENCES documents(id) ON DELETE SET NULL,
     engagement_letter_sent_at TIMESTAMP WITH TIME ZONE,
-    -- The countersigned copy. There is no e-signature integration in this
-    -- pass — the existing "Signature Request" UI buttons stay decorative
-    -- (see README) — so this is populated by a staff member uploading the
-    -- countersigned document, exactly like engagement_letter_document_id.
-    -- Deliberately just a document id + timestamp so a future e-signature
-    -- integration (a provider's signed-callback writing this same field)
-    -- is a drop-in, not a schema change.
+    -- The countersigned copy. Populated either by a staff member manually
+    -- uploading the countersigned document (exactly like
+    -- engagement_letter_document_id) or, as of migration 0019, by a
+    -- completed e-signature request tied to this case — deliberately just
+    -- a document id + timestamp, written the same way by both paths, so
+    -- migration 0019 needed no schema change here to add the second one.
     signed_document_id UUID REFERENCES documents(id) ON DELETE SET NULL,
     signed_at TIMESTAMP WITH TIME ZONE,
     -- Reuses the trust ledger (0014) directly — "retainer received" is

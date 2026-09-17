@@ -84,6 +84,16 @@ async function toConversationSummaryView(row) {
   };
 }
 
+function toAttachmentView(m) {
+  if (!m.attachment_document_id) return null;
+  return {
+    documentId: m.attachment_document_id,
+    name: m.attachment_name,
+    sizeBytes: m.attachment_size_bytes != null ? Number(m.attachment_size_bytes) : null,
+    fileType: m.attachment_file_type
+  };
+}
+
 async function toMessageView(m, viewerIsStaff) {
   const isNote = m.sender === 'note';
   if (isNote && !viewerIsStaff) return null; // defense in depth — see file header
@@ -95,7 +105,8 @@ async function toMessageView(m, viewerIsStaff) {
     senderName: m.sender_name,
     text: isNote ? `STAFF NOTE: ${body}` : body,
     time: formatMessageTime(m.created_at),
-    isNote
+    isNote,
+    attachment: toAttachmentView(m)
   };
 }
 
@@ -146,8 +157,15 @@ class CommunicationsService {
    * binds ciphertext to a specific (conversation_id, message id) pair,
    * which has to be known before the encrypted bytes are computed, let
    * alone inserted.
+   *
+   * `attachmentDocumentId`, if given, must already be a real document the
+   * caller can see — re-verified here via db.getDocumentById (firm-scoped,
+   * and CLIENT-role-scoped to their own case the same way every other
+   * document read is), not merely trusted because the id looks plausible.
+   * See db/migrations/0018_message_attachments.sql for why a message
+   * carries at most one attachment.
    */
-  static async postMessage(tenantId, user, conversationId, { text, isNote }) {
+  static async postMessage(tenantId, user, conversationId, { text, isNote, attachmentDocumentId }) {
     if (!text || !text.trim()) {
       const err = new Error('Message text is required.');
       err.status = 400;
@@ -157,6 +175,18 @@ class CommunicationsService {
     const viewerIsStaff = isStaff(user);
     const conv = await db.getConversationWithMessages(tenantId, conversationId, user, viewerIsStaff);
     if (!conv) throw notFound();
+
+    let validAttachmentId = null;
+    if (attachmentDocumentId) {
+      const document = await db.getDocumentById(tenantId, attachmentDocumentId, user);
+      if (!document) {
+        const err = new Error('Attachment not found.');
+        err.status = 400;
+        err.code = 'ATTACHMENT_NOT_FOUND';
+        throw err;
+      }
+      validAttachmentId = document.id;
+    }
 
     const wantsNote = viewerIsStaff && !!isNote;
     const sender = wantsNote ? 'note' : (viewerIsStaff ? 'staff' : 'client');
@@ -177,10 +207,14 @@ class CommunicationsService {
       bodyCiphertext,
       bodyNonce,
       bodyAuthTag,
-      encryptionKeyId
+      encryptionKeyId,
+      attachmentDocumentId: validAttachmentId
     });
 
-    return toMessageView({ ...inserted, sender_name: user.full_name }, viewerIsStaff);
+    const full = await db.getConversationWithMessages(tenantId, conversationId, user, viewerIsStaff);
+    const insertedWithAttachment = full.messages.find(m => m.id === messageId) || inserted;
+
+    return toMessageView({ ...insertedWithAttachment, sender_name: user.full_name }, viewerIsStaff);
   }
 }
 

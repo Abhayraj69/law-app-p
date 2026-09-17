@@ -1137,8 +1137,9 @@
 
           <!-- Typing Form -->
           <form id="commsMessageForm" onsubmit="handleSendCommsMessage(event)">
+            <div id="commsPendingAttachment" class="hidden" style="margin-bottom:6px;"></div>
             <div class="comms-input-box-wrap">
-              <textarea id="commsMessageInput" placeholder="Type a message or internal note..." required
+              <textarea id="commsMessageInput" placeholder="Type a message or internal note..."
                 rows="1"></textarea>
               <div class="comms-input-actions">
                 <div class="quick-icons-group">
@@ -1149,8 +1150,8 @@
                         d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48" />
                     </svg>
                   </button>
-                  <button type="button" class="quick-action-btn" title="Coming soon — e-signature integration not yet available"
-                    disabled style="opacity:0.4; cursor:not-allowed;">
+                  <button type="button" class="quick-action-btn" title="Request Signature"
+                    onclick="handleInputQuickAction('signature')">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                       <path d="M12 20h9M16.5 3.5a2.121 2.121 0 013 3L7 19l-4 1 1-4L16.5 3.5z" />
                     </svg>
@@ -1889,6 +1890,67 @@
               Invoice</button>
           </div>
         </form>
+      </div>
+    </div>
+  </div>
+
+  <!-- REQUEST SIGNATURE MODAL -->
+  <div class="modal-overlay hidden" id="signatureRequestModal">
+    <div class="modal-box">
+      <div class="modal-header">
+        <h3 class="modal-title">Request Signature</h3>
+        <button class="modal-close-btn" id="signatureRequestModalCloseBtn">&times;</button>
+      </div>
+      <div class="modal-body">
+        <form id="signatureRequestForm" onsubmit="handleSignatureRequestSubmit(event)">
+          <div class="form-group-modal">
+            <label for="signatureRequestDocument">Document to sign</label>
+            <select id="signatureRequestDocument" required>
+              <option value="">Loading documents…</option>
+            </select>
+          </div>
+          <div class="form-row-two">
+            <div class="form-group-modal">
+              <label for="signatureRequestSignerName">Signer name</label>
+              <input type="text" id="signatureRequestSignerName" required placeholder="e.g. Jane Anderson" />
+            </div>
+            <div class="form-group-modal">
+              <label for="signatureRequestSignerEmail">Signer email</label>
+              <input type="email" id="signatureRequestSignerEmail" required placeholder="jane@example.com" />
+            </div>
+          </div>
+          <p class="auth-hint" style="margin-top:-8px;">There's no email integration configured — after creating
+            the request, a one-time signing link is shown for you to send the signer yourself, the same way an
+            invite link works today.</p>
+          <div class="modal-footer">
+            <button type="button" class="btn-ghost" id="signatureRequestModalCancelBtn">Cancel</button>
+            <button type="submit" class="btn-primary" id="signatureRequestSubmitBtn"
+              style="background: var(--gold-500); color: var(--navy-950); font-weight: 600; border: none;">Send
+              Request</button>
+          </div>
+        </form>
+      </div>
+    </div>
+  </div>
+
+  <!-- SIGNATURE REQUEST LINK MODAL (shown once, right after creating a request) -->
+  <div class="modal-overlay hidden" id="signatureLinkModal">
+    <div class="modal-box">
+      <div class="modal-header">
+        <h3 class="modal-title">Signature request sent</h3>
+        <button class="modal-close-btn" id="signatureLinkModalCloseBtn">&times;</button>
+      </div>
+      <div class="modal-body">
+        <p style="margin-bottom:10px;">Send this one-time link to <strong id="signatureLinkSignerName"></strong> so
+          they can review and sign the document. It expires in 14 days.</p>
+        <div class="form-group-modal">
+          <input type="text" id="signatureLinkValue" readonly style="font-size:12px;" />
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn-primary" id="signatureLinkCopyBtn"
+            style="background: var(--gold-500); color: var(--navy-950); font-weight: 600; border: none;">Copy
+            Link</button>
+        </div>
       </div>
     </div>
   </div>

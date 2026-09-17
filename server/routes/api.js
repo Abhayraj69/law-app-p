@@ -29,6 +29,7 @@ const storageQuotaController = require('../controllers/storageQuotaController');
 const searchController = require('../controllers/searchController');
 const trustController = require('../controllers/trustController');
 const matterIntakeController = require('../controllers/matterIntakeController');
+const signatureController = require('../controllers/signatureController');
 
 // Apply Global Tenant Authentication & User Context
 router.use(authMiddleware);
@@ -220,6 +221,19 @@ router.post('/cases/:id/intake/decline', requireRole('ASSOCIATE'), matterIntakeC
 router.get('/conversations', communicationsController.listConversations);
 router.get('/conversations/:id', communicationsController.getConversation);
 router.post('/conversations/:id/messages', communicationsController.postMessage);
+
+// ═════════════════════════════════════════════════════════════════════
+// G1B. E-SIGNATURE REQUESTS
+// Staff-authenticated create/list/void, same ASSOCIATE+ floor as archiving
+// a case or creating an invoice. The signer's own two actions (view a
+// pending request, complete it) are public/token-based — see
+// server/routes/auth.js's /sign/:token routes, mounted outside
+// authMiddleware the same way /auth/invite/:token is.
+// ═════════════════════════════════════════════════════════════════════
+router.post('/signatures', requireRole('ASSOCIATE'), signatureController.requestSignature);
+router.get('/signatures', requireRole('ASSOCIATE'), signatureController.listSignatures);
+router.post('/signatures/:id/void', requireRole('ASSOCIATE'), signatureController.voidSignature);
+router.get('/cases/:id/signatures', requireRole('ASSOCIATE'), signatureController.listSignaturesForCase);
 
 // ═════════════════════════════════════════════════════════════════════
 // G2. INVOICES / BILLING (staff Billing page + client portal read)

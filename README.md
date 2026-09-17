@@ -131,7 +131,12 @@ section before assuming a feature is wired up.
   reasoned action — never as a side effect of the same request that
   created the case. The retainer step reuses Trust Accounting's real
   deposit endpoint rather than a separate mechanism (or can be explicitly
-  waived, for contingency/pro bono matters). Activation itself
+  waived, for contingency/pro bono matters). The `SIGNED` step is reached
+  either by a staff member manually uploading a countersigned document
+  (`POST /api/v1/cases/:id/intake/signed`) or, now, by a completed
+  e-signature request tied to the case (see "Pluggable e-signature
+  workflow" above) — both paths write the same
+  `case_intake.signed_document_id` + `signed_at` fields. Activation itself
   (`CaseService`'s case row and `case_intake`'s state flip together in
   one transaction) hard-refuses unless every prior step is satisfied.
   Cases created through the ordinary "New Case" modal are untouched by
@@ -184,38 +189,50 @@ section before assuming a feature is wired up.
   upload modal pre-scoped to that case; "Message via Client Portal" opens
   that case's real conversation in Communications (or says plainly that
   no thread exists yet, if one doesn't).
-- **Two of the Communications composer's three quick-action buttons** —
-  "Attach" really uploads through the same vault upload pipeline
-  (`POST /api/v1/vault/upload`) and references the result in the message
-  as editable text (`conversation_messages` has no attachment column, so
-  this stops short of a structured attachment — see "What's still
-  mock/static" if you want that built properly); "Template" inserts one
-  of a small fixed set of canned messages (plain string substitution, no
-  merge fields). The third, "Request Signature," is intentionally still
-  decorative — see below.
+- **Structured message attachments** — the Communications composer's
+  "Attach" quick action uploads through the same vault upload pipeline
+  (`POST /api/v1/vault/upload`) as before, but now links the result to
+  the message as a real reference
+  (`conversation_messages.attachment_document_id`,
+  `db/migrations/0018_message_attachments.sql`) instead of a plain-text
+  mention the sender could edit into something misleading. Re-verified
+  server-side on every post (`CommunicationsService.postMessage` calls
+  `db.getDocumentById` with the same firm/CLIENT-ownership scoping every
+  other document read uses) before it's ever linked. Renders as a
+  clickable download chip in both the staff Communications page and the
+  Client Portal's message thread.
+- **Pluggable e-signature workflow** — the Communications composer's
+  "Request Signature" quick action is real: it creates a
+  `signature_requests` row (`db/migrations/0019_signature_requests.sql`)
+  through a pluggable provider interface
+  (`server/services/esignature/`), the same swappable-backend shape
+  `server/services/encryption/keyProvider.js` uses for AWS KMS vs. a
+  local key. Only a `'local'` provider exists today — no third-party
+  account needed — the signer completes the request themselves on this
+  app's own public page (`/sign-document.html?token=...`, reached via a
+  one-time link, the same shape the admin-invite flow uses) by typing
+  their full name; that's recorded as real signer metadata (typed name,
+  IP, timestamp) on the row, not a forged re-rendering of the document.
+  A request optionally carries a `case_id`; completing one for a case
+  whose Matter Intake is waiting on `ENGAGEMENT_LETTER_SENT`
+  auto-advances that intake to `SIGNED` using the same document
+  (`MatterIntakeService.markSignedViaSignatureRequest`) — the exact
+  drop-in migration 0015's own comment anticipated. Swapping in a real
+  provider (DocuSign, HelloSign) later means adding one file under
+  `server/services/esignature/providers/`, not touching
+  `SignatureService` or the schema. See
+  `server/test/messageAttachmentsAndSignatures.test.js`.
+- **"Template," the third Communications composer quick action** —
+  inserts one of a small fixed set of canned messages (plain string
+  substitution, no merge fields, no server involvement).
 
-## What's still mock/static
-
-- **E-signature is not integrated anywhere in the app.** The message
-  composer's "Request Signature" quick action is a disabled button
-  labeled "Coming soon" (`index.html`) rather than a toast that implied a
-  real request was sent. Matter Intake's "signed" step (see above) is
-  satisfied by a staff member manually uploading a countersigned
-  document, not a real e-signature flow — that upload's `signed_document_id`
-  is deliberately just a document id + timestamp so a future e-signature
-  provider integration (DocuSign, HelloSign, etc.) can slot in without a
-  schema change, but no such provider is wired up today.
-- **The message composer's "Attach" quick action doesn't produce a real,
-  structured message attachment** — see above. The file is genuinely
-  uploaded and stored; the message only carries a plain-text reference to
-  it, because `conversation_messages` has no attachment column.
-
-If you want any of the above to become fully real, the pattern to copy is
-the same one every other real feature in this app already follows: a
-service in `server/services/`, a controller in `server/controllers/`, a
-route in `server/routes/api.js`, and (for a frontend feature) replacing
-the hardcoded/decorative markup in `app.js`/`index.html` with an
-`ApiClient` call against it.
+If you want a real third-party e-signature provider integrated, the
+pattern to copy is the same one every other real feature in this app
+already follows: a service in `server/services/`, a controller in
+`server/controllers/`, a route in `server/routes/api.js` — here,
+specifically, one more file under `server/services/esignature/providers/`
+implementing `send`/`void` against that provider's API, selected via the
+`SIGNATURE_PROVIDER` env var (see `providerSelector.js`).
 
 ## Running it locally
 
@@ -511,9 +528,11 @@ work end to end.
 - **No email/SMTP integration** — an ADMIN's invite link (see "Adding a
   user" below) is shown once in the UI for them to relay however they
   currently reach new hires; nothing is emailed automatically.
-- **No e-signature provider is integrated** — see "What's still
-  mock/static" above for exactly what that leaves decorative or
-  manual-upload-only.
+- **No real third-party e-signature provider is integrated** — the
+  request/sign/track workflow itself is real (see "Pluggable e-signature
+  workflow" above), running against a self-contained `'local'` provider
+  rather than DocuSign/HelloSign/etc. Wiring one of those in is adding a
+  new file under `server/services/esignature/providers/`.
 - **The staff Dashboard's hearings widget (`case_deadlines`) and
   client-messages widget (`client_messages`) are firm-wide, not
   client-scoped** — those two tables have no per-client ownership column

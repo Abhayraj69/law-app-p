@@ -508,6 +508,7 @@ html, body {
 .portal-msg-mine { align-self: flex-end; background: var(--gold-glow); color: var(--slate-100); border: 1px solid rgba(201,168,76,0.25); }
 .portal-msg-theirs { align-self: flex-start; background: var(--bg-elevated); color: var(--slate-200); }
 .portal-msg-meta { display: block; font-size: 10.5px; color: var(--slate-500); margin-top: 5px; }
+.portal-msg-attachment { display: flex; align-items: center; gap: 6px; margin-top: 8px; padding: 6px 10px; border-radius: 8px; background: rgba(255,255,255,0.08); text-decoration: none; color: inherit; font-size: 12px; }
 
 .portal-thread-reply { display: flex; gap: 10px; padding: 14px 18px; border-top: var(--border-faint); }
 .portal-thread-reply textarea {

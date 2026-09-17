@@ -1203,8 +1203,13 @@ async function getConversationWithMessages(firmId, conversationId, user, include
   const conversation = rows[0];
   if (!conversation) return null;
 
-  let msgQuery = `SELECT cm.*, u.full_name AS sender_name FROM conversation_messages cm
+  let msgQuery = `SELECT cm.*, u.full_name AS sender_name,
+                         ad.original_name AS attachment_name,
+                         ad.file_size_bytes AS attachment_size_bytes,
+                         ad.file_type AS attachment_file_type
+                  FROM conversation_messages cm
                   LEFT JOIN users u ON u.id = cm.sender_user_id
+                  LEFT JOIN documents ad ON ad.id = cm.attachment_document_id
                   WHERE cm.conversation_id = $1`;
   const msgValues = [conversationId];
   if (!includeNotes) {
@@ -1235,13 +1240,13 @@ async function insertConversation({ id, firmId, caseId, clientUserId, clientName
 // db/migrations/0006_message_encryption.sql's header for the migration
 // plan; legacy plaintext rows written before that migration are read via
 // resolveMessageBody's fallback, never written fresh.
-async function insertConversationMessage({ id, conversationId, sender, senderUserId, bodyCiphertext, bodyNonce, bodyAuthTag, encryptionKeyId }) {
+async function insertConversationMessage({ id, conversationId, sender, senderUserId, bodyCiphertext, bodyNonce, bodyAuthTag, encryptionKeyId, attachmentDocumentId }) {
   const { rows } = await pool.query(
     `INSERT INTO conversation_messages
-       (id, conversation_id, sender, sender_user_id, body_ciphertext, body_nonce, body_auth_tag, encryption_key_id)
-     VALUES (COALESCE($1, uuid_generate_v4()), $2, $3, $4, $5, $6, $7, $8)
+       (id, conversation_id, sender, sender_user_id, body_ciphertext, body_nonce, body_auth_tag, encryption_key_id, attachment_document_id)
+     VALUES (COALESCE($1, uuid_generate_v4()), $2, $3, $4, $5, $6, $7, $8, $9)
      RETURNING *`,
-    [id || null, conversationId, sender, senderUserId || null, bodyCiphertext, bodyNonce, bodyAuthTag, encryptionKeyId]
+    [id || null, conversationId, sender, senderUserId || null, bodyCiphertext, bodyNonce, bodyAuthTag, encryptionKeyId, attachmentDocumentId || null]
   );
   await pool.query('UPDATE conversations SET updated_at = CURRENT_TIMESTAMP WHERE id = $1', [conversationId]);
   return rows[0];
@@ -1703,6 +1708,104 @@ async function listTrustReconciliations(firmId, trustAccountId) {
   }));
 }
 
+// ── Signature requests (pluggable e-signature workflow) ─────────────────
+// See db/migrations/0019_signature_requests.sql and
+// server/services/signatureService.js for the full design. Every read
+// joins the document/case/requester names a view needs, the same
+// "one SELECT that already has everything a caller wants" shape
+// SIGNATURE_REQUEST_SELECT below mirrors DOCUMENT_SELECT for.
+const SIGNATURE_REQUEST_SELECT = `
+  SELECT sr.*,
+         d.original_name AS document_original_name,
+         c.case_name,
+         u.full_name AS requested_by_name,
+         f.name AS firm_name
+  FROM signature_requests sr
+  LEFT JOIN documents d ON d.id = sr.document_id
+  LEFT JOIN cases c ON c.id = sr.case_id
+  LEFT JOIN users u ON u.id = sr.requested_by
+  LEFT JOIN firms f ON f.id = sr.firm_id
+`;
+
+async function insertSignatureRequest({ firmId, caseId, documentId, requestedBy, signerName, signerEmail, provider, tokenHash, expiresAt }) {
+  const { rows } = await pool.query(
+    `INSERT INTO signature_requests
+       (firm_id, case_id, document_id, requested_by, signer_name, signer_email, provider, token_hash, expires_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+     RETURNING *`,
+    [firmId, caseId || null, documentId, requestedBy || null, signerName, signerEmail, provider, tokenHash, expiresAt]
+  );
+  return rows[0];
+}
+
+async function getSignatureRequestById(firmId, id) {
+  if (!isUuid(id)) return null;
+  const { rows } = await pool.query(`${SIGNATURE_REQUEST_SELECT} WHERE sr.firm_id = $1 AND sr.id = $2`, [firmId, id]);
+  return rows[0] || null;
+}
+
+async function listSignatureRequestsByCase(firmId, caseId) {
+  const { rows } = await pool.query(
+    `${SIGNATURE_REQUEST_SELECT} WHERE sr.firm_id = $1 AND sr.case_id = $2 ORDER BY sr.requested_at DESC`,
+    [firmId, caseId]
+  );
+  return rows;
+}
+
+async function listSignatureRequestsByFirm(firmId) {
+  const { rows } = await pool.query(
+    `${SIGNATURE_REQUEST_SELECT} WHERE sr.firm_id = $1 ORDER BY sr.requested_at DESC`,
+    [firmId]
+  );
+  return rows;
+}
+
+// Same "invalid token must look identical to expired/spent token" posture
+// as getUsableInviteByTokenHash — only a still-pending, unexpired request
+// is ever returned here.
+async function getUsableSignatureRequestByTokenHash(tokenHash) {
+  const { rows } = await pool.query(
+    `${SIGNATURE_REQUEST_SELECT} WHERE sr.token_hash = $1 AND sr.status = 'sent' AND sr.expires_at > CURRENT_TIMESTAMP`,
+    [tokenHash]
+  );
+  return rows[0] || null;
+}
+
+async function updateSignatureRequestStatus(firmId, id, { status, voidedAt, voidedReason }) {
+  const { rows } = await pool.query(
+    `UPDATE signature_requests SET status = $1, voided_at = $2, voided_reason = $3, updated_at = CURRENT_TIMESTAMP
+     WHERE firm_id = $4 AND id = $5 AND status = 'sent'
+     RETURNING *`,
+    [status, voidedAt || null, voidedReason || null, firmId, id]
+  );
+  return rows[0] || null;
+}
+
+// Race-safe: only completes a request still in 'sent' — same gated-UPDATE
+// pattern as acceptUserInvite, so the same token can't be used twice by
+// two concurrent submits of the public signing page.
+async function completeSignatureRequest(id, { signerTypedName, signerIp, signedDocumentId }) {
+  const { rows } = await pool.query(
+    `UPDATE signature_requests
+     SET status = 'signed', completed_at = CURRENT_TIMESTAMP,
+         signer_typed_name = $1, signer_ip = $2, signed_document_id = $3, updated_at = CURRENT_TIMESTAMP
+     WHERE id = $4 AND status = 'sent'
+     RETURNING *`,
+    [signerTypedName, signerIp || null, signedDocumentId, id]
+  );
+  return rows[0] || null;
+}
+
+async function insertSignatureRequestEvent({ signatureRequestId, eventType, actorId, note }) {
+  const { rows } = await pool.query(
+    `INSERT INTO signature_request_events (signature_request_id, event_type, actor_id, note)
+     VALUES ($1, $2, $3, $4)
+     RETURNING *`,
+    [signatureRequestId, eventType, actorId || null, note || null]
+  );
+  return rows[0];
+}
+
 module.exports = {
   pool,
   DEFAULT_FIRM_ID,
@@ -1798,5 +1901,13 @@ module.exports = {
   updateCaseIntake,
   insertCaseIntakeEvent,
   listCaseIntakeEvents,
-  activateCaseIntake
+  activateCaseIntake,
+  insertSignatureRequest,
+  getSignatureRequestById,
+  listSignatureRequestsByCase,
+  listSignatureRequestsByFirm,
+  getUsableSignatureRequestByTokenHash,
+  updateSignatureRequestStatus,
+  completeSignatureRequest,
+  insertSignatureRequestEvent
 };

@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Sign Document — SLF</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap"
+    rel="stylesheet" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+
+<body class="auth-locked">
+
+  <!-- ══════════════════════════════════════════
+       SIGN-DOCUMENT PAGE
+       Reached only via a one-time link a staff member generated through
+       the Client Communications "Request Signature" quick action (see
+       app.js's openSignatureRequestModal and
+       server/services/signatureService.js). The signer has no account —
+       this page is deliberately outside the main SPA, the same posture
+       accept-invite.html uses for a brand-new user setting their own
+       password. Signing is "type your full name," recorded as
+       signer_typed_name/signer_ip/completed_at on the signature_requests
+       row — it does not alter the underlying document.
+  ══════════════════════════════════════════ -->
+  <div class="auth-overlay" id="authOverlay" style="display:flex">
+    <form class="auth-card" id="signDocumentForm" autocomplete="off">
+      <div class="auth-logo">
+        <div class="logo-icon">
+          <svg viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <rect width="32" height="32" rx="8" fill="url(#authLogoGrad)" />
+            <path d="M16 6L8 12v4l8-4 8 4v-4L16 6z" fill="white" opacity="0.9" />
+            <path d="M10 18v6h4v-4h4v4h4v-6L16 15l-6 3z" fill="white" />
+            <defs>
+              <linearGradient id="authLogoGrad" x1="0" y1="0" x2="32" y2="32" gradientUnits="userSpaceOnUse">
+                <stop stop-color="#C9A84C" /><stop offset="1" stop-color="#A0722A" />
+              </linearGradient>
+            </defs>
+          </svg>
+        </div>
+        <span class="logo-name">SLF</span>
+      </div>
+
+      <!-- Loading state, shown while the token is being validated -->
+      <div id="signLoadingState">
+        <h2 class="auth-title">Checking your signing link…</h2>
+      </div>
+
+      <!-- Invalid/expired/already-signed state -->
+      <div id="signInvalidState" class="hidden">
+        <h2 class="auth-title">This signing link is invalid or expired</h2>
+        <p class="auth-subtitle">Ask the firm to send you a new signature request if you still need to sign.</p>
+      </div>
+
+      <!-- Sign state, shown once the token checks out -->
+      <div id="signFormState" class="hidden">
+        <h2 class="auth-title" id="signWelcomeTitle">Sign document</h2>
+        <p class="auth-subtitle" id="signWelcomeSubtitle"></p>
+
+        <div class="form-group-modal">
+          <label for="signTypedName">Type your full legal name to sign</label>
+          <input type="text" id="signTypedName" placeholder="e.g. Jane Anderson" required autocomplete="off" />
+          <p class="auth-hint" style="text-align:left; margin-top:6px;">Typing your name here and submitting is a
+            legally binding electronic signature on this document, timestamped and recorded with your IP address.</p>
+        </div>
+        <div class="auth-error hidden" id="signError"></div>
+        <button type="submit" class="btn-primary vault-submit-btn" id="signSubmitBtn"
+          style="width:100%">Sign Document</button>
+      </div>
+
+      <!-- Success state, shown after a successful submit -->
+      <div id="signSuccessState" class="hidden">
+        <h2 class="auth-title">Signed — thank you</h2>
+        <p class="auth-subtitle">The firm has been notified that you've signed. You can close this page now.</p>
+      </div>
+    </form>
+  </div>
+
+  <script>
+    'use strict';
+    const $ = (id) => document.getElementById(id);
+
+    function getToken() {
+      return new URLSearchParams(window.location.search).get('token') || '';
+    }
+
+    function showState(name) {
+      ['signLoadingState', 'signInvalidState', 'signFormState', 'signSuccessState'].forEach(id => {
+        $(id).classList.toggle('hidden', id !== name);
+      });
+    }
+
+    async function init() {
+      const token = getToken();
+      if (!token) { showState('signInvalidState'); return; }
+
+      try {
+        const res = await fetch(`/api/v1/auth/sign/${encodeURIComponent(token)}`);
+        const json = await res.json();
+        if (!res.ok || !json.success) throw new Error('invalid');
+
+        $('signWelcomeTitle').textContent = `Hi ${json.data.signer_name.split(' ')[0]}, please review and sign`;
+        $('signWelcomeSubtitle').textContent =
+          `${json.data.firm_name} has sent "${json.data.document_name}"` +
+          (json.data.case_name ? ` (${json.data.case_name})` : '') + ' for your signature.';
+        showState('signFormState');
+      } catch (err) {
+        showState('signInvalidState');
+      }
+    }
+
+    $('signDocumentForm').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const token = getToken();
+      const typedName = $('signTypedName').value;
+      const errBox = $('signError');
+      errBox.classList.add('hidden');
+
+      const btn = $('signSubmitBtn');
+      btn.disabled = true;
+      btn.textContent = 'Signing…';
+
+      try {
+        const res = await fetch(`/api/v1/auth/sign/${encodeURIComponent(token)}/complete`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ typedName })
+        });
+        const json = await res.json();
+        if (!res.ok || !json.success) throw new Error(json.error || 'Failed to sign the document.');
+
+        showState('signSuccessState');
+      } catch (err) {
+        errBox.textContent = err.message;
+        errBox.classList.remove('hidden');
+        btn.disabled = false;
+        btn.textContent = 'Sign Document';
+      }
+    });
+
+    init();
+  </script>
+</body>
+
+</html>

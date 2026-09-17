@@ -228,10 +228,11 @@ class MatterIntakeService {
   }
 
   /**
-   * POST /api/v1/cases/:id/intake/signed — staff uploads the countersigned
-   * copy. No e-signature integration in this pass (see migration 0015's
-   * comment on signed_document_id) — this is a manual upload, same as
-   * attachEngagementLetter.
+   * POST /api/v1/cases/:id/intake/signed — staff manually uploads the
+   * countersigned copy, same as attachEngagementLetter. The alternative
+   * path — a client completing a real e-signature request tied to this
+   * case — is markSignedViaSignatureRequest below, called from
+   * SignatureService.completeSigning instead of this route.
    */
   static async attachSignedDocument(tenantId, actingUser, caseId, file) {
     const intake = await assertIntake(tenantId, caseId);
@@ -244,6 +245,27 @@ class MatterIntakeService {
     return transition(tenantId, actingUser, intake, 'SIGNED',
       { signedDocumentId: document.id, signedAt: new Date() },
       'CASE_INTAKE_SIGNED', { document_id: document.id });
+  }
+
+  /**
+   * Called by SignatureService.completeSigning when a completed signature
+   * request is tied to a case (signature_requests.case_id) — if that
+   * case's intake is waiting on ENGAGEMENT_LETTER_SENT, this advances it
+   * to SIGNED using the just-signed document, exactly like
+   * attachSignedDocument above but driven by the signer's own action
+   * instead of a staff upload. Any other intake state (no intake row at
+   * all, already SIGNED, still drafting the letter, etc.) is silently a
+   * no-op — a signature request isn't required to be tied to an
+   * in-progress intake at all, so this must never throw for callers that
+   * aren't in the one state it applies to.
+   */
+  static async markSignedViaSignatureRequest(tenantId, caseId, documentId, actorId) {
+    const intake = await db.getCaseIntake(tenantId, caseId);
+    if (!intake || intake.state !== 'ENGAGEMENT_LETTER_SENT') return null;
+
+    return transition(tenantId, { id: actorId || null }, intake, 'SIGNED',
+      { signedDocumentId: documentId, signedAt: new Date() },
+      'CASE_INTAKE_SIGNED', { document_id: documentId, via: 'signature_request' });
   }
 
   /**

@@ -2867,6 +2867,7 @@ function renderActiveChat() {
   }
 
   stream.innerHTML = conv.messages.map(m => {
+    const attachmentHtml = renderCommsAttachmentChip(m.attachment);
     if (m.isNote) {
       return `
         <div class="message-row internal-note-side">
@@ -2878,6 +2879,7 @@ function renderActiveChat() {
               Internal Firm Note &mdash; Hidden from Client
             </div>
             <div>${m.text}</div>
+            ${attachmentHtml}
           </div>
           <span class="message-meta">${m.time}</span>
         </div>
@@ -2885,14 +2887,14 @@ function renderActiveChat() {
     } else if (m.sender === 'client') {
       return `
         <div class="message-row client-side">
-          <div class="message-bubble">${m.text}</div>
+          <div class="message-bubble">${m.text}${attachmentHtml}</div>
           <span class="message-meta">${m.time}</span>
         </div>
       `;
     } else {
       return `
         <div class="message-row staff-side">
-          <div class="message-bubble">${m.text}</div>
+          <div class="message-bubble">${m.text}${attachmentHtml}</div>
           <span class="message-meta">${m.time}</span>
         </div>
       `;
@@ -2902,6 +2904,23 @@ function renderActiveChat() {
   setTimeout(() => {
     stream.scrollTop = stream.scrollHeight;
   }, 20);
+}
+
+// A message's `attachment` (see server/services/communicationsService.js's
+// toAttachmentView) is a real document reference now, not just a
+// plain-text mention — renders as a clickable chip that downloads through
+// the same vault download endpoint every other document uses.
+function renderCommsAttachmentChip(attachment) {
+  if (!attachment) return '';
+  return `
+    <a class="comms-attachment-chip" href="/api/v1/files/${attachment.documentId}/download"
+       target="_blank" rel="noopener" style="display:flex;align-items:center;gap:6px;margin-top:8px;padding:6px 10px;border-radius:8px;background:rgba(255,255,255,0.08);text-decoration:none;color:inherit;font-size:12px;">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:14px;height:14px;flex-shrink:0;">
+        <path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/>
+      </svg>
+      <span>${attachment.name}</span>
+    </a>
+  `;
 }
 
 async function selectConversation(id) {
@@ -2953,6 +2972,26 @@ function setupCommsPageListeners() {
     textarea.style.height = (textarea.scrollHeight) + 'px';
   });
 
+  $('signatureRequestModalCloseBtn').addEventListener('click', closeSignatureRequestModal);
+  $('signatureRequestModalCancelBtn').addEventListener('click', closeSignatureRequestModal);
+  $('signatureRequestModal').addEventListener('click', (e) => {
+    if (e.target === $('signatureRequestModal')) closeSignatureRequestModal();
+  });
+  $('signatureLinkModalCloseBtn').addEventListener('click', closeSignatureLinkModal);
+  $('signatureLinkModal').addEventListener('click', (e) => {
+    if (e.target === $('signatureLinkModal')) closeSignatureLinkModal();
+  });
+  $('signatureLinkCopyBtn').addEventListener('click', async () => {
+    const input = $('signatureLinkValue');
+    try {
+      await navigator.clipboard.writeText(input.value);
+      showToast('Signing link copied to clipboard.', 'success');
+    } catch {
+      input.select();
+      showToast('Could not access clipboard — link is selected, copy it manually.', 'error');
+    }
+  });
+
   commsListenersInitialized = true;
 }
 
@@ -2962,7 +3001,7 @@ async function handleSendCommsMessage(event) {
   const toggle = $('internalNoteToggle');
   const text = input.value.trim();
 
-  if (!text || !activeConvId) return;
+  if ((!text && !pendingCommsAttachment) || !activeConvId) return;
 
   const isNote = toggle.checked;
   const sendBtn = $('btnSendSecure');
@@ -2972,11 +3011,15 @@ async function handleSendCommsMessage(event) {
     // isNote is sent as a hint, but the server decides the actual sender
     // — a CLIENT-role caller can never produce a note even if this box is
     // somehow checked (see communicationsService.postMessage).
-    const { ok, json } = await ApiClient.post(`/api/v1/conversations/${activeConvId}/messages`, { text, isNote });
+    const payload = { text: text || `Shared a file: ${pendingCommsAttachment?.name || ''}`, isNote };
+    if (pendingCommsAttachment) payload.attachmentDocumentId = pendingCommsAttachment.id;
+
+    const { ok, json } = await ApiClient.post(`/api/v1/conversations/${activeConvId}/messages`, payload);
     if (!ok) throw new Error(json.error || 'Failed to send message.');
 
     input.value = '';
     input.style.height = 'auto';
+    clearPendingCommsAttachment();
     await loadConversationDetail(activeConvId); // re-fetch the thread so the new message renders with its server-assigned id/timestamp
 
     showToast(isNote ? 'Internal Firm Note saved securely.' : 'Secure Client Message Transmitted successfully.', 'success');
@@ -2995,24 +3038,22 @@ function handleInputQuickAction(action, event) {
     handleCommsAttachClick();
   } else if (action === 'template') {
     toggleCommsTemplateMenu(event.currentTarget);
+  } else if (action === 'signature') {
+    openSignatureRequestModal();
   }
-  // 'signature' has no handler at all — that button is now disabled in
-  // the markup (title="Coming soon...") rather than firing a toast that
-  // implied a real e-signature request was sent. Wiring it for real is a
-  // separate follow-up once an e-signature provider is chosen.
 }
 
 // ── Attach (quick action) ─────────────────────────────────────────────────
 // Reuses the exact same upload path the Document Vault and Cases pages
 // already use (ApiClient.postForm -> POST /api/v1/vault/upload ->
-// VaultService.initiateUpload) — no new storage/upload code. The file is
-// really uploaded and really stored; what's NOT built is a structured
-// "attachment" on the message itself, because conversation_messages has
-// no such column (only body/sender/is_read — see db/schema.sql +
-// migration 0006_message_encryption.sql) and this task explicitly says
-// not to touch the messages schema or its encryption. So the upload is
-// real, and it's referenced in the message as plain text the sender can
-// edit before sending, same as anything else typed into the box.
+// VaultService.initiateUpload) — no new storage/upload code. The uploaded
+// document's real id is held as a pending attachment (see
+// renderPendingCommsAttachment below) and sent as `attachmentDocumentId`
+// on the next POST /conversations/:id/messages — a structured link via
+// conversation_messages.attachment_document_id (migration 0018), not a
+// plain-text mention the sender could edit into something misleading.
+let pendingCommsAttachment = null; // { id, name } | null
+
 function handleCommsAttachClick() {
   const conv = CONVERSATIONS.find(c => c.id === activeConvId);
   if (!conv) return showToast('Select a conversation first.', 'error');
@@ -3038,13 +3079,116 @@ async function uploadCommsAttachment(file, conv) {
     const res = await ApiClient.postForm('/api/v1/vault/upload', formData);
     if (!res.ok) throw new Error(res.json?.error || `Upload failed for ${file.name}.`);
 
-    const textarea = $('commsMessageInput');
-    const mention = `📎 Attached: ${file.name} (uploaded to Document Vault${conv.caseId ? ` — ${conv.caseId}` : ''})`;
-    textarea.value = textarea.value ? `${textarea.value}\n${mention}` : mention;
-    textarea.dispatchEvent(new Event('input')); // reuses the existing auto-grow-height listener
-    showToast(`${file.name} uploaded — reference added to your message.`, 'success');
+    pendingCommsAttachment = { id: res.json.data.document.id, name: file.name };
+    renderPendingCommsAttachment();
+    showToast(`${file.name} uploaded — will be attached to your next message.`, 'success');
   } catch (err) {
     showToast(err.message || 'Failed to upload attachment.', 'error');
+  }
+}
+
+function renderPendingCommsAttachment() {
+  const wrap = $('commsPendingAttachment');
+  if (!wrap) return;
+  if (!pendingCommsAttachment) {
+    wrap.innerHTML = '';
+    wrap.classList.add('hidden');
+    return;
+  }
+  wrap.classList.remove('hidden');
+  wrap.innerHTML = `
+    <span style="display:inline-flex;align-items:center;gap:6px;font-size:12px;padding:4px 8px;border-radius:6px;background:rgba(255,255,255,0.08);">
+      📎 ${pendingCommsAttachment.name}
+      <button type="button" onclick="clearPendingCommsAttachment()" style="background:none;border:none;color:inherit;cursor:pointer;opacity:0.7;padding:0;">✕</button>
+    </span>
+  `;
+}
+
+function clearPendingCommsAttachment() {
+  pendingCommsAttachment = null;
+  renderPendingCommsAttachment();
+}
+
+// ── Request Signature (quick action) ────────────────────────────────────
+// Real requests now (POST /api/v1/signatures — server/services/signatureService.js),
+// replacing the formerly-disabled "Coming soon" button. The document picker
+// is scoped to the active conversation's case, same as Attach's upload
+// scoping above; a conversation with no linked case can't request a
+// signature (nothing to pick from) — same limitation Attach already has
+// implicitly (it just uploads firm-wide instead of failing outright, but a
+// signature request needs a real, already-uploaded document to point at).
+async function openSignatureRequestModal() {
+  const conv = CONVERSATIONS.find(c => c.id === activeConvId);
+  if (!conv) return showToast('Select a conversation first.', 'error');
+  if (!conv.caseId) return showToast('This conversation has no linked case to pick a document from.', 'error');
+
+  $('signatureRequestForm').reset();
+  const select = $('signatureRequestDocument');
+  select.innerHTML = '<option value="">Loading documents…</option>';
+
+  const modal = $('signatureRequestModal');
+  modal.dataset.caseId = conv.caseId;
+  modal.classList.remove('hidden');
+  setTimeout(() => modal.classList.add('active'), 10);
+
+  try {
+    const { ok, json } = await ApiClient.get(`/api/v1/cases/${conv.caseId}/documents`);
+    if (!ok) throw new Error(json.error || 'Failed to load documents.');
+    const docs = json.data || [];
+    select.innerHTML = docs.length
+      ? docs.map(d => `<option value="${d.id}">${d.original_name}</option>`).join('')
+      : '<option value="">No documents on this case yet</option>';
+  } catch (err) {
+    select.innerHTML = '<option value="">Failed to load documents</option>';
+    showToast(err.message || 'Failed to load documents.', 'error');
+  }
+}
+
+function closeSignatureRequestModal() {
+  const modal = $('signatureRequestModal');
+  if (modal) {
+    modal.classList.remove('active');
+    setTimeout(() => modal.classList.add('hidden'), 300);
+    $('signatureRequestForm').reset();
+  }
+}
+
+async function handleSignatureRequestSubmit(e) {
+  e.preventDefault();
+  const modal = $('signatureRequestModal');
+  const caseId = modal.dataset.caseId;
+  const documentId = $('signatureRequestDocument').value;
+  const signerName = $('signatureRequestSignerName').value.trim();
+  const signerEmail = $('signatureRequestSignerEmail').value.trim();
+
+  if (!documentId) return showToast('Choose a document to send for signature.', 'error');
+
+  const submitBtn = $('signatureRequestSubmitBtn');
+  submitBtn.disabled = true;
+  try {
+    const { ok, json } = await ApiClient.post('/api/v1/signatures', { caseId, documentId, signerName, signerEmail });
+    if (!ok) throw new Error(json.error || 'Failed to create signature request.');
+
+    closeSignatureRequestModal();
+    $('signatureLinkSignerName').textContent = signerName;
+    $('signatureLinkValue').value = `${window.location.origin}${json.data.sign_path}`;
+    const linkModal = $('signatureLinkModal');
+    linkModal.classList.remove('hidden');
+    setTimeout(() => linkModal.classList.add('active'), 10);
+
+    showToast('Signature request created.', 'success');
+  } catch (err) {
+    showToast(err.message || 'Failed to create signature request.', 'error');
+  } finally {
+    submitBtn.disabled = false;
+  }
+}
+
+function closeSignatureLinkModal() {
+  const modal = $('signatureLinkModal');
+  if (modal) {
+    modal.classList.remove('active');
+    setTimeout(() => modal.classList.add('hidden'), 300);
   }
 }
 
