@@ -248,7 +248,18 @@ router.get('/invoices', invoiceController.listInvoices);
 router.post('/invoices', requireRole('ASSOCIATE'), invoiceController.createInvoice);
 router.patch('/invoices/:id', requireRole('ASSOCIATE'), invoiceController.updateInvoice);
 router.patch('/invoices/:id/mark-paid', requireRole('PARTNER'), invoiceController.markInvoicePaid);
-router.get('/invoices/:id/line-items', timeEntryController.getInvoiceLineItems);
+// requireRole('ASSOCIATE') — a real broken-access-control bug this route
+// shipped with and a security review caught: db.getInvoiceById (which
+// TimeEntryService.getLineItems calls) is firm-scoped only, by design —
+// its own comment says so — on the assumption that every prior caller
+// was already staff-gated (invoice create/update/markPaid all require
+// ASSOCIATE+/PARTNER+). This route had no such gate, so ANY authenticated
+// CLIENT could read the itemized line-item breakdown — descriptions of
+// billable work, which can be privileged work-product detail — for ANY
+// invoice at their firm, not just one tied to their own case. Verified
+// live before this fix: a client with no relationship to the invoice's
+// case successfully pulled another client's line items over HTTP.
+router.get('/invoices/:id/line-items', requireRole('ASSOCIATE'), timeEntryController.getInvoiceLineItems);
 // Rolls a set of unbilled time entries up into a new invoice, atomically
 // (see db.insertInvoiceFromTimeEntries). Same ASSOCIATE+ floor as creating
 // an invoice directly above — this IS creating an invoice, just from time
