@@ -107,11 +107,15 @@ test('Copilot system prompt is actually wired up', async (t) => {
     const saved = {
       key: process.env.AI_PROVIDER_API_KEY,
       anthropic: process.env.ANTHROPIC_API_KEY,
+      google: process.env.GOOGLE_API_KEY,
+      gemini: process.env.GEMINI_API_KEY,
       provider: process.env.AI_PROVIDER
     };
     delete process.env.AI_PROVIDER_API_KEY;
     delete process.env.ANTHROPIC_API_KEY;
     delete process.env.OPENAI_API_KEY;
+    delete process.env.GOOGLE_API_KEY;
+    delete process.env.GEMINI_API_KEY;
 
     try {
       assert.equal(CopilotAgent.isAvailable(), false, 'with no key, conversational mode must report unavailable');
@@ -122,7 +126,61 @@ test('Copilot system prompt is actually wired up', async (t) => {
     } finally {
       if (saved.key) process.env.AI_PROVIDER_API_KEY = saved.key;
       if (saved.anthropic) process.env.ANTHROPIC_API_KEY = saved.anthropic;
+      if (saved.google) process.env.GOOGLE_API_KEY = saved.google;
+      if (saved.gemini) process.env.GEMINI_API_KEY = saved.gemini;
       if (saved.provider) process.env.AI_PROVIDER = saved.provider;
+    }
+  });
+
+  await t.test('conversational mode is available for Google, same as Anthropic', () => {
+    const CopilotAgent = require('../services/copilotAgent');
+    const saved = { provider: process.env.AI_PROVIDER, key: process.env.AI_PROVIDER_API_KEY };
+    process.env.AI_PROVIDER = 'google';
+    process.env.AI_PROVIDER_API_KEY = 'test-google-key-not-real';
+
+    try {
+      assert.equal(CopilotAgent.isAvailable(), true, 'AI_PROVIDER=google with a key must be available for chat');
+    } finally {
+      if (saved.provider === undefined) delete process.env.AI_PROVIDER; else process.env.AI_PROVIDER = saved.provider;
+      if (saved.key === undefined) delete process.env.AI_PROVIDER_API_KEY; else process.env.AI_PROVIDER_API_KEY = saved.key;
+    }
+  });
+
+  await t.test('conversational mode reports unavailable, by name, for a provider with no chat support (e.g. openai)', () => {
+    const CopilotAgent = require('../services/copilotAgent');
+    const saved = { provider: process.env.AI_PROVIDER, key: process.env.AI_PROVIDER_API_KEY };
+    process.env.AI_PROVIDER = 'openai';
+    process.env.AI_PROVIDER_API_KEY = 'test-openai-key-not-real';
+
+    try {
+      assert.equal(CopilotAgent.isAvailable(), false);
+      assert.match(CopilotAgent.unavailableReason(), /anthropic or google/i);
+    } finally {
+      if (saved.provider === undefined) delete process.env.AI_PROVIDER; else process.env.AI_PROVIDER = saved.provider;
+      if (saved.key === undefined) delete process.env.AI_PROVIDER_API_KEY; else process.env.AI_PROVIDER_API_KEY = saved.key;
+    }
+  });
+
+  await t.test('every Anthropic tool definition has a matching, well-formed Gemini functionDeclaration', () => {
+    const { TOOL_DEFINITIONS } = require('../services/copilotTools');
+    const { GEMINI_TOOLS } = require('../services/copilotAgent');
+
+    const declarations = GEMINI_TOOLS[0].functionDeclarations;
+    assert.equal(declarations.length, TOOL_DEFINITIONS.length, 'every Anthropic tool must have a Gemini counterpart');
+
+    for (const tool of TOOL_DEFINITIONS) {
+      const decl = declarations.find(d => d.name === tool.name);
+      assert.ok(decl, `missing Gemini functionDeclaration for "${tool.name}"`);
+      assert.equal(decl.description, tool.description);
+      // Gemini's Schema.Type is the uppercase enum name, not the lowercase
+      // JSON-Schema string TOOL_DEFINITIONS is written in.
+      assert.equal(decl.parameters.type, tool.input_schema.type.toUpperCase());
+      for (const [propName, propSchema] of Object.entries(tool.input_schema.properties || {})) {
+        assert.equal(
+          decl.parameters.properties[propName].type, propSchema.type.toUpperCase(),
+          `"${tool.name}.${propName}" must be uppercased for Gemini`
+        );
+      }
     }
   });
 });

@@ -2,7 +2,7 @@
  * AI Provider Service
  *
  * Wires all model calls to strictly consume process.env.AI_PROVIDER_API_KEY.
- * Supports Anthropic (Claude), OpenAI, and Vercel AI SDK.
+ * Supports Anthropic (Claude), OpenAI, Google (Gemini), and Vercel AI SDK.
  *
  * IMPORTANT: API keys are NEVER generated, prompted for, or managed programmatically.
  * The user must manually insert keys into .env.local.
@@ -13,11 +13,11 @@ const baseLogger = require('../utils/logger');
 
 /**
  * Get the configured AI provider from environment
- * @returns {'anthropic' | 'openai' | 'vercel-ai'}
+ * @returns {'anthropic' | 'openai' | 'google' | 'vercel-ai'}
  */
 function getProvider() {
   const provider = process.env.AI_PROVIDER?.toLowerCase();
-  if (['anthropic', 'openai', 'vercel-ai'].includes(provider)) {
+  if (['anthropic', 'openai', 'google', 'vercel-ai'].includes(provider)) {
     return provider;
   }
   // Default to anthropic if configured, otherwise return null
@@ -44,13 +44,16 @@ function getApiKey() {
   if (provider === 'openai' && process.env.OPENAI_API_KEY) {
     return process.env.OPENAI_API_KEY;
   }
+  if (provider === 'google' && (process.env.GOOGLE_API_KEY || process.env.GEMINI_API_KEY)) {
+    return process.env.GOOGLE_API_KEY || process.env.GEMINI_API_KEY;
+  }
   if (provider === 'vercel-ai' && process.env.AI_API_KEY) {
     return process.env.AI_API_KEY;
   }
 
   throw new Error(
     `No AI provider API key configured. ` +
-    `Set AI_PROVIDER_API_KEY in .env.local or provider-specific key (ANTHROPIC_API_KEY, OPENAI_API_KEY). ` +
+    `Set AI_PROVIDER_API_KEY in .env.local or provider-specific key (ANTHROPIC_API_KEY, OPENAI_API_KEY, GOOGLE_API_KEY). ` +
     `See .env.example for details.`
   );
 }
@@ -66,6 +69,9 @@ function getModel() {
   }
   if (provider === 'openai') {
     return process.env.OPENAI_MODEL || 'gpt-4o';
+  }
+  if (provider === 'google') {
+    return process.env.GOOGLE_MODEL || 'gemini-3.6-flash';
   }
   if (provider === 'vercel-ai') {
     return process.env.VERCEL_AI_MODEL || 'anthropic/claude-sonnet-5';
@@ -109,7 +115,7 @@ function getStatus() {
     provider: provider || 'none',
     model: configured ? getModel() : null,
     configured,
-    hasApiKey: !!process.env.AI_PROVIDER_API_KEY || !!process.env.ANTHROPIC_API_KEY || !!process.env.OPENAI_API_KEY,
+    hasApiKey: !!process.env.AI_PROVIDER_API_KEY || !!process.env.ANTHROPIC_API_KEY || !!process.env.OPENAI_API_KEY || !!process.env.GOOGLE_API_KEY || !!process.env.GEMINI_API_KEY,
   };
 }
 
@@ -139,6 +145,8 @@ async function chatCompletion(messages, options = {}) {
       return await anthropicChatCompletion(messages, apiKey, model, requestOptions);
     } else if (provider === 'openai') {
       return await openaiChatCompletion(messages, apiKey, model, requestOptions);
+    } else if (provider === 'google') {
+      return await googleChatCompletion(messages, apiKey, model, requestOptions);
     } else if (provider === 'vercel-ai') {
       return await vercelAiChatCompletion(messages, apiKey, model, requestOptions);
     }
@@ -217,6 +225,45 @@ async function openaiChatCompletion(messages, apiKey, model, options) {
 }
 
 /**
+ * Google (Gemini) chat completion, via the Generative Language REST API
+ * directly (no SDK dependency, same posture as the Anthropic/OpenAI
+ * functions above) — https://ai.google.dev/api/generate-content
+ */
+async function googleChatCompletion(messages, apiKey, model, options) {
+  const systemMessage = messages.find(m => m.role === 'system');
+  const turnMessages = messages.filter(m => m.role !== 'system');
+
+  const response = await fetchWithTimeout(
+    `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${apiKey}`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        ...(systemMessage ? { systemInstruction: { parts: [{ text: systemMessage.content }] } } : {}),
+        contents: turnMessages.map(m => ({
+          // Gemini's roles are 'user'/'model', not 'user'/'assistant'.
+          role: m.role === 'assistant' ? 'model' : 'user',
+          parts: [{ text: m.content }],
+        })),
+        generationConfig: {
+          maxOutputTokens: options.maxTokens,
+          temperature: options.temperature,
+        },
+      }),
+    },
+    options.timeout
+  );
+
+  const data = await response.json();
+
+  if (!response.ok) {
+    throw new Error(data.error?.message || `Google AI API error: ${response.status}`);
+  }
+
+  return (data.candidates?.[0]?.content?.parts || []).map(p => p.text || '').join('');
+}
+
+/**
  * Vercel AI SDK chat completion
  * Note: This requires the `ai` package to be installed
  */
@@ -288,6 +335,8 @@ async function streamChatCompletion(messages, onChunk, options = {}) {
     return await anthropicStreamChatCompletion(messages, onChunk, apiKey, model, config);
   } else if (provider === 'openai') {
     return await openaiStreamChatCompletion(messages, onChunk, apiKey, model, config);
+  } else if (provider === 'google') {
+    return await googleStreamChatCompletion(messages, onChunk, apiKey, model, config);
   } else if (provider === 'vercel-ai') {
     // Vercel AI SDK streaming would go here
     return await vercelAiChatCompletion(messages, apiKey, model, config);
@@ -429,6 +478,77 @@ async function openaiStreamChatCompletion(messages, onChunk, apiKey, model, conf
   return fullText;
 }
 
+/**
+ * Google (Gemini) streaming chat completion, via streamGenerateContent
+ * with `alt=sse` so the response arrives as standard `data: <json>` SSE
+ * lines, the same shape the Anthropic/OpenAI streaming functions parse.
+ */
+async function googleStreamChatCompletion(messages, onChunk, apiKey, model, config) {
+  const systemMessage = messages.find(m => m.role === 'system');
+  const turnMessages = messages.filter(m => m.role !== 'system');
+
+  const response = await fetchWithTimeout(
+    `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:streamGenerateContent?alt=sse&key=${apiKey}`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        ...(systemMessage ? { systemInstruction: { parts: [{ text: systemMessage.content }] } } : {}),
+        contents: turnMessages.map(m => ({
+          role: m.role === 'assistant' ? 'model' : 'user',
+          parts: [{ text: m.content }],
+        })),
+        generationConfig: {
+          maxOutputTokens: config.maxTokens,
+          temperature: config.temperature,
+        },
+      }),
+    },
+    config.timeout
+  );
+
+  if (!response.ok) {
+    const data = await response.json();
+    throw new Error(data.error?.message || `Google AI API error: ${response.status}`);
+  }
+
+  let fullText = '';
+  const reader = response.body?.getReader();
+  const decoder = new TextDecoder();
+
+  if (!reader) {
+    throw new Error('No response body reader available');
+  }
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+
+    const chunk = decoder.decode(value, { stream: true });
+    const lines = chunk.split('\n');
+
+    for (const line of lines) {
+      if (line.startsWith('data: ')) {
+        const data = line.slice(6);
+        if (!data || data === '[DONE]') continue;
+
+        try {
+          const parsed = JSON.parse(data);
+          const text = (parsed.candidates?.[0]?.content?.parts || []).map(p => p.text || '').join('');
+          if (text) {
+            fullText += text;
+            onChunk(text);
+          }
+        } catch {
+          // Ignore parse errors for non-JSON lines
+        }
+      }
+    }
+  }
+
+  return fullText;
+}
+
 module.exports = {
   getProvider,
   getApiKey,
@@ -438,4 +558,8 @@ module.exports = {
   getStatus,
   chatCompletion,
   streamChatCompletion,
+  // Exposed so other services (e.g. copilotAgent.js's Gemini tool-calling
+  // loop) can make their own provider-specific requests without
+  // duplicating the timeout-wrapping logic.
+  fetchWithTimeout,
 };

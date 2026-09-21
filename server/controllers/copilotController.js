@@ -259,7 +259,7 @@ function buildMetadataSummary(doc) {
     author_name: doc.author_name,
     tags: doc.tags || [],
     size_mb: sizeMb,
-    updated_at: doc.updated_at,
+    updated_at: new Date(doc.updated_at).toISOString(),
     // Default false: this function never reads the document. A caller that
     // DID read the text overrides this explicitly.
     content_read: false,
