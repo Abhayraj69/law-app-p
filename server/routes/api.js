@@ -31,6 +31,8 @@ const trustController = require('../controllers/trustController');
 const matterIntakeController = require('../controllers/matterIntakeController');
 const signatureController = require('../controllers/signatureController');
 const timeEntryController = require('../controllers/timeEntryController');
+const hearingController = require('../controllers/hearingController');
+const taskController = require('../controllers/taskController');
 
 // Apply Global Tenant Authentication & User Context
 router.use(authMiddleware);
@@ -168,6 +170,7 @@ router.post(
   caseController.uploadCaseDocument
 );
 router.get('/cases/:id/deadlines', caseController.getCaseDeadlines);
+router.get('/cases/:id/hearings', hearingController.listHearingsForCase);
 router.get('/cases/:id/activity', caseController.getCaseActivity);
 // Case audit entries are logged directly by CaseService (not via
 // logAuditAction) because that middleware's document_id column expects a
@@ -279,6 +282,32 @@ router.get('/time-entries', requireRole('PARALEGAL'), timeEntryController.listTi
 router.post('/time-entries', requireRole('PARALEGAL'), timeEntryController.createTimeEntry);
 router.patch('/time-entries/:id', requireRole('PARALEGAL'), timeEntryController.updateTimeEntry);
 router.delete('/time-entries/:id', requireRole('PARALEGAL'), timeEntryController.deleteTimeEntry);
+
+// ═════════════════════════════════════════════════════════════════════
+// G2c. HEARING LOG
+// requireRole('PARALEGAL') for scheduling/reads (routine data entry, same
+// floor as time tracking); requireRole('ASSOCIATE') for the structured
+// post-hearing update (PATCH .../log) — the roadmap calls this out
+// specifically as "associate-facing," and it's what drives the reminder
+// engine (server/services/reminderEngine.js), unlike a plain reschedule.
+// ═════════════════════════════════════════════════════════════════════
+router.get('/hearings', requireRole('PARALEGAL'), hearingController.listHearings);
+router.post('/hearings', requireRole('PARALEGAL'), hearingController.createHearing);
+router.patch('/hearings/:id', requireRole('PARALEGAL'), hearingController.updateHearing);
+router.patch('/hearings/:id/log', requireRole('ASSOCIATE'), hearingController.logHearingUpdate);
+router.delete('/hearings/:id', requireRole('ASSOCIATE'), hearingController.deleteHearing);
+
+// ═════════════════════════════════════════════════════════════════════
+// G2d. TASKS / REMINDERS
+// requireRole('PARALEGAL') — same "routine own work" floor as time
+// tracking and the hearing log above. No per-user ownership restriction on
+// reads: a task list is meant to be visible firm-wide (who's behind on
+// what), matching how hearings/case_deadlines already behave.
+// ═════════════════════════════════════════════════════════════════════
+router.get('/tasks', requireRole('PARALEGAL'), taskController.listTasks);
+router.post('/tasks', requireRole('PARALEGAL'), taskController.createTask);
+router.patch('/tasks/:id', requireRole('PARALEGAL'), taskController.updateTask);
+router.delete('/tasks/:id', requireRole('PARALEGAL'), taskController.deleteTask);
 
 // ═════════════════════════════════════════════════════════════════════
 // G3. TRUST ACCOUNTING

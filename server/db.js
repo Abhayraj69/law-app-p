@@ -1514,6 +1514,190 @@ async function getInvoiceStats(firmId) {
   };
 }
 
+// ═════════════════════════════════════════════════════════════════════
+// HEARINGS & TASKS (db/migrations/0022_hearings_and_tasks.sql)
+// ═════════════════════════════════════════════════════════════════════
+
+const HEARING_SELECT = `SELECT hearings.*, cases.case_name, u.full_name AS updated_by_name
+     FROM hearings
+     JOIN cases ON cases.id = hearings.case_id
+     LEFT JOIN users u ON u.id = hearings.updated_by_user_id`;
+
+async function getHearingById(firmId, hearingId) {
+  const { rows } = await pool.query(`${HEARING_SELECT} WHERE hearings.firm_id = $1 AND hearings.id = $2`, [firmId, hearingId]);
+  return rows[0] || null;
+}
+
+// Firm-wide read — a hearing has no per-client ownership column (same as
+// case_deadlines), so role scoping for a CLIENT caller is enforced one
+// level up, by HearingService verifying case ownership via
+// db.getCaseByIdForUser before ever calling this.
+async function listHearingsForFirm(firmId, { caseId, status, fromDate, toDate } = {}) {
+  const values = [firmId];
+  let query = `${HEARING_SELECT} WHERE hearings.firm_id = $1`;
+  if (caseId) { values.push(caseId); query += ` AND hearings.case_id = $${values.length}`; }
+  if (status) { values.push(status); query += ` AND hearings.status = $${values.length}`; }
+  if (fromDate) { values.push(fromDate); query += ` AND hearings.hearing_date >= $${values.length}`; }
+  if (toDate) { values.push(toDate); query += ` AND hearings.hearing_date <= $${values.length}`; }
+  query += ' ORDER BY hearings.hearing_date ASC';
+  const { rows } = await pool.query(query, values);
+  return rows;
+}
+
+async function insertHearing({ firmId, caseId, hearingDate, courtHall, purpose }) {
+  const { rows } = await pool.query(
+    `INSERT INTO hearings (firm_id, case_id, hearing_date, court_hall, purpose)
+     VALUES ($1, $2, $3, $4, $5)
+     RETURNING id`,
+    [firmId, caseId, hearingDate, courtHall || null, purpose || null]
+  );
+  return getHearingById(firmId, rows[0].id);
+}
+
+// General field update, used both for lightweight edits (moving a
+// scheduled date/court hall) and for the associate-facing structured
+// update (submissions/orders_passed/next_hearing_date/risk_flag/
+// suggested_draft/status/updated_by_user_id all at once) — HearingService
+// decides which fields a given call is allowed to set.
+async function updateHearingFields(firmId, hearingId, updates = {}) {
+  const fieldMap = {
+    hearingDate: 'hearing_date', courtHall: 'court_hall', purpose: 'purpose',
+    submissions: 'submissions', ordersPassed: 'orders_passed', nextHearingDate: 'next_hearing_date',
+    riskFlag: 'risk_flag', suggestedDraft: 'suggested_draft', status: 'status',
+    updatedByUserId: 'updated_by_user_id'
+  };
+  const setClauses = [];
+  const values = [];
+  let i = 1;
+  for (const [key, column] of Object.entries(fieldMap)) {
+    if (updates[key] !== undefined) {
+      setClauses.push(`${column} = $${i}`);
+      values.push(updates[key]);
+      i++;
+    }
+  }
+  if (!setClauses.length) return getHearingById(firmId, hearingId);
+  setClauses.push('updated_at = CURRENT_TIMESTAMP');
+  values.push(firmId, hearingId);
+  await pool.query(`UPDATE hearings SET ${setClauses.join(', ')} WHERE firm_id = $${i} AND id = $${i + 1}`, values);
+  return getHearingById(firmId, hearingId);
+}
+
+async function deleteHearingRow(firmId, hearingId) {
+  const { rowCount } = await pool.query('DELETE FROM hearings WHERE firm_id = $1 AND id = $2', [firmId, hearingId]);
+  return rowCount;
+}
+
+const TASK_SELECT = `SELECT tasks.*, cases.case_name,
+       au.full_name AS assigned_to_name, cu.full_name AS created_by_name
+     FROM tasks
+     LEFT JOIN cases ON cases.id = tasks.case_id
+     LEFT JOIN users au ON au.id = tasks.assigned_to_user_id
+     LEFT JOIN users cu ON cu.id = tasks.created_by_user_id`;
+
+async function getTaskById(firmId, taskId) {
+  const { rows } = await pool.query(`${TASK_SELECT} WHERE tasks.firm_id = $1 AND tasks.id = $2`, [firmId, taskId]);
+  return rows[0] || null;
+}
+
+async function listTasksForFirm(firmId, { caseId, status, assignedToUserId, taskType } = {}) {
+  const values = [firmId];
+  let query = `${TASK_SELECT} WHERE tasks.firm_id = $1`;
+  if (caseId) { values.push(caseId); query += ` AND tasks.case_id = $${values.length}`; }
+  if (status) { values.push(status); query += ` AND tasks.status = $${values.length}`; }
+  if (assignedToUserId) { values.push(assignedToUserId); query += ` AND tasks.assigned_to_user_id = $${values.length}`; }
+  if (taskType) { values.push(taskType); query += ` AND tasks.task_type = $${values.length}`; }
+  // Undated tasks sort after dated ones rather than first (the default
+  // NULLS FIRST for ASC), since "no due date" is lower urgency, not higher.
+  query += ' ORDER BY (tasks.due_date IS NULL), tasks.due_date ASC, tasks.created_at DESC';
+  const { rows } = await pool.query(query, values);
+  return rows;
+}
+
+// Used by TaskService.createAutoTask to stay idempotent: the reminder
+// engine re-derives its task specs every time a hearing update is logged
+// (an associate can log an update more than once, e.g. correcting a typo),
+// and must not spawn a second 'follow_up'/'draft_needed' task for the same
+// hearing every time it does.
+async function findOpenAutoTaskForHearing(firmId, hearingId, taskType) {
+  const { rows } = await pool.query(
+    `SELECT * FROM tasks WHERE firm_id = $1 AND hearing_id = $2 AND task_type = $3
+       AND auto_generated = TRUE AND status IN ('open', 'in_progress')
+     LIMIT 1`,
+    [firmId, hearingId, taskType]
+  );
+  return rows[0] || null;
+}
+
+async function insertTask({ firmId, caseId, hearingId, title, description, taskType, dueDate, assignedToUserId, createdByUserId, autoGenerated }) {
+  const { rows } = await pool.query(
+    `INSERT INTO tasks (firm_id, case_id, hearing_id, title, description, task_type, due_date, assigned_to_user_id, created_by_user_id, auto_generated)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, COALESCE($10, FALSE))
+     RETURNING id`,
+    [firmId, caseId || null, hearingId || null, title, description || null, taskType || 'general', dueDate || null, assignedToUserId || null, createdByUserId || null, autoGenerated]
+  );
+  return getTaskById(firmId, rows[0].id);
+}
+
+async function updateTaskFields(firmId, taskId, updates = {}) {
+  const fieldMap = {
+    title: 'title', description: 'description', taskType: 'task_type', dueDate: 'due_date',
+    status: 'status', assignedToUserId: 'assigned_to_user_id'
+  };
+  const setClauses = [];
+  const values = [];
+  let i = 1;
+  for (const [key, column] of Object.entries(fieldMap)) {
+    if (updates[key] !== undefined) {
+      setClauses.push(`${column} = $${i}`);
+      values.push(updates[key]);
+      i++;
+    }
+  }
+  if (!setClauses.length) return getTaskById(firmId, taskId);
+  setClauses.push('updated_at = CURRENT_TIMESTAMP');
+  values.push(firmId, taskId);
+  await pool.query(`UPDATE tasks SET ${setClauses.join(', ')} WHERE firm_id = $${i} AND id = $${i + 1}`, values);
+  return getTaskById(firmId, taskId);
+}
+
+async function deleteTaskRow(firmId, taskId) {
+  const { rowCount } = await pool.query('DELETE FROM tasks WHERE firm_id = $1 AND id = $2', [firmId, taskId]);
+  return rowCount;
+}
+
+// Dashboard's three Phase 1 ops metrics — each a single COUNT(*), firm-wide
+// (same posture as the existing hearings/messages widgets — see
+// dashboardService.js's KNOWN LIMITATION comment), gated to staff-only
+// users at the DashboardService layer rather than here.
+async function getHearingsListedThisWeekCount(firmId) {
+  const { rows } = await pool.query(
+    `SELECT COUNT(*)::int AS n FROM hearings
+      WHERE firm_id = $1 AND status = 'scheduled'
+        AND hearing_date >= CURRENT_DATE AND hearing_date < CURRENT_DATE + INTERVAL '7 days'`,
+    [firmId]
+  );
+  return rows[0].n;
+}
+
+async function getHearingsNotUpdatedCount(firmId) {
+  const { rows } = await pool.query(
+    `SELECT COUNT(*)::int AS n FROM hearings
+      WHERE firm_id = $1 AND status = 'scheduled' AND hearing_date < CURRENT_DATE`,
+    [firmId]
+  );
+  return rows[0].n;
+}
+
+async function getTasksAwaitingDraftCount(firmId) {
+  const { rows } = await pool.query(
+    `SELECT COUNT(*)::int AS n FROM tasks
+      WHERE firm_id = $1 AND task_type = 'draft_needed' AND status IN ('open', 'in_progress')`,
+    [firmId]
+  );
+  return rows[0].n;
+}
+
 // ── Conversations / threaded client communications ──────────────────────
 // Same role-scoping rule as cases: a CLIENT only ever sees conversations
 // where client_user_id matches their own id.
@@ -2256,6 +2440,20 @@ module.exports = {
   markInvoicePaidRow,
   getMonthlyBillingTotals,
   getInvoiceStats,
+  getHearingById,
+  listHearingsForFirm,
+  insertHearing,
+  updateHearingFields,
+  deleteHearingRow,
+  getTaskById,
+  listTasksForFirm,
+  findOpenAutoTaskForHearing,
+  insertTask,
+  updateTaskFields,
+  deleteTaskRow,
+  getHearingsListedThisWeekCount,
+  getHearingsNotUpdatedCount,
+  getTasksAwaitingDraftCount,
   listConversationsForUser,
   getConversationWithMessages,
   insertConversation,

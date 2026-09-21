@@ -54,6 +54,14 @@ const ACTIVITY_LABEL_BY_ACTION = {
   COPILOT_UPDATE_CASE: 'AI Copilot updated a case'
 };
 
+// Same "everyone except CLIENT" rule caseService.js/communicationsService.js
+// apply elsewhere — the three Phase 1 ops metrics below (listed this week,
+// non-updated after hearing, awaiting draft) are internal practice-ops
+// numbers, not something a client's dashboard should show.
+function isStaff(user) {
+  return !!user && user.role !== 'CLIENT';
+}
+
 function relativeTime(date) {
   const diffMs = Date.now() - new Date(date).getTime();
   const diffMin = Math.floor(diffMs / 60000);
@@ -79,13 +87,25 @@ function toActivityView(row) {
 
 class DashboardService {
   static async getSummary(tenantId, user) {
-    const [counts, billingData, invoiceStats, deadlines, messages, activity] = await Promise.all([
+    const staff = isStaff(user);
+
+    const [counts, billingData, invoiceStats, deadlines, messages, activity, ops] = await Promise.all([
       db.getDashboardCounts(tenantId, user),
       db.getMonthlyBillingTotals(tenantId),
       db.getInvoiceStats(tenantId),
       IntegrationService.getDeadlines(tenantId),
       IntegrationService.getFlaggedMessages(tenantId),
-      db.listRecentAuditActivity(tenantId, 6)
+      db.listRecentAuditActivity(tenantId, 6),
+      // Phase 1 ops metrics — skipped entirely (not just hidden) for a
+      // CLIENT viewer, same posture as the case/document/message counts in
+      // getDashboardCounts already take for anything client-sensitive.
+      staff
+        ? Promise.all([
+            db.getHearingsListedThisWeekCount(tenantId),
+            db.getHearingsNotUpdatedCount(tenantId),
+            db.getTasksAwaitingDraftCount(tenantId)
+          ])
+        : Promise.resolve(null)
     ]);
 
     return {
@@ -115,7 +135,15 @@ class DashboardService {
         unread: m.is_unread ? 1 : 0,
         unreadItem: m.is_unread
       })),
-      activity: activity.map(toActivityView)
+      activity: activity.map(toActivityView),
+      // null for a CLIENT viewer — see the staff ? ... : null above —
+      // rather than a fake all-zero object, so the frontend can tell
+      // "not applicable to you" apart from "genuinely zero right now".
+      ops: ops ? {
+        listed_this_week: ops[0],
+        not_updated_after_hearing: ops[1],
+        awaiting_draft: ops[2]
+      } : null
     };
   }
 }

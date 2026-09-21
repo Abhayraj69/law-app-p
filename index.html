@@ -147,6 +147,20 @@
               <span class="nav-text">Billing</span>
             </a>
           </li>
+          <li class="nav-item" data-page="hearings">
+            <a href="#" class="nav-link" id="nav-hearings">
+              <span class="nav-icon">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+                  <path d="M12 2l8 4v6c0 5-3.5 8.5-8 10-4.5-1.5-8-5-8-10V6l8-4z" opacity="0" />
+                  <rect x="3" y="4" width="18" height="18" rx="2" ry="2" />
+                  <line x1="16" y1="2" x2="16" y2="6" />
+                  <line x1="8" y1="2" x2="8" y2="6" />
+                  <line x1="3" y1="10" x2="21" y2="10" />
+                </svg>
+              </span>
+              <span class="nav-text">Hearings</span>
+            </a>
+          </li>
           <li class="nav-item hidden" data-page="trust" id="navTrustItem">
             <a href="#" class="nav-link" id="nav-trust">
               <span class="nav-icon">
@@ -537,6 +551,31 @@
             </div>
             <div class="hearings-list" id="hearingsList"></div>
           </div>
+
+          <!-- OPS METRICS (Phase 1) — null for a CLIENT viewer, see
+               DashboardService.getSummary; hidden entirely in that case
+               rather than shown with fake zeros. -->
+          <section class="vault-kpi-row hidden" id="dashboardOpsRow" style="margin-top:20px;">
+            <div class="vault-kpi-card" id="opsKpiListedThisWeek">
+              <div class="kpi-card-header">
+                <span class="kpi-title">LISTED THIS WEEK</span>
+              </div>
+              <div class="kpi-value" id="opsValListedThisWeek">0</div>
+            </div>
+            <div class="vault-kpi-card" id="opsKpiNotUpdated">
+              <div class="kpi-card-header">
+                <span class="kpi-title">NON-UPDATED AFTER HEARING</span>
+                <span class="kpi-badge" id="opsBadgeNotUpdated" style="background:rgba(231,76,60,0.15); color:#E74C3C;">Attention</span>
+              </div>
+              <div class="kpi-value" id="opsValNotUpdated">0</div>
+            </div>
+            <div class="vault-kpi-card" id="opsKpiAwaitingDraft">
+              <div class="kpi-card-header">
+                <span class="kpi-title">AWAITING DRAFT</span>
+              </div>
+              <div class="kpi-value" id="opsValAwaitingDraft">0</div>
+            </div>
+          </section>
 
           <!-- RECENT MESSAGES -->
           <div class="panel messages-panel">
@@ -1533,6 +1572,100 @@
       <!-- /TIME ENTRIES TAB -->
     </main>
 
+    <!-- HEARINGS PAGE -->
+    <main class="content hidden" id="hearingsPage">
+      <div class="page-header-row">
+        <h2 class="cases-page-title">Hearing Log</h2>
+        <button class="btn-primary" id="hearingNewBtn">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+            style="width: 14px; height: 14px; vertical-align: middle; margin-right: 4px;">
+            <line x1="12" y1="5" x2="12" y2="19" />
+            <line x1="5" y1="12" x2="19" y2="12" />
+          </svg>
+          + Schedule Hearing
+        </button>
+      </div>
+
+      <div class="command-bar">
+        <div class="search-box">
+          <svg class="search-box-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="11" cy="11" r="8" />
+            <path d="M21 21l-4.35-4.35" />
+          </svg>
+          <input type="text" id="hearingSearch" placeholder="Search by case, court hall, or purpose..."
+            autocomplete="off" />
+        </div>
+        <div class="filter-row">
+          <div class="filter-group">
+            <span class="filter-label">Status:</span>
+            <div class="pill-group" id="hearingStatusFilterPills">
+              <button class="pill active" data-value="all">All</button>
+              <button class="pill" data-value="scheduled">Scheduled</button>
+              <button class="pill" data-value="held">Held</button>
+              <button class="pill" data-value="adjourned">Adjourned</button>
+              <button class="pill" data-value="disposed">Disposed</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="panel table-panel edge-to-edge">
+        <div class="table-container">
+          <table class="cases-large-table" id="hearingTable">
+            <thead>
+              <tr>
+                <th>Date</th>
+                <th>Case</th>
+                <th>Court Hall</th>
+                <th>Purpose</th>
+                <th>Status</th>
+                <th>Risk</th>
+                <th>Next Date</th>
+                <th style="width: 140px;">Actions</th>
+              </tr>
+            </thead>
+            <tbody id="hearingTableBody">
+              <!-- Rendered Dynamically -->
+            </tbody>
+          </table>
+        </div>
+
+        <div class="empty-state-container hidden" id="hearingEmptyState">
+          <h3 class="empty-state-title">No hearings found</h3>
+          <p class="empty-state-description">Schedule a hearing against a case, then log what happened once it's
+            held — that's what feeds the reminder engine's follow-up and draft tasks.</p>
+        </div>
+      </div>
+
+      <div class="page-header-row" style="margin-top:28px;">
+        <h2 class="cases-page-title" style="font-size:16px;">Open Tasks</h2>
+      </div>
+      <div class="panel table-panel edge-to-edge">
+        <div class="table-container">
+          <table class="cases-large-table" id="hearingTaskTable">
+            <thead>
+              <tr>
+                <th>Task</th>
+                <th>Case</th>
+                <th>Type</th>
+                <th>Due</th>
+                <th>Source</th>
+                <th style="width: 100px;">Actions</th>
+              </tr>
+            </thead>
+            <tbody id="hearingTaskTableBody">
+              <!-- Rendered Dynamically -->
+            </tbody>
+          </table>
+        </div>
+        <div class="empty-state-container hidden" id="hearingTaskEmptyState">
+          <h3 class="empty-state-title">No open tasks</h3>
+          <p class="empty-state-description">Tasks appear here once created manually or generated automatically
+            from a hearing update.</p>
+        </div>
+      </div>
+    </main>
+
     <!-- TRUST ACCOUNTING PAGE -->
     <main class="content hidden" id="trustPage">
       <div class="page-header-row">
@@ -2051,6 +2184,104 @@
             <button type="submit" class="btn-primary" id="timeEntrySubmitBtn"
               style="background: var(--gold-500); color: var(--navy-950); font-weight: 600; border: none;">Log
               Time</button>
+          </div>
+        </form>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal-overlay hidden" id="hearingModal">
+    <div class="modal-box">
+      <div class="modal-header">
+        <h3 class="modal-title">Schedule Hearing</h3>
+        <button class="modal-close-btn" id="hearingModalCloseBtn">&times;</button>
+      </div>
+      <div class="modal-body">
+        <form id="hearingForm" data-action="submit-hearing">
+          <div class="form-row-two">
+            <div class="form-group-modal">
+              <label for="hearingCase">Case</label>
+              <select id="hearingCase" required>
+                <option value="">Select a case…</option>
+              </select>
+            </div>
+            <div class="form-group-modal">
+              <label for="hearingDate">Hearing Date</label>
+              <input type="date" id="hearingDate" required />
+            </div>
+          </div>
+          <div class="form-row-two">
+            <div class="form-group-modal">
+              <label for="hearingCourtHall">Court Hall</label>
+              <input type="text" id="hearingCourtHall" placeholder="e.g. Court Hall 3" />
+            </div>
+            <div class="form-group-modal">
+              <label for="hearingPurpose">Purpose</label>
+              <input type="text" id="hearingPurpose" placeholder="e.g. Arguments" />
+            </div>
+          </div>
+          <div class="modal-footer">
+            <button type="button" class="btn-ghost" id="hearingModalCancelBtn">Cancel</button>
+            <button type="submit" class="btn-primary" id="hearingSubmitBtn"
+              style="background: var(--gold-500); color: var(--navy-950); font-weight: 600; border: none;">Schedule</button>
+          </div>
+        </form>
+      </div>
+    </div>
+  </div>
+
+  <!-- The associate-facing structured update — logging what happened at a
+       hearing. Submitting this is what runs the reminder engine (see
+       HearingService.logHearingUpdate) — scheduling/editing a hearing via
+       the modal above never does. -->
+  <div class="modal-overlay hidden" id="hearingLogModal">
+    <div class="modal-box">
+      <div class="modal-header">
+        <h3 class="modal-title">Log Hearing Update</h3>
+        <button class="modal-close-btn" id="hearingLogModalCloseBtn">&times;</button>
+      </div>
+      <div class="modal-body">
+        <form id="hearingLogForm" data-action="submit-hearing-log">
+          <div class="form-group-modal">
+            <label for="hearingLogSubmissions">Submissions</label>
+            <textarea id="hearingLogSubmissions" rows="3" placeholder="What was submitted / argued?"></textarea>
+          </div>
+          <div class="form-group-modal">
+            <label for="hearingLogOrdersPassed">Order Passed</label>
+            <textarea id="hearingLogOrdersPassed" rows="3" placeholder="What order did the court pass?"></textarea>
+          </div>
+          <div class="form-row-two">
+            <div class="form-group-modal">
+              <label for="hearingLogNextDate">Next Hearing Date</label>
+              <input type="date" id="hearingLogNextDate" />
+            </div>
+            <div class="form-group-modal">
+              <label for="hearingLogRiskFlag">Risk Flag</label>
+              <select id="hearingLogRiskFlag">
+                <option value="none">None</option>
+                <option value="watch">Watch</option>
+                <option value="urgent">Urgent</option>
+              </select>
+            </div>
+          </div>
+          <div class="form-row-two">
+            <div class="form-group-modal">
+              <label for="hearingLogSuggestedDraft">Suggested Draft (optional)</label>
+              <input type="text" id="hearingLogSuggestedDraft" placeholder="e.g. Adjournment Application" />
+            </div>
+            <div class="form-group-modal">
+              <label for="hearingLogStatus">Status</label>
+              <select id="hearingLogStatus">
+                <option value="held">Held</option>
+                <option value="adjourned">Adjourned</option>
+                <option value="disposed">Disposed</option>
+              </select>
+            </div>
+          </div>
+          <div class="modal-footer">
+            <button type="button" class="btn-ghost" id="hearingLogModalCancelBtn">Cancel</button>
+            <button type="submit" class="btn-primary" id="hearingLogSubmitBtn"
+              style="background: var(--gold-500); color: var(--navy-950); font-weight: 600; border: none;">Save Update</button>
           </div>
         </form>
       </div>

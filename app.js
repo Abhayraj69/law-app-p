@@ -489,6 +489,7 @@ function navigateToPage(page) {
     communications: 'Client Communications',
     documents:      'Document Vault',
     billing:        'Billing & Invoices',
+    hearings:       'Hearing Log',
     trust:          'Trust Accounting',
     settings:       'Settings',
   };
@@ -499,6 +500,7 @@ function navigateToPage(page) {
   const commsPage = $('commsPage');
   const documentsPage = $('documentsPage');
   const billingPage = $('billingPage');
+  const hearingsPage = $('hearingsPage');
   const trustPage = $('trustPage');
   const settingsPage = $('settingsPage');
   const placeholder = $('placeholderPage');
@@ -509,6 +511,7 @@ function navigateToPage(page) {
   if (commsPage) commsPage.classList.add('hidden');
   if (documentsPage) documentsPage.classList.add('hidden');
   if (billingPage) billingPage.classList.add('hidden');
+  if (hearingsPage) hearingsPage.classList.add('hidden');
   if (trustPage) trustPage.classList.add('hidden');
   if (settingsPage) settingsPage.classList.add('hidden');
   if (placeholder) placeholder.classList.add('hidden');
@@ -537,6 +540,11 @@ function navigateToPage(page) {
     if (billingPage) {
       billingPage.classList.remove('hidden');
       initBillingPage();
+    }
+  } else if (page === 'hearings') {
+    if (hearingsPage) {
+      hearingsPage.classList.remove('hidden');
+      initHearingsPage();
     }
   } else if (page === 'trust') {
     if (trustPage) {
@@ -831,9 +839,26 @@ async function loadDashboard() {
 
     ACTIVITIES = data.activity;
     renderActivityFeed();
+
+    renderOpsMetrics(data.ops);
   } catch (err) {
     console.error('Dashboard load error', err);
   }
+}
+
+// data.ops is null for a CLIENT viewer (see DashboardService.getSummary) —
+// the whole row stays hidden rather than showing fake zeros in that case.
+function renderOpsMetrics(ops) {
+  const row = $('dashboardOpsRow');
+  if (!row) return;
+  if (!ops) {
+    row.classList.add('hidden');
+    return;
+  }
+  row.classList.remove('hidden');
+  if ($('opsValListedThisWeek')) $('opsValListedThisWeek').textContent = ops.listed_this_week;
+  if ($('opsValNotUpdated')) $('opsValNotUpdated').textContent = ops.not_updated_after_hearing;
+  if ($('opsValAwaitingDraft')) $('opsValAwaitingDraft').textContent = ops.awaiting_draft;
 }
 
 // Backs both the dashboard's "Recent Case Activity" mini table
@@ -2933,6 +2958,307 @@ registerActions({
   'delete-time-entry': (el) => handleDeleteTimeEntry(el.dataset.entryId, el.dataset.entryDescription),
   'generate-invoice-from-time': () => handleGenerateInvoiceFromTime(),
   'clear-time-entry-selection': () => clearTimeEntrySelection(),
+});
+
+/* ════════════════════════════════════════════
+   HEARING LOG PAGE
+   Backs GET/POST/PATCH /api/v1/hearings and GET/POST/PATCH/DELETE
+   /api/v1/tasks — see server/services/hearingService.js and
+   server/services/reminderEngine.js. Scheduling a hearing (the
+   "hearingModal") never generates tasks; only the associate-facing
+   structured update ("hearingLogModal", PATCH .../log) does — that's
+   the one call site that runs the reminder engine server-side.
+   ════════════════════════════════════════════ */
+
+let HEARING_LOG = [];
+let HEARING_TASKS = [];
+let hearingsLoadedOnce = false;
+let hearingListenersInitialized = false;
+let hearingStatusFilter = 'all';
+let hearingSearchQuery = '';
+let currentHearingLogId = null;
+
+// Mirrors the server's requireRole('ASSOCIATE') floor on
+// PATCH /api/v1/hearings/:id/log (server/routes/api.js) — the roadmap
+// calls this out specifically as "associate-facing." Scheduling a hearing
+// and managing tasks stay at the PARALEGAL floor the route itself enforces,
+// same as time tracking, so no separate client-side gate is needed for those.
+function canLogHearingUpdate() {
+  const role = Auth.getUser() && Auth.getUser().role;
+  return role === 'ASSOCIATE' || role === 'PARTNER' || role === 'SENIOR_PARTNER' || role === 'ADMIN';
+}
+
+function initHearingsPage() {
+  hearingsLoadedOnce = true;
+  setupHearingListeners();
+  loadHearingLog();
+  loadHearingTasks();
+}
+
+async function loadHearingLog() {
+  try {
+    HEARING_LOG = await ApiClient.get('/api/v1/hearings');
+    renderHearingTable();
+  } catch (err) {
+    console.error('Hearings load error', err);
+    const tbody = $('hearingTableBody');
+    if (tbody) tbody.innerHTML = `<tr><td colspan="8" style="text-align:center;color:var(--slate-400)">Error loading hearings</td></tr>`;
+  }
+}
+
+async function loadHearingTasks() {
+  try {
+    HEARING_TASKS = await ApiClient.get('/api/v1/tasks?status=open');
+    renderHearingTaskTable();
+  } catch (err) {
+    console.error('Tasks load error', err);
+  }
+}
+
+function filteredHearings() {
+  const q = hearingSearchQuery.toLowerCase();
+  return HEARING_LOG.filter(h => {
+    const matchesSearch = !q ||
+      (h.case_name || '').toLowerCase().includes(q) ||
+      (h.case_id || '').toLowerCase().includes(q) ||
+      (h.court_hall || '').toLowerCase().includes(q) ||
+      (h.purpose || '').toLowerCase().includes(q);
+    const matchesStatus = hearingStatusFilter === 'all' || h.status === hearingStatusFilter;
+    return matchesSearch && matchesStatus;
+  });
+}
+
+const HEARING_STATUS_BADGE_CLASS = { scheduled: 'pending', held: 'active', adjourned: 'review', disposed: 'closed' };
+const RISK_FLAG_COLOR = { none: 'var(--slate-400)', watch: '#F39C12', urgent: '#E74C3C' };
+
+function renderHearingTable() {
+  const tbody = $('hearingTableBody');
+  const emptyState = $('hearingEmptyState');
+  const table = $('hearingTable');
+  if (!tbody) return;
+
+  const today = new Date().toISOString().slice(0, 10);
+  const results = filteredHearings();
+
+  if (results.length === 0) {
+    emptyState.classList.remove('hidden');
+    table.classList.add('hidden');
+    return;
+  }
+  emptyState.classList.add('hidden');
+  table.classList.remove('hidden');
+
+  tbody.innerHTML = results.map(h => {
+    // Same signal as the dashboard's "non-updated after hearing" count —
+    // a hearing whose date has passed but is still 'scheduled'.
+    const overdueUpdate = h.status === 'scheduled' && h.hearing_date < today;
+    const actions = canLogHearingUpdate()
+      ? `<button class="row-action-btn" data-action="open-hearing-log-modal" data-hearing-id="${escapeAttr(h.id)}" title="Log update">
+           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" style="width:16px;height:16px;"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+         </button>`
+      : '';
+    return `
+      <tr${overdueUpdate ? ' style="background:rgba(231,76,60,0.06);"' : ''}>
+        <td class="activity-time">${formatInvoiceDate(h.hearing_date)}</td>
+        <td>${escapeHtml(h.case_name || h.case_id)}</td>
+        <td>${escapeHtml(h.court_hall || '—')}</td>
+        <td>${escapeHtml(h.purpose || '—')}</td>
+        <td><span class="status-badge ${HEARING_STATUS_BADGE_CLASS[h.status] || 'closed'}">${escapeHtml(h.status)}</span>${overdueUpdate ? ' <span style="color:#E74C3C;font-size:11px;">not updated</span>' : ''}</td>
+        <td><span style="color:${RISK_FLAG_COLOR[h.risk_flag] || 'var(--slate-400)'};font-weight:600;text-transform:capitalize;">${escapeHtml(h.risk_flag)}</span></td>
+        <td>${formatInvoiceDate(h.next_hearing_date)}</td>
+        <td class="actions-cell-wrap">${actions}</td>
+      </tr>
+    `;
+  }).join('');
+}
+
+const TASK_TYPE_LABEL = { general: 'General', draft_needed: 'Draft Needed', follow_up: 'Follow-up', reminder: 'Reminder' };
+
+function renderHearingTaskTable() {
+  const tbody = $('hearingTaskTableBody');
+  const emptyState = $('hearingTaskEmptyState');
+  const table = $('hearingTaskTable');
+  if (!tbody) return;
+
+  if (HEARING_TASKS.length === 0) {
+    emptyState.classList.remove('hidden');
+    table.classList.add('hidden');
+    return;
+  }
+  emptyState.classList.add('hidden');
+  table.classList.remove('hidden');
+
+  tbody.innerHTML = HEARING_TASKS.map(t => `
+    <tr${t.overdue ? ' style="background:rgba(231,76,60,0.06);"' : ''}>
+      <td>${escapeHtml(t.title)}</td>
+      <td>${escapeHtml(t.case_name || t.case_id || '—')}</td>
+      <td>${escapeHtml(TASK_TYPE_LABEL[t.task_type] || t.task_type)}</td>
+      <td${t.overdue ? ' style="color:#E74C3C;font-weight:600;"' : ''}>${formatInvoiceDate(t.due_date)}</td>
+      <td>${t.auto_generated ? '<span style="color:var(--gold-500);font-size:12px;">Auto</span>' : '<span style="color:var(--slate-400);font-size:12px;">Manual</span>'}</td>
+      <td class="actions-cell-wrap">
+        <button class="row-action-btn" data-action="task-mark-done" data-task-id="${escapeAttr(t.id)}" title="Mark done">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:16px;height:16px;"><polyline points="20 6 9 17 4 12"/></svg>
+        </button>
+      </td>
+    </tr>
+  `).join('');
+}
+
+function setupHearingListeners() {
+  if (hearingListenersInitialized) return;
+
+  $('hearingSearch').addEventListener('input', (e) => {
+    hearingSearchQuery = e.target.value;
+    renderHearingTable();
+  });
+
+  $$('#hearingStatusFilterPills .pill').forEach(pill => {
+    pill.addEventListener('click', () => {
+      $$('#hearingStatusFilterPills .pill').forEach(p => p.classList.remove('active'));
+      pill.classList.add('active');
+      hearingStatusFilter = pill.dataset.value;
+      renderHearingTable();
+    });
+  });
+
+  $('hearingNewBtn').addEventListener('click', () => openHearingModal());
+  $('hearingModalCloseBtn').addEventListener('click', closeHearingModal);
+  $('hearingModalCancelBtn').addEventListener('click', closeHearingModal);
+  $('hearingModal').addEventListener('click', (e) => {
+    if (e.target === $('hearingModal')) closeHearingModal();
+  });
+
+  $('hearingLogModalCloseBtn').addEventListener('click', closeHearingLogModal);
+  $('hearingLogModalCancelBtn').addEventListener('click', closeHearingLogModal);
+  $('hearingLogModal').addEventListener('click', (e) => {
+    if (e.target === $('hearingLogModal')) closeHearingLogModal();
+  });
+
+  hearingListenersInitialized = true;
+}
+
+function openHearingModal() {
+  const caseSelect = $('hearingCase');
+  caseSelect.innerHTML = '<option value="">Select a case…</option>' +
+    CASES.map(c => `<option value="${escapeAttr(c.id)}">${escapeHtml(c.id)} — ${escapeHtml(c.name)}</option>`).join('');
+  $('hearingForm').reset();
+  $('hearingDate').value = new Date().toISOString().slice(0, 10);
+
+  const modal = $('hearingModal');
+  modal.classList.remove('hidden');
+  setTimeout(() => modal.classList.add('active'), 10);
+}
+
+function closeHearingModal() {
+  const modal = $('hearingModal');
+  if (modal) {
+    modal.classList.remove('active');
+    setTimeout(() => modal.classList.add('hidden'), 300);
+    $('hearingForm').reset();
+  }
+}
+
+async function handleHearingSubmit(e) {
+  e.preventDefault();
+  const caseId = $('hearingCase').value;
+  const hearingDate = $('hearingDate').value;
+  if (!caseId) { showToast('Select a case.', 'error'); return; }
+  if (!hearingDate) { showToast('Select a hearing date.', 'error'); return; }
+
+  const submitBtn = $('hearingSubmitBtn');
+  submitBtn.disabled = true;
+  submitBtn.textContent = 'Scheduling…';
+
+  try {
+    await ApiClient.post('/api/v1/hearings', {
+      case_id: caseId, hearing_date: hearingDate,
+      court_hall: $('hearingCourtHall').value.trim() || null,
+      purpose: $('hearingPurpose').value.trim() || null
+    });
+    showToast('Hearing scheduled.', 'success');
+    closeHearingModal();
+    await loadHearingLog();
+  } catch (err) {
+    showToast(err.message || 'Failed to schedule hearing.', 'error');
+  } finally {
+    submitBtn.disabled = false;
+    submitBtn.textContent = 'Schedule';
+  }
+}
+
+// hearingId is required — the log modal only ever opens against an
+// existing, already-scheduled hearing (the row action in renderHearingTable).
+function openHearingLogModal(hearingId) {
+  const hearing = HEARING_LOG.find(h => h.id === hearingId);
+  if (!hearing) return;
+  currentHearingLogId = hearingId;
+
+  $('hearingLogForm').reset();
+  $('hearingLogSubmissions').value = hearing.submissions || '';
+  $('hearingLogOrdersPassed').value = hearing.orders_passed || '';
+  $('hearingLogNextDate').value = hearing.next_hearing_date || '';
+  $('hearingLogRiskFlag').value = hearing.risk_flag || 'none';
+  $('hearingLogSuggestedDraft').value = hearing.suggested_draft || '';
+  $('hearingLogStatus').value = hearing.status === 'scheduled' ? 'held' : hearing.status;
+
+  const modal = $('hearingLogModal');
+  modal.classList.remove('hidden');
+  setTimeout(() => modal.classList.add('active'), 10);
+}
+
+function closeHearingLogModal() {
+  const modal = $('hearingLogModal');
+  if (modal) {
+    modal.classList.remove('active');
+    setTimeout(() => modal.classList.add('hidden'), 300);
+    $('hearingLogForm').reset();
+    currentHearingLogId = null;
+  }
+}
+
+async function handleHearingLogSubmit(e) {
+  e.preventDefault();
+  if (!currentHearingLogId) return;
+
+  const submitBtn = $('hearingLogSubmitBtn');
+  submitBtn.disabled = true;
+  submitBtn.textContent = 'Saving…';
+
+  try {
+    await ApiClient.patch(`/api/v1/hearings/${currentHearingLogId}/log`, {
+      submissions: $('hearingLogSubmissions').value.trim() || null,
+      orders_passed: $('hearingLogOrdersPassed').value.trim() || null,
+      next_hearing_date: $('hearingLogNextDate').value || null,
+      risk_flag: $('hearingLogRiskFlag').value,
+      suggested_draft: $('hearingLogSuggestedDraft').value.trim() || null,
+      status: $('hearingLogStatus').value
+    });
+    showToast('Hearing update logged.', 'success');
+    closeHearingLogModal();
+    await loadHearingLog();
+    await loadHearingTasks();
+  } catch (err) {
+    showToast(err.message || 'Failed to save hearing update.', 'error');
+  } finally {
+    submitBtn.disabled = false;
+    submitBtn.textContent = 'Save Update';
+  }
+}
+
+async function handleTaskMarkDone(taskId) {
+  try {
+    await ApiClient.patch(`/api/v1/tasks/${taskId}`, { status: 'done' });
+    await loadHearingTasks();
+  } catch (err) {
+    showToast(err.message || 'Failed to update task.', 'error');
+  }
+}
+
+registerActions({
+  'submit-hearing': (el, event) => handleHearingSubmit(event),
+  'submit-hearing-log': (el, event) => handleHearingLogSubmit(event),
+  'open-hearing-log-modal': (el) => openHearingLogModal(el.dataset.hearingId),
+  'task-mark-done': (el) => handleTaskMarkDone(el.dataset.taskId),
 });
 
 /* ════════════════════════════════════════════
