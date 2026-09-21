@@ -1,6 +1,7 @@
 const fs = require('fs/promises');
 const { resolveStoragePath } = require('./fileService');
 const baseLogger = require('../utils/logger');
+const ocrService = require('./ocrService');
 
 /**
  * Document Text Extractor
@@ -40,6 +41,12 @@ const PLAIN_TEXT_EXTENSIONS = new Set([
 const PDF_EXTENSIONS = new Set(['pdf']);
 const DOCX_EXTENSIONS = new Set(['docx']);
 
+// Image formats with no text layer of their own — read via OCR (see
+// ocrService.js) rather than refused outright. gif is deliberately left out:
+// it's rarely a scanned document and tesseract.js's image decoders don't
+// cover it, so it stays in KNOWN_UNREADABLE below.
+const OCR_IMAGE_EXTENSIONS = new Set(['png', 'jpg', 'jpeg']);
+
 // Formats we can identify but genuinely cannot read as text. Listed
 // explicitly so the reason given to the user names the format instead of a
 // generic "unsupported" — and so adding a parser later is a one-line change.
@@ -49,10 +56,7 @@ const KNOWN_UNREADABLE = {
   xlsx: 'Spreadsheets are not text-extractable here — open the file to review its contents.',
   ppt: 'Legacy PowerPoint (.ppt) files are not text-extractable here.',
   pptx: 'Presentations are not text-extractable here — open the file to review its slides.',
-  png: 'Images have no text layer to read. Scanned documents would need OCR, which is not configured.',
-  jpg: 'Images have no text layer to read. Scanned documents would need OCR, which is not configured.',
-  jpeg: 'Images have no text layer to read. Scanned documents would need OCR, which is not configured.',
-  gif: 'Images have no text layer to read.',
+  gif: 'Images have no text layer to read, and this format is not OCR-supported here.',
   zip: 'Archives are not text-extractable — extract the archive and upload the documents individually.'
 };
 
@@ -152,6 +156,19 @@ function normalizeWhitespace(text) {
     .trim();
 }
 
+// pdf-parse v2's getText() inserts a `-- N of M --` separator between every
+// page's text, unconditionally — even a totally blank/scanned page with no
+// real content still produces one. Found while testing the OCR fallback
+// below: a genuinely blank single page normalizes to `-- 1 of 1 --`, not
+// "", so the "no text layer, most likely a scan" check would never have
+// fired for a real single-page scan — normalizeWhitespace alone can't tell
+// pdf-parse's own formatting from actual document text. Stripped before
+// that check (and before truncate/return) so it never counts as content
+// and never eats characters out of MAX_TEXT_CHARS either.
+function stripPdfParsePageMarkers(text) {
+  return String(text || '').replace(/^-- \d+ of \d+ --$/gm, '');
+}
+
 function truncate(text) {
   if (text.length <= MAX_TEXT_CHARS) {
     return { text, truncated: false, total_chars: text.length };
@@ -201,8 +218,9 @@ async function extractText(doc, log = baseLogger) {
   const isPlain = PLAIN_TEXT_EXTENSIONS.has(ext);
   const isPdf = PDF_EXTENSIONS.has(ext);
   const isDocx = DOCX_EXTENSIONS.has(ext);
+  const isOcrImage = OCR_IMAGE_EXTENSIONS.has(ext);
 
-  if (!isPlain && !isPdf && !isDocx) {
+  if (!isPlain && !isPdf && !isDocx && !isOcrImage) {
     return unreadable(`No text extractor is available for .${ext || 'unknown'} files.`);
   }
 
@@ -268,15 +286,36 @@ async function extractText(doc, log = baseLogger) {
       } finally {
         if (typeof parser.destroy === 'function') await parser.destroy();
       }
-      const normalized = normalizeWhitespace(parsed.text);
+      const normalized = normalizeWhitespace(stripPdfParsePageMarkers(parsed.text));
       if (!normalized) {
-        // A PDF with no text layer is almost always a scan. Saying that is
-        // far more useful than returning "" and letting a caller summarize
-        // an empty string.
-        return unreadable(
-          'This PDF contains no extractable text layer — it is most likely a scan. ' +
-          'Reading it would need OCR, which is not configured.'
-        );
+        // A PDF with no text layer is almost always a scan — fall back to
+        // OCR rather than refusing outright. Errors from OCR itself (a
+        // corrupt PDF pdfjs can't even open, a provider failure) are
+        // reported as a reason, same as every other unreadable case, not
+        // thrown — this path already tried its best with pdf-parse.
+        try {
+          const ocrResult = await ocrService.ocrScannedPdf(buffer, log);
+          if (!ocrResult.text) {
+            return unreadable(
+              'This PDF contains no extractable text layer, and OCR found no readable text on its ' +
+              `first ${ocrResult.pages_ocred} page(s) either — it may be a blank or very low-quality scan.`
+            );
+          }
+          const { text, truncated, total_chars } = truncate(normalizeWhitespace(ocrResult.text));
+          return {
+            extractable: true, reason: null, text, truncated, total_chars,
+            source: 'pdf-ocr', page_count: ocrResult.page_count,
+            pages_ocred: ocrResult.pages_ocred, ocr_truncated_pages: ocrResult.truncated_pages
+          };
+        } catch (ocrErr) {
+          log.error('OCR fallback failed for scanned PDF', {
+            context: 'EXTRACT', document_id: doc.id, file_name: doc.file_name, error: ocrErr.message
+          });
+          return unreadable(
+            'This PDF contains no extractable text layer — it is most likely a scan, and OCR was ' +
+            `unable to read it (${ocrErr.message}).`
+          );
+        }
       }
       const { text, truncated, total_chars } = truncate(normalized);
       return {
@@ -287,6 +326,26 @@ async function extractText(doc, log = baseLogger) {
         // silently left page_count always null.
         source: 'pdf', page_count: parsed.total || null
       };
+    }
+
+    if (isOcrImage) {
+      try {
+        const { text, confidence } = await ocrService.ocrImage(buffer, log);
+        const normalized = normalizeWhitespace(text);
+        if (!normalized) {
+          return unreadable('OCR found no readable text in this image.');
+        }
+        const { text: truncatedText, truncated, total_chars } = truncate(normalized);
+        return {
+          extractable: true, reason: null, text: truncatedText, truncated, total_chars,
+          source: 'image-ocr', ocr_confidence: confidence
+        };
+      } catch (ocrErr) {
+        log.error('OCR failed for image document', {
+          context: 'EXTRACT', document_id: doc.id, file_name: doc.file_name, error: ocrErr.message
+        });
+        return unreadable(`This image could not be read by OCR (${ocrErr.message}).`);
+      }
     }
 
     if (isDocx) {
@@ -321,6 +380,7 @@ module.exports = {
   // Exported for tests and for callers that want to tell a user up front
   // whether a document is readable without doing the work.
   PLAIN_TEXT_EXTENSIONS,
+  OCR_IMAGE_EXTENSIONS,
   KNOWN_UNREADABLE,
   MAX_EXTRACTABLE_BYTES,
   MAX_TEXT_CHARS,
