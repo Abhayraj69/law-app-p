@@ -1698,6 +1698,111 @@ async function getTasksAwaitingDraftCount(firmId) {
   return rows[0].n;
 }
 
+// ═════════════════════════════════════════════════════════════════════
+// CONSULTATIONS (db/migrations/0023_consultations.sql)
+// ═════════════════════════════════════════════════════════════════════
+
+async function getConsultationById(firmId, consultationId) {
+  const { rows } = await pool.query(
+    `SELECT consultations.*, cu.full_name AS created_by_name, au.full_name AS approved_by_name
+       FROM consultations
+       LEFT JOIN users cu ON cu.id = consultations.created_by_user_id
+       LEFT JOIN users au ON au.id = consultations.approved_by_user_id
+      WHERE consultations.firm_id = $1 AND consultations.id = $2`,
+    [firmId, consultationId]
+  );
+  return rows[0] || null;
+}
+
+async function listConsultationsForFirm(firmId, { status } = {}) {
+  const values = [firmId];
+  let query = `SELECT consultations.*, cu.full_name AS created_by_name, au.full_name AS approved_by_name
+                 FROM consultations
+                 LEFT JOIN users cu ON cu.id = consultations.created_by_user_id
+                 LEFT JOIN users au ON au.id = consultations.approved_by_user_id
+                WHERE consultations.firm_id = $1`;
+  if (status) { values.push(status); query += ` AND consultations.status = $${values.length}`; }
+  query += ' ORDER BY consultations.created_at DESC';
+  const { rows } = await pool.query(query, values);
+  return rows;
+}
+
+async function insertConsultation({ firmId, clientName, clientContact, matterCategory, opposingParty, opposingCounsel, referralSource, intakeNotes, conflictFlag, conflictDetails, createdByUserId }) {
+  const { rows } = await pool.query(
+    `INSERT INTO consultations (
+        firm_id, client_name, client_contact, matter_category, opposing_party, opposing_counsel,
+        referral_source, intake_notes, conflict_flag, conflict_details, created_by_user_id
+     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+     RETURNING id`,
+    [firmId, clientName, clientContact || null, matterCategory || null, opposingParty || null, opposingCounsel || null,
+     referralSource || null, intakeNotes || null, !!conflictFlag, conflictDetails || null, createdByUserId || null]
+  );
+  return getConsultationById(firmId, rows[0].id);
+}
+
+async function updateConsultationFields(firmId, consultationId, updates = {}) {
+  const fieldMap = {
+    clientName: 'client_name', clientContact: 'client_contact', matterCategory: 'matter_category',
+    opposingParty: 'opposing_party', opposingCounsel: 'opposing_counsel', referralSource: 'referral_source',
+    intakeNotes: 'intake_notes', status: 'status', conflictFlag: 'conflict_flag', conflictDetails: 'conflict_details',
+    bundleDocumentId: 'bundle_document_id', approvedByUserId: 'approved_by_user_id', approvedAt: 'approved_at',
+    lastDeclineReason: 'last_decline_reason', convertedCaseId: 'converted_case_id', convertedAt: 'converted_at'
+  };
+  const setClauses = [];
+  const values = [];
+  let i = 1;
+  for (const [key, column] of Object.entries(fieldMap)) {
+    if (updates[key] !== undefined) {
+      setClauses.push(`${column} = $${i}`);
+      values.push(updates[key]);
+      i++;
+    }
+  }
+  if (!setClauses.length) return getConsultationById(firmId, consultationId);
+  setClauses.push('updated_at = CURRENT_TIMESTAMP');
+  values.push(firmId, consultationId);
+  await pool.query(`UPDATE consultations SET ${setClauses.join(', ')} WHERE firm_id = $${i} AND id = $${i + 1}`, values);
+  return getConsultationById(firmId, consultationId);
+}
+
+async function linkConsultationDocument(consultationId, documentId) {
+  await pool.query(
+    `INSERT INTO consultation_documents (consultation_id, document_id) VALUES ($1, $2)
+     ON CONFLICT (consultation_id, document_id) DO NOTHING`,
+    [consultationId, documentId]
+  );
+}
+
+// Ownership of `consultationId` is the caller's responsibility (already
+// firm-scoped via getConsultationById before this runs) — documents joined
+// here have no firm_id filter of their own, same convention
+// listDeadlinesByCase uses for its own case-scoped sub-resource.
+async function listConsultationDocuments(consultationId) {
+  const { rows } = await pool.query(
+    `SELECT documents.* FROM consultation_documents cd
+       JOIN documents ON documents.id = cd.document_id
+      WHERE cd.consultation_id = $1 AND documents.is_deleted = FALSE
+      ORDER BY cd.created_at ASC`,
+    [consultationId]
+  );
+  return rows;
+}
+
+// Re-points every document linked to a consultation (the bundle included,
+// since it's just another documents row referenced from
+// consultation_documents once inserted) at the real case created from it —
+// used once, at conversion. Firm-scoped defensively even though the
+// documents were already verified to belong to this firm at upload time.
+async function reassignConsultationDocumentsToCase(firmId, consultationId, caseId) {
+  await pool.query(
+    `UPDATE documents SET case_id = $1, updated_at = CURRENT_TIMESTAMP
+      WHERE firm_id = $2 AND id IN (
+        SELECT document_id FROM consultation_documents WHERE consultation_id = $3
+      )`,
+    [caseId, firmId, consultationId]
+  );
+}
+
 // ── Conversations / threaded client communications ──────────────────────
 // Same role-scoping rule as cases: a CLIENT only ever sees conversations
 // where client_user_id matches their own id.
@@ -2454,6 +2559,13 @@ module.exports = {
   getHearingsListedThisWeekCount,
   getHearingsNotUpdatedCount,
   getTasksAwaitingDraftCount,
+  getConsultationById,
+  listConsultationsForFirm,
+  insertConsultation,
+  updateConsultationFields,
+  linkConsultationDocument,
+  listConsultationDocuments,
+  reassignConsultationDocumentsToCase,
   listConversationsForUser,
   getConversationWithMessages,
   insertConversation,

@@ -161,6 +161,16 @@
               <span class="nav-text">Hearings</span>
             </a>
           </li>
+          <li class="nav-item" data-page="consultations">
+            <a href="#" class="nav-link" id="nav-consultations">
+              <span class="nav-icon">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+                  <path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z" />
+                </svg>
+              </span>
+              <span class="nav-text">Consultations</span>
+            </a>
+          </li>
           <li class="nav-item hidden" data-page="trust" id="navTrustItem">
             <a href="#" class="nav-link" id="nav-trust">
               <span class="nav-icon">
@@ -1666,6 +1676,69 @@
       </div>
     </main>
 
+    <!-- CONSULTATIONS PAGE -->
+    <main class="content hidden" id="consultationsPage">
+      <div class="page-header-row">
+        <h2 class="cases-page-title">Consultation Intake</h2>
+        <button class="btn-primary" id="consultationNewBtn">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+            style="width: 14px; height: 14px; vertical-align: middle; margin-right: 4px;">
+            <line x1="12" y1="5" x2="12" y2="19" />
+            <line x1="5" y1="12" x2="19" y2="12" />
+          </svg>
+          + New Consultation
+        </button>
+      </div>
+
+      <div class="command-bar">
+        <div class="search-box">
+          <svg class="search-box-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="11" cy="11" r="8" />
+            <path d="M21 21l-4.35-4.35" />
+          </svg>
+          <input type="text" id="consultationSearch" placeholder="Search by client or category..."
+            autocomplete="off" />
+        </div>
+        <div class="filter-row">
+          <div class="filter-group">
+            <span class="filter-label">Status:</span>
+            <div class="pill-group" id="consultationStatusFilterPills">
+              <button class="pill active" data-value="all">All</button>
+              <button class="pill" data-value="draft">Draft</button>
+              <button class="pill" data-value="pending_approval">Pending Approval</button>
+              <button class="pill" data-value="approved">Approved</button>
+              <button class="pill" data-value="converted">Converted</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="panel table-panel edge-to-edge">
+        <div class="table-container">
+          <table class="cases-large-table" id="consultationTable">
+            <thead>
+              <tr>
+                <th>Client</th>
+                <th>Category</th>
+                <th>Status</th>
+                <th>Conflict</th>
+                <th>Created</th>
+                <th style="width: 80px;">Actions</th>
+              </tr>
+            </thead>
+            <tbody id="consultationTableBody">
+              <!-- Rendered Dynamically -->
+            </tbody>
+          </table>
+        </div>
+        <div class="empty-state-container hidden" id="consultationEmptyState">
+          <h3 class="empty-state-title">No consultations found</h3>
+          <p class="empty-state-description">Start a new consultation to screen a prospective client before opening
+            a case.</p>
+        </div>
+      </div>
+    </main>
+
     <!-- TRUST ACCOUNTING PAGE -->
     <main class="content hidden" id="trustPage">
       <div class="page-header-row">
@@ -2284,6 +2357,88 @@
               style="background: var(--gold-500); color: var(--navy-950); font-weight: 600; border: none;">Save Update</button>
           </div>
         </form>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal-overlay hidden" id="consultationModal">
+    <div class="modal-box">
+      <div class="modal-header">
+        <h3 class="modal-title">New Consultation</h3>
+        <button class="modal-close-btn" id="consultationModalCloseBtn">&times;</button>
+      </div>
+      <div class="modal-body">
+        <form id="consultationForm" data-action="submit-consultation">
+          <div class="form-row-two">
+            <div class="form-group-modal">
+              <label for="consultationClientName">Client Name</label>
+              <input type="text" id="consultationClientName" required />
+            </div>
+            <div class="form-group-modal">
+              <label for="consultationClientContact">Contact (phone/email)</label>
+              <input type="text" id="consultationClientContact" />
+            </div>
+          </div>
+          <div class="form-row-two">
+            <div class="form-group-modal">
+              <label for="consultationMatterCategory">Matter Category</label>
+              <select id="consultationMatterCategory">
+                <option value="">Select a category…</option>
+              </select>
+            </div>
+            <div class="form-group-modal">
+              <label for="consultationReferralSource">Referral Source</label>
+              <input type="text" id="consultationReferralSource" placeholder="e.g. Existing client referral" />
+            </div>
+          </div>
+          <div class="form-row-two">
+            <div class="form-group-modal">
+              <label for="consultationOpposingParty">Opposing Party (if known)</label>
+              <input type="text" id="consultationOpposingParty" />
+            </div>
+            <div class="form-group-modal">
+              <label for="consultationOpposingCounsel">Opposing Counsel (if known)</label>
+              <input type="text" id="consultationOpposingCounsel" />
+            </div>
+          </div>
+          <div class="modal-footer">
+            <button type="button" class="btn-ghost" id="consultationModalCancelBtn">Cancel</button>
+            <button type="submit" class="btn-primary" id="consultationSubmitBtn"
+              style="background: var(--gold-500); color: var(--navy-950); font-weight: 600; border: none;">Create</button>
+          </div>
+        </form>
+      </div>
+    </div>
+  </div>
+
+  <!-- Consultation detail: overview edit, document bundle, and the
+       lawyer-approval workflow (submit / approve / decline / convert),
+       all rendered dynamically by renderConsultationDetail in app.js since
+       which actions are available depends on both status and role. -->
+  <div class="modal-overlay hidden" id="consultationDetailModal">
+    <div class="modal-box" style="max-width: 720px;">
+      <div class="modal-header">
+        <h3 class="modal-title">Consultation — <span id="consultationDetailClientLabel"></span></h3>
+        <button class="modal-close-btn" id="consultationDetailModalCloseBtn">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div id="consultationDetailOverview" style="margin-bottom:20px; font-size:13px;"></div>
+
+        <div style="margin-bottom:20px;">
+          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+            <h4 style="margin:0;">Documents</h4>
+            <div>
+              <label class="btn-ghost" style="padding:4px 10px; font-size:12px; cursor:pointer;">
+                Upload
+                <input type="file" id="consultationDocumentInput" style="display:none;" accept=".pdf,.docx,.doc,.jpg,.jpeg,.png" />
+              </label>
+              <button class="btn-ghost" style="padding:4px 10px; font-size:12px;" id="consultationBundleBtn">Bundle PDFs</button>
+            </div>
+          </div>
+          <div id="consultationDetailDocuments" style="font-size:13px;"></div>
+        </div>
+
+        <div id="consultationDetailActions"></div>
       </div>
     </div>
   </div>

@@ -33,6 +33,7 @@ const signatureController = require('../controllers/signatureController');
 const timeEntryController = require('../controllers/timeEntryController');
 const hearingController = require('../controllers/hearingController');
 const taskController = require('../controllers/taskController');
+const consultationController = require('../controllers/consultationController');
 
 // Apply Global Tenant Authentication & User Context
 router.use(authMiddleware);
@@ -308,6 +309,36 @@ router.get('/tasks', requireRole('PARALEGAL'), taskController.listTasks);
 router.post('/tasks', requireRole('PARALEGAL'), taskController.createTask);
 router.patch('/tasks/:id', requireRole('PARALEGAL'), taskController.updateTask);
 router.delete('/tasks/:id', requireRole('PARALEGAL'), taskController.deleteTask);
+
+// ═════════════════════════════════════════════════════════════════════
+// G2e. CONSULTATION INTAKE (Phase 2)
+// Staff-assisted only — no client-facing intake surface exists yet (a
+// deliberate scope decision; see server/services/consultationService.js).
+// requireRole('PARALEGAL') for the routine intake work (create/edit/
+// upload/bundle/submit), requireRole('PARTNER') for approve/decline — the
+// "lawyer approval screen" the roadmap calls for, same floor case_intake's
+// own activate/decline already uses for the analogous decision — and
+// requireRole('ASSOCIATE') for converting an approved consultation into a
+// real case, matching this app's general case-creation floor.
+// ═════════════════════════════════════════════════════════════════════
+router.get('/consultations/matter-categories', requireRole('PARALEGAL'), consultationController.getMatterCategories);
+router.get('/consultations', requireRole('PARALEGAL'), consultationController.listConsultations);
+router.get('/consultations/:id', requireRole('PARALEGAL'), consultationController.getConsultation);
+router.post('/consultations', requireRole('PARALEGAL'), consultationController.createConsultation);
+router.patch('/consultations/:id', requireRole('PARALEGAL'), consultationController.updateConsultation);
+router.post(
+  '/consultations/:id/documents',
+  requireRole('PARALEGAL'),
+  upload.single('file'),
+  enforceStorageQuota,
+  validateAndScanUpload,
+  consultationController.addDocument
+);
+router.post('/consultations/:id/bundle', requireRole('PARALEGAL'), consultationController.bundleDocuments);
+router.post('/consultations/:id/submit', requireRole('PARALEGAL'), consultationController.submitConsultation);
+router.patch('/consultations/:id/approve', requireRole('PARTNER'), consultationController.approveConsultation);
+router.patch('/consultations/:id/decline', requireRole('PARTNER'), consultationController.declineConsultation);
+router.post('/consultations/:id/convert', requireRole('ASSOCIATE'), consultationController.convertConsultation);
 
 // ═════════════════════════════════════════════════════════════════════
 // G3. TRUST ACCOUNTING

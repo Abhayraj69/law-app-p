@@ -490,6 +490,7 @@ function navigateToPage(page) {
     documents:      'Document Vault',
     billing:        'Billing & Invoices',
     hearings:       'Hearing Log',
+    consultations:  'Consultation Intake',
     trust:          'Trust Accounting',
     settings:       'Settings',
   };
@@ -501,6 +502,7 @@ function navigateToPage(page) {
   const documentsPage = $('documentsPage');
   const billingPage = $('billingPage');
   const hearingsPage = $('hearingsPage');
+  const consultationsPage = $('consultationsPage');
   const trustPage = $('trustPage');
   const settingsPage = $('settingsPage');
   const placeholder = $('placeholderPage');
@@ -512,6 +514,7 @@ function navigateToPage(page) {
   if (documentsPage) documentsPage.classList.add('hidden');
   if (billingPage) billingPage.classList.add('hidden');
   if (hearingsPage) hearingsPage.classList.add('hidden');
+  if (consultationsPage) consultationsPage.classList.add('hidden');
   if (trustPage) trustPage.classList.add('hidden');
   if (settingsPage) settingsPage.classList.add('hidden');
   if (placeholder) placeholder.classList.add('hidden');
@@ -545,6 +548,11 @@ function navigateToPage(page) {
     if (hearingsPage) {
       hearingsPage.classList.remove('hidden');
       initHearingsPage();
+    }
+  } else if (page === 'consultations') {
+    if (consultationsPage) {
+      consultationsPage.classList.remove('hidden');
+      initConsultationsPage();
     }
   } else if (page === 'trust') {
     if (trustPage) {
@@ -3259,6 +3267,446 @@ registerActions({
   'submit-hearing-log': (el, event) => handleHearingLogSubmit(event),
   'open-hearing-log-modal': (el) => openHearingLogModal(el.dataset.hearingId),
   'task-mark-done': (el) => handleTaskMarkDone(el.dataset.taskId),
+});
+
+/* ════════════════════════════════════════════
+   CONSULTATION INTAKE PAGE (Phase 2)
+   Backs GET/POST/PATCH /api/v1/consultations and its sub-resources — see
+   server/services/consultationService.js for the draft -> pending_approval
+   -> approved -> converted lifecycle and role floors this UI reflects
+   (PARALEGAL+ for routine intake work, PARTNER+ for approve/decline — the
+   "lawyer approval screen" — ASSOCIATE+ for converting to a real case).
+   ════════════════════════════════════════════ */
+
+let CONSULTATIONS = [];
+let MATTER_CATEGORIES = [];
+let consultationsLoadedOnce = false;
+let consultationListenersInitialized = false;
+let consultationStatusFilter = 'all';
+let consultationSearchQuery = '';
+let currentConsultationDetailId = null;
+
+function canApproveConsultations() {
+  const role = Auth.getUser() && Auth.getUser().role;
+  return role === 'PARTNER' || role === 'SENIOR_PARTNER' || role === 'ADMIN';
+}
+
+function canConvertConsultations() {
+  const role = Auth.getUser() && Auth.getUser().role;
+  return role === 'ASSOCIATE' || role === 'PARTNER' || role === 'SENIOR_PARTNER' || role === 'ADMIN';
+}
+
+async function initConsultationsPage() {
+  consultationsLoadedOnce = true;
+  setupConsultationListeners();
+  if (!MATTER_CATEGORIES.length) {
+    try { MATTER_CATEGORIES = await ApiClient.get('/api/v1/consultations/matter-categories'); }
+    catch (err) { console.error('Matter categories load error', err); }
+  }
+  await loadConsultations();
+}
+
+async function loadConsultations() {
+  try {
+    CONSULTATIONS = await ApiClient.get('/api/v1/consultations');
+    renderConsultationTable();
+  } catch (err) {
+    console.error('Consultations load error', err);
+    const tbody = $('consultationTableBody');
+    if (tbody) tbody.innerHTML = `<tr><td colspan="6" style="text-align:center;color:var(--slate-400)">Error loading consultations</td></tr>`;
+  }
+}
+
+function filteredConsultations() {
+  const q = consultationSearchQuery.toLowerCase();
+  return CONSULTATIONS.filter(c => {
+    const matchesSearch = !q ||
+      (c.client_name || '').toLowerCase().includes(q) ||
+      (c.matter_category || '').toLowerCase().includes(q);
+    const matchesStatus = consultationStatusFilter === 'all' || c.status === consultationStatusFilter;
+    return matchesSearch && matchesStatus;
+  });
+}
+
+const CONSULTATION_STATUS_BADGE_CLASS = { draft: 'pending', pending_approval: 'review', approved: 'active', converted: 'closed' };
+const CONSULTATION_STATUS_LABEL = { draft: 'Draft', pending_approval: 'Pending Approval', approved: 'Approved', converted: 'Converted' };
+
+function renderConsultationTable() {
+  const tbody = $('consultationTableBody');
+  const emptyState = $('consultationEmptyState');
+  const table = $('consultationTable');
+  if (!tbody) return;
+
+  const results = filteredConsultations();
+
+  if (results.length === 0) {
+    emptyState.classList.remove('hidden');
+    table.classList.add('hidden');
+    return;
+  }
+  emptyState.classList.add('hidden');
+  table.classList.remove('hidden');
+
+  tbody.innerHTML = results.map(c => `
+    <tr>
+      <td>${escapeHtml(c.client_name)}</td>
+      <td>${escapeHtml(c.matter_category || '—')}</td>
+      <td><span class="status-badge ${CONSULTATION_STATUS_BADGE_CLASS[c.status] || 'closed'}">${CONSULTATION_STATUS_LABEL[c.status] || c.status}</span></td>
+      <td>${c.conflict_flag ? '<span style="color:#E74C3C;font-weight:600;">Flagged</span>' : '<span style="color:var(--slate-400);">Clear</span>'}</td>
+      <td class="activity-time">${formatInvoiceDate((c.created_at || '').slice(0, 10))}</td>
+      <td class="actions-cell-wrap">
+        <button class="row-action-btn" data-action="open-consultation-detail" data-consultation-id="${escapeAttr(c.id)}" title="Open">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" style="width:16px;height:16px;"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7z"/><circle cx="12" cy="12" r="3"/></svg>
+        </button>
+      </td>
+    </tr>
+  `).join('');
+}
+
+function setupConsultationListeners() {
+  if (consultationListenersInitialized) return;
+
+  $('consultationSearch').addEventListener('input', (e) => {
+    consultationSearchQuery = e.target.value;
+    renderConsultationTable();
+  });
+
+  $$('#consultationStatusFilterPills .pill').forEach(pill => {
+    pill.addEventListener('click', () => {
+      $$('#consultationStatusFilterPills .pill').forEach(p => p.classList.remove('active'));
+      pill.classList.add('active');
+      consultationStatusFilter = pill.dataset.value;
+      renderConsultationTable();
+    });
+  });
+
+  $('consultationNewBtn').addEventListener('click', () => openConsultationModal());
+  $('consultationModalCloseBtn').addEventListener('click', closeConsultationModal);
+  $('consultationModalCancelBtn').addEventListener('click', closeConsultationModal);
+  $('consultationModal').addEventListener('click', (e) => {
+    if (e.target === $('consultationModal')) closeConsultationModal();
+  });
+
+  $('consultationDetailModalCloseBtn').addEventListener('click', closeConsultationDetailModal);
+  $('consultationDetailModal').addEventListener('click', (e) => {
+    if (e.target === $('consultationDetailModal')) closeConsultationDetailModal();
+  });
+
+  $('consultationDocumentInput').addEventListener('change', handleConsultationDocumentUpload);
+  $('consultationBundleBtn').addEventListener('click', handleConsultationBundle);
+
+  consultationListenersInitialized = true;
+}
+
+function openConsultationModal() {
+  const select = $('consultationMatterCategory');
+  select.innerHTML = '<option value="">Select a category…</option>' +
+    MATTER_CATEGORIES.map(cat => `<option value="${escapeAttr(cat)}">${escapeHtml(cat)}</option>`).join('');
+  $('consultationForm').reset();
+
+  const modal = $('consultationModal');
+  modal.classList.remove('hidden');
+  setTimeout(() => modal.classList.add('active'), 10);
+}
+
+function closeConsultationModal() {
+  const modal = $('consultationModal');
+  if (modal) {
+    modal.classList.remove('active');
+    setTimeout(() => modal.classList.add('hidden'), 300);
+    $('consultationForm').reset();
+  }
+}
+
+async function handleConsultationSubmit(e) {
+  e.preventDefault();
+  const clientName = $('consultationClientName').value.trim();
+  if (!clientName) { showToast('Enter the client\'s name.', 'error'); return; }
+
+  const submitBtn = $('consultationSubmitBtn');
+  submitBtn.disabled = true;
+  submitBtn.textContent = 'Creating…';
+
+  try {
+    // ApiClient.post resolves to { ok, status, json }, not the created
+    // record directly (only .get() unwraps to json.data) — see its own
+    // comment on why 413/409 are let through instead of thrown.
+    const { ok, json } = await ApiClient.post('/api/v1/consultations', {
+      client_name: clientName,
+      client_contact: $('consultationClientContact').value.trim() || null,
+      matter_category: $('consultationMatterCategory').value || null,
+      referral_source: $('consultationReferralSource').value.trim() || null,
+      opposing_party: $('consultationOpposingParty').value.trim() || null,
+      opposing_counsel: $('consultationOpposingCounsel').value.trim() || null
+    });
+    if (!ok) throw new Error(json.error || 'Failed to create consultation.');
+    const created = json.data;
+    showToast(created.conflict_flag
+      ? 'Consultation created — a potential conflict was flagged, review it in the detail view.'
+      : 'Consultation created.', created.conflict_flag ? 'warning' : 'success');
+    closeConsultationModal();
+    await loadConsultations();
+    openConsultationDetailModal(created.id);
+  } catch (err) {
+    showToast(err.message || 'Failed to create consultation.', 'error');
+  } finally {
+    submitBtn.disabled = false;
+    submitBtn.textContent = 'Create';
+  }
+}
+
+async function openConsultationDetailModal(consultationId) {
+  currentConsultationDetailId = consultationId;
+  $('consultationDetailClientLabel').textContent = '';
+  $('consultationDetailOverview').innerHTML = '<p style="color:var(--slate-400)">Loading…</p>';
+  $('consultationDetailDocuments').innerHTML = '';
+  $('consultationDetailActions').innerHTML = '';
+
+  const modal = $('consultationDetailModal');
+  modal.classList.remove('hidden');
+  setTimeout(() => modal.classList.add('active'), 10);
+
+  await refreshConsultationDetail();
+}
+
+async function refreshConsultationDetail() {
+  if (!currentConsultationDetailId) return;
+  try {
+    const c = await ApiClient.get(`/api/v1/consultations/${currentConsultationDetailId}`);
+    $('consultationDetailClientLabel').textContent = c.client_name;
+    renderConsultationDetailOverview(c);
+    renderConsultationDetailDocuments(c.documents);
+    renderConsultationDetailActions(c);
+  } catch (err) {
+    $('consultationDetailOverview').innerHTML = `<p style="color:#E74C3C">Failed to load consultation: ${escapeHtml(err.message)}</p>`;
+  }
+}
+
+function closeConsultationDetailModal() {
+  const modal = $('consultationDetailModal');
+  if (modal) {
+    modal.classList.remove('active');
+    setTimeout(() => modal.classList.add('hidden'), 300);
+  }
+  currentConsultationDetailId = null;
+  loadConsultations();
+}
+
+function renderConsultationDetailOverview(c) {
+  const isDraft = c.status === 'draft';
+  const categoryOptions = MATTER_CATEGORIES.map(cat =>
+    `<option value="${escapeAttr(cat)}" ${cat === c.matter_category ? 'selected' : ''}>${escapeHtml(cat)}</option>`
+  ).join('');
+
+  if (!isDraft) {
+    $('consultationDetailOverview').innerHTML = `
+      <div class="form-row-two">
+        <div><strong>Contact</strong><div>${escapeHtml(c.client_contact) || '—'}</div></div>
+        <div><strong>Category</strong><div>${escapeHtml(c.matter_category) || '—'}</div></div>
+      </div>
+      <div class="form-row-two" style="margin-top:10px;">
+        <div><strong>Opposing Party</strong><div>${escapeHtml(c.opposing_party) || '—'}</div></div>
+        <div><strong>Opposing Counsel</strong><div>${escapeHtml(c.opposing_counsel) || '—'}</div></div>
+      </div>
+      ${c.conflict_flag ? `<p style="color:#E74C3C; margin-top:10px;">Potential conflict flagged against ${c.conflict_details?.matches?.length || 'an'} existing case${(c.conflict_details?.matches?.length || 0) === 1 ? '' : 's'}.</p>` : ''}
+      <div style="margin-top:10px;"><strong>Intake Notes</strong><div style="white-space:pre-wrap;">${escapeHtml(c.intake_notes) || '—'}</div></div>
+      ${c.last_decline_reason ? `<div style="margin-top:10px; color:#F39C12;"><strong>Last Decline Reason</strong><div>${escapeHtml(c.last_decline_reason)}</div></div>` : ''}
+      ${c.converted_case_id ? `<div style="margin-top:10px;"><strong>Converted Case</strong><div>${escapeHtml(c.converted_case_id)}</div></div>` : ''}
+    `;
+    return;
+  }
+
+  $('consultationDetailOverview').innerHTML = `
+    <div class="form-row-two">
+      <div class="form-group-modal">
+        <label for="cdContact">Contact</label>
+        <input type="text" id="cdContact" value="${escapeAttr(c.client_contact || '')}" />
+      </div>
+      <div class="form-group-modal">
+        <label for="cdCategory">Matter Category</label>
+        <select id="cdCategory"><option value="">Select a category…</option>${categoryOptions}</select>
+      </div>
+    </div>
+    <div class="form-row-two">
+      <div class="form-group-modal">
+        <label for="cdOpposingParty">Opposing Party</label>
+        <input type="text" id="cdOpposingParty" value="${escapeAttr(c.opposing_party || '')}" />
+      </div>
+      <div class="form-group-modal">
+        <label for="cdOpposingCounsel">Opposing Counsel</label>
+        <input type="text" id="cdOpposingCounsel" value="${escapeAttr(c.opposing_counsel || '')}" />
+      </div>
+    </div>
+    ${c.conflict_flag ? `<p style="color:#E74C3C;">Potential conflict flagged against ${c.conflict_details?.matches?.length || 'an'} existing case${(c.conflict_details?.matches?.length || 0) === 1 ? '' : 's'}.</p>` : ''}
+    ${c.last_decline_reason ? `<p style="color:#F39C12;"><strong>Declined:</strong> ${escapeHtml(c.last_decline_reason)}</p>` : ''}
+    <div class="form-group-modal">
+      <label for="cdIntakeNotes">Intake Notes</label>
+      <textarea id="cdIntakeNotes" rows="4" placeholder="What was discussed, the client's situation, next steps...">${escapeHtml(c.intake_notes || '')}</textarea>
+    </div>
+    <button type="button" class="btn-ghost" data-action="save-consultation-overview">Save Changes</button>
+  `;
+}
+
+async function handleSaveConsultationOverview() {
+  if (!currentConsultationDetailId) return;
+  try {
+    await ApiClient.patch(`/api/v1/consultations/${currentConsultationDetailId}`, {
+      client_contact: $('cdContact').value.trim() || null,
+      matter_category: $('cdCategory').value || null,
+      opposing_party: $('cdOpposingParty').value.trim() || null,
+      opposing_counsel: $('cdOpposingCounsel').value.trim() || null,
+      intake_notes: $('cdIntakeNotes').value.trim() || null
+    });
+    showToast('Consultation updated.', 'success');
+    await refreshConsultationDetail();
+  } catch (err) {
+    showToast(err.message || 'Failed to update consultation.', 'error');
+  }
+}
+
+function renderConsultationDetailDocuments(docs) {
+  const el = $('consultationDetailDocuments');
+  if (!docs.length) { el.innerHTML = '<p style="color:var(--slate-400)">No documents uploaded yet.</p>'; return; }
+  el.innerHTML = `
+    <table class="cases-large-table">
+      <thead><tr><th>File</th><th>Type</th></tr></thead>
+      <tbody>
+        ${docs.map(d => `
+          <tr>
+            <td>${escapeHtml(d.original_name || d.file_name)}</td>
+            <td>${escapeHtml((d.extension || '').toUpperCase())}</td>
+          </tr>
+        `).join('')}
+      </tbody>
+    </table>
+  `;
+}
+
+function renderConsultationDetailActions(c) {
+  const el = $('consultationDetailActions');
+  const buttons = [];
+
+  if (c.status === 'draft') {
+    buttons.push(`<button class="btn-primary" data-action="submit-consultation-for-approval" style="margin-right:8px;">Submit for Approval</button>`);
+  }
+  if (c.status === 'pending_approval' && canApproveConsultations()) {
+    buttons.push(`<button class="btn-primary" data-action="approve-consultation" style="margin-right:8px;">Approve</button>`);
+    buttons.push(`<button class="btn-ghost" data-action="decline-consultation" style="margin-right:8px;">Decline</button>`);
+  }
+  if (c.status === 'pending_approval' && !canApproveConsultations()) {
+    buttons.push(`<p style="color:var(--slate-400);">Awaiting lawyer approval.</p>`);
+  }
+  if (c.status === 'approved' && canConvertConsultations()) {
+    buttons.push(`<button class="btn-primary" data-action="convert-consultation" style="margin-right:8px;">Convert to Case</button>`);
+  }
+  if (c.status === 'converted') {
+    buttons.push(`<p style="color:var(--slate-400);">Converted to case ${escapeHtml(c.converted_case_id)}.</p>`);
+  }
+
+  el.innerHTML = buttons.join('');
+}
+
+async function handleConsultationDocumentUpload(e) {
+  const file = e.target.files[0];
+  e.target.value = '';
+  if (!file || !currentConsultationDetailId) return;
+
+  const formData = new FormData();
+  formData.append('file', file);
+
+  try {
+    // postForm doesn't throw for 413 (quota)/409 (duplicate content) —
+    // those carry structured detail other callers use for a prompt; here
+    // it's enough to just surface them as an error rather than a false
+    // "uploaded" success toast. See ApiClient.postForm's own comment.
+    const { ok, json } = await ApiClient.postForm(`/api/v1/consultations/${currentConsultationDetailId}/documents`, formData);
+    if (!ok) throw new Error(json.error || 'Failed to upload document.');
+    showToast('Document uploaded.', 'success');
+    await refreshConsultationDetail();
+  } catch (err) {
+    showToast(err.message || 'Failed to upload document.', 'error');
+  }
+}
+
+async function handleConsultationBundle() {
+  if (!currentConsultationDetailId) return;
+  try {
+    const { ok, json } = await ApiClient.post(`/api/v1/consultations/${currentConsultationDetailId}/bundle`, {});
+    if (!ok) throw new Error(json.error || 'Failed to bundle documents.');
+    const result = json.data;
+    showToast(result.skipped.length
+      ? `Bundle created — skipped ${result.skipped.length} non-PDF file(s).`
+      : 'Bundle created.', 'success');
+    await refreshConsultationDetail();
+  } catch (err) {
+    showToast(err.message || 'Failed to bundle documents.', 'error');
+  }
+}
+
+async function handleSubmitConsultationForApproval() {
+  if (!currentConsultationDetailId) return;
+  try {
+    // ApiClient.post doesn't throw for a 409 (e.g. WRONG_STATE if this was
+    // already submitted from another tab) — must check `ok` explicitly or
+    // a failed submit would still show a success toast.
+    const { ok, json } = await ApiClient.post(`/api/v1/consultations/${currentConsultationDetailId}/submit`, {});
+    if (!ok) throw new Error(json.error || 'Failed to submit for approval.');
+    showToast('Submitted for approval.', 'success');
+    await refreshConsultationDetail();
+  } catch (err) {
+    showToast(err.message || 'Failed to submit for approval.', 'error');
+  }
+}
+
+async function handleApproveConsultation() {
+  if (!currentConsultationDetailId) return;
+  try {
+    await ApiClient.patch(`/api/v1/consultations/${currentConsultationDetailId}/approve`, {});
+    showToast('Consultation approved.', 'success');
+    await refreshConsultationDetail();
+  } catch (err) {
+    showToast(err.message || 'Failed to approve consultation.', 'error');
+  }
+}
+
+async function handleDeclineConsultation() {
+  if (!currentConsultationDetailId) return;
+  const reason = prompt('Reason for declining this consultation note (it will return to draft for revision):');
+  if (!reason || !reason.trim()) return;
+  try {
+    await ApiClient.patch(`/api/v1/consultations/${currentConsultationDetailId}/decline`, { reason: reason.trim() });
+    showToast('Consultation declined and returned to draft.', 'success');
+    await refreshConsultationDetail();
+  } catch (err) {
+    showToast(err.message || 'Failed to decline consultation.', 'error');
+  }
+}
+
+async function handleConvertConsultation() {
+  if (!currentConsultationDetailId) return;
+  const confirmed = confirm('Convert this consultation into a real case? This cannot be undone.');
+  if (!confirmed) return;
+  try {
+    const { ok, json } = await ApiClient.post(`/api/v1/consultations/${currentConsultationDetailId}/convert`, {});
+    if (!ok) throw new Error(json.error || 'Failed to convert consultation.');
+    const result = json.data;
+    showToast(`Case ${result.case.id} created.`, 'success');
+    closeConsultationDetailModal();
+    await loadConsultations();
+    navigateToPage('cases');
+  } catch (err) {
+    showToast(err.message || 'Failed to convert consultation.', 'error');
+  }
+}
+
+registerActions({
+  'submit-consultation': (el, event) => handleConsultationSubmit(event),
+  'open-consultation-detail': (el) => openConsultationDetailModal(el.dataset.consultationId),
+  'save-consultation-overview': () => handleSaveConsultationOverview(),
+  'submit-consultation-for-approval': () => handleSubmitConsultationForApproval(),
+  'approve-consultation': () => handleApproveConsultation(),
+  'decline-consultation': () => handleDeclineConsultation(),
+  'convert-consultation': () => handleConvertConsultation(),
 });
 
 /* ════════════════════════════════════════════
