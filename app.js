@@ -149,6 +149,7 @@ registerActions({
   'case-action': (el) => handleCaseAction(el.dataset.caseAction, el.dataset.caseId, el.dataset.caseName),
   'set-cases-page': (el) => setCasesPage(Number(el.dataset.pageNumber)),
   'open-case-detail': (el) => openCaseDetailModal(el.dataset.caseId, el.dataset.caseName),
+  'generate-matter-analysis': (el) => handleGenerateMatterAnalysis(el.dataset.analysisType, el),
 
   // Billing
   'submit-invoice': (el, event) => handleInvoiceSubmit(event),
@@ -193,38 +194,36 @@ registerActions({
 // ══════════════════════════════════════
 // AUTHENTICATION
 // The app previously had no login of any kind — the backend defaulted
-// every request to a hardcoded user. It now issues a signed JWT on login
-// and requires it (as an Authorization: Bearer header) on every API call.
-// This module owns the token lifecycle on the client: storing it,
-// attaching it to requests, and locking the UI behind the login overlay
-// whenever there is no valid session.
+// every request to a hardcoded user. It now issues a signed JWT on login,
+// delivered as an HttpOnly session cookie (see
+// server/utils/sessionCookie.js) that the browser attaches to every
+// same-origin request on its own — this module never sees or stores the
+// token itself. It only caches a non-sensitive display copy of the user
+// and locks the UI behind the login overlay whenever there is no valid
+// session.
 // ══════════════════════════════════════
 
 const Auth = {
-  TOKEN_KEY: 'slf_auth_token',
+  // The session token itself is no longer readable here at all — it lives
+  // in an HttpOnly cookie the server sets on login (see
+  // server/utils/sessionCookie.js) and the browser attaches automatically
+  // to every same-origin request. Page JavaScript, including an XSS
+  // payload, cannot read an HttpOnly cookie, which is the whole point:
+  // there is nothing left in localStorage for a script to steal. Only a
+  // non-sensitive display copy of the signed-in user is cached here, for
+  // instant UI (name/role in the sidebar, role-gated controls) before the
+  // real auth check (GET /auth/me, which relies on the cookie) resolves.
   USER_KEY: 'slf_auth_user',
 
-  getToken() {
-    try { return localStorage.getItem(this.TOKEN_KEY); } catch { return null; }
-  },
   getUser() {
     try { return JSON.parse(localStorage.getItem(this.USER_KEY) || 'null'); } catch { return null; }
   },
-  setSession(token, user) {
-    try {
-      localStorage.setItem(this.TOKEN_KEY, token);
-      localStorage.setItem(this.USER_KEY, JSON.stringify(user));
-    } catch { /* localStorage unavailable (private mode, etc.) — session just won't persist */ }
+  setSession(user) {
+    try { localStorage.setItem(this.USER_KEY, JSON.stringify(user)); }
+    catch { /* localStorage unavailable (private mode, etc.) — display cache just won't persist */ }
   },
   clearSession() {
-    try {
-      localStorage.removeItem(this.TOKEN_KEY);
-      localStorage.removeItem(this.USER_KEY);
-    } catch { /* ignore */ }
-  },
-  authHeader() {
-    const token = this.getToken();
-    return token ? { Authorization: `Bearer ${token}` } : {};
+    try { localStorage.removeItem(this.USER_KEY); } catch { /* ignore */ }
   }
 };
 
@@ -289,7 +288,7 @@ function hideAuthOverlay() {
 function applyUserToChrome(user) {
   if (!user) return;
   const roleLabels = {
-    CLIENT: 'Client', PARALEGAL: 'Paralegal', ASSOCIATE: 'Associate',
+    CLIENT: 'Client', INTAKE_STAFF: 'Intake Staff', PARALEGAL: 'Paralegal', ASSOCIATE: 'Associate',
     PARTNER: 'Partner, Esq.', SENIOR_PARTNER: 'Senior Partner, Esq.', ADMIN: 'Administrator'
   };
   const initials = user.initials || user.full_name.split(' ').map(p => p[0]).join('').slice(0, 2).toUpperCase();
@@ -326,30 +325,37 @@ function applyRolePermissionsToChrome(user) {
   // see canManageTrust()'s comment on why this floor is stricter than
   // billing's.
   if ($('navTrustItem')) $('navTrustItem').classList.toggle('hidden', !canManageTrust());
+
+  // Management Analytics nav item (Phase 6) — same PARTNER+ floor as the
+  // server's requireRole('PARTNER') on GET /api/v1/analytics/management.
+  if ($('navAnalyticsItem')) $('navAnalyticsItem').classList.toggle('hidden', !canManageTrust());
 }
 
-// Called once at startup: trust a stored token only after the server
-// confirms it's still valid (not expired, user still exists).
+// Called once at startup: there is no token this client can inspect
+// directly anymore (it lives in an HttpOnly cookie — see the Auth module
+// above), so the only way to know whether a session is live is to ask the
+// server and let a 401 mean "not signed in."
 async function initAuth() {
-  const token = Auth.getToken();
-  if (!token) {
-    showAuthOverlay();
-    return;
-  }
   // CLIENT-role users get a separate, simplified portal (see
   // client-portal.html/.js) — they never load this staff SPA. Checked
   // against the cached role first (synchronous, no flash of staff chrome
-  // before redirecting) rather than waiting on the /auth/me round trip.
+  // before redirecting) when a previous session left one cached; this is
+  // a UI convenience only — the real auth check below still runs and
+  // catches a stale/missing cookie regardless of what's cached here.
   const cachedUser = Auth.getUser();
   if (cachedUser && cachedUser.role === 'CLIENT') {
     window.location.href = '/portal';
     return;
   }
   try {
-    const res = await fetch('/api/v1/auth/me', { headers: Auth.authHeader() });
+    const res = await fetch('/api/v1/auth/me');
     const json = await res.json();
     if (!res.ok || !json.success) throw new Error(json.error || 'Session expired.');
-    Auth.setSession(token, json.data);
+    if (json.data.role === 'CLIENT') {
+      window.location.href = '/portal';
+      return;
+    }
+    Auth.setSession(json.data);
     applyUserToChrome(json.data);
     hideAuthOverlay();
     loadInitialAppData();
@@ -394,18 +400,20 @@ document.addEventListener('DOMContentLoaded', () => {
         const json = await res.json();
         if (!res.ok || !json.success) throw new Error(json.error || 'Sign in failed.');
 
-        Auth.setSession(json.data.token, json.data.user);
-        if (json.data.user.role === 'CLIENT') {
-          window.location.href = '/portal';
+        // Password was correct, but the account has 2FA enabled — this is
+        // not a session yet, just a challenge (see authService.js's
+        // issuePendingMfaToken comment). Swap to the second-step form
+        // rather than completing sign-in.
+        if (json.data.mfa_required) {
+          pendingMfaToken = json.data.mfa_token;
+          loginForm.classList.add('hidden');
+          $('mfaForm').classList.remove('hidden');
+          $('mfaCode').focus();
           return;
         }
-        applyUserToChrome(json.data.user);
-        hideAuthOverlay();
-        loadInitialAppData();
+
+        completeLogin(json.data);
         loginForm.reset();
-        if (typeof showToast === 'function') {
-          showToast(`Welcome back, ${json.data.user.full_name.split(' ')[0]}!`, 'info');
-        }
       } catch (err) {
         errBox.textContent = err.message;
         errBox.classList.remove('hidden');
@@ -416,19 +424,99 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   }
 
+  let pendingMfaToken = null;
+
+  function completeLogin(data) {
+    Auth.setSession(data.user);
+    if (data.user.role === 'CLIENT') {
+      window.location.href = '/portal';
+      return;
+    }
+    applyUserToChrome(data.user);
+    hideAuthOverlay();
+    loadInitialAppData();
+    if (typeof showToast === 'function') {
+      showToast(`Welcome back, ${data.user.full_name.split(' ')[0]}!`, 'info');
+    }
+  }
+
+  function resetToLoginForm() {
+    pendingMfaToken = null;
+    $('mfaForm').classList.add('hidden');
+    $('mfaError').classList.add('hidden');
+    $('mfaCode').value = '';
+    $('mfaRecoveryCode').value = '';
+    $('mfaRecoveryGroup').classList.add('hidden');
+    loginForm.classList.remove('hidden');
+  }
+
+  const mfaForm = $('mfaForm');
+  if (mfaForm) {
+    $('mfaUseRecoveryLink').addEventListener('click', (e) => {
+      e.preventDefault();
+      $('mfaRecoveryGroup').classList.remove('hidden');
+      $('mfaRecoveryCode').focus();
+    });
+    $('mfaBackToLoginLink').addEventListener('click', (e) => {
+      e.preventDefault();
+      resetToLoginForm();
+    });
+
+    mfaForm.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const code = $('mfaCode').value.trim();
+      const recoveryCode = $('mfaRecoveryCode').value.trim();
+      const btn = $('mfaSubmitBtn');
+      const errBox = $('mfaError');
+      errBox.classList.add('hidden');
+
+      if (!code && !recoveryCode) {
+        errBox.textContent = 'Enter your authenticator code or a recovery code.';
+        errBox.classList.remove('hidden');
+        return;
+      }
+
+      btn.disabled = true;
+      btn.textContent = 'Verifying…';
+      try {
+        const res = await fetch('/api/v1/auth/2fa/verify-login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            mfa_token: pendingMfaToken,
+            code: code || undefined,
+            recovery_code: recoveryCode || undefined
+          })
+        });
+        const json = await res.json();
+        if (!res.ok || !json.success) throw new Error(json.error || 'Verification failed.');
+
+        completeLogin(json.data);
+        mfaForm.reset();
+        resetToLoginForm();
+        loginForm.reset();
+      } catch (err) {
+        errBox.textContent = err.message;
+        errBox.classList.remove('hidden');
+      } finally {
+        btn.disabled = false;
+        btn.textContent = 'Verify';
+      }
+    });
+  }
+
   const signOutBtn = $('signOutBtn');
   if (signOutBtn) {
     signOutBtn.addEventListener('click', async (e) => {
       e.preventDefault();
 
-      // Revoke the token server-side BEFORE dropping it locally, so
-      // signing out actually ends the session everywhere rather than
-      // just forgetting it in this browser. Clearing localStorage alone
-      // left a copied token working for the rest of its 12-hour TTL.
+      // Revoke the token server-side (the server clears the session
+      // cookie on this same call) so signing out actually ends the
+      // session everywhere, not just in this browser tab.
       //
       // Best-effort: if the call fails (offline, server down) the local
-      // session is still cleared, because refusing to log someone out
-      // because the network is unavailable is the worse failure.
+      // display cache is still cleared, because refusing to log someone
+      // out because the network is unavailable is the worse failure.
       try {
         await ApiClient.post('/api/v1/auth/logout', {});
       } catch (err) {
@@ -492,6 +580,7 @@ function navigateToPage(page) {
     hearings:       'Hearing Log',
     consultations:  'Consultation Intake',
     trust:          'Trust Accounting',
+    analytics:      'Management Analytics',
     settings:       'Settings',
   };
   $('pageTitle').textContent = pageTitles[page] || 'Document Vault';
@@ -504,6 +593,7 @@ function navigateToPage(page) {
   const hearingsPage = $('hearingsPage');
   const consultationsPage = $('consultationsPage');
   const trustPage = $('trustPage');
+  const analyticsPage = $('analyticsPage');
   const settingsPage = $('settingsPage');
   const placeholder = $('placeholderPage');
 
@@ -516,6 +606,7 @@ function navigateToPage(page) {
   if (hearingsPage) hearingsPage.classList.add('hidden');
   if (consultationsPage) consultationsPage.classList.add('hidden');
   if (trustPage) trustPage.classList.add('hidden');
+  if (analyticsPage) analyticsPage.classList.add('hidden');
   if (settingsPage) settingsPage.classList.add('hidden');
   if (placeholder) placeholder.classList.add('hidden');
 
@@ -558,6 +649,11 @@ function navigateToPage(page) {
     if (trustPage) {
       trustPage.classList.remove('hidden');
       initTrustPage();
+    }
+  } else if (page === 'analytics') {
+    if (analyticsPage) {
+      analyticsPage.classList.remove('hidden');
+      initAnalyticsPage();
     }
   } else if (page === 'settings') {
     if (settingsPage) {
@@ -1719,12 +1815,18 @@ async function handleCaseAction(action, caseId, caseName) {
 
 const CASE_DETAIL_STATUS_LABEL = { active: 'Active', pending: 'Awaiting Docs', urgent: 'Urgent Deadline', closed: 'Closed' };
 
+let caseDetailCurrentId = null;
+
 async function openCaseDetailModal(caseId, caseName) {
+  caseDetailCurrentId = caseId;
   $('caseDetailCaseLabel').textContent = `${caseName} (${caseId})`;
   $('caseDetailOverview').innerHTML = '<p style="color:var(--slate-400)">Loading…</p>';
   $('caseDetailDocuments').innerHTML = '';
   $('caseDetailDeadlines').innerHTML = '';
   $('caseDetailActivity').innerHTML = '';
+  $('caseDetailChronology').innerHTML = '<p style="color:var(--slate-400)">Loading…</p>';
+  $('caseDetailIssueMatrix').innerHTML = '';
+  $('caseDetailRemedyOutline').innerHTML = '';
 
   const modal = $('caseDetailModal');
   modal.classList.remove('hidden');
@@ -1744,6 +1846,17 @@ async function openCaseDetailModal(caseId, caseName) {
   } catch (err) {
     $('caseDetailOverview').innerHTML = `<p style="color:#E74C3C">Failed to load case file: ${escapeHtml(err.message)}</p>`;
   }
+
+  try {
+    const overview = await ApiClient.get(`/api/v1/cases/${caseId}/analysis`);
+    renderChronologyBlock(overview.chronology);
+    renderIssueMatrixBlock(overview.issue_matrix);
+    renderRemedyOutlineBlock(overview.remedy_outline);
+  } catch (err) {
+    $('caseDetailChronology').innerHTML = `<p style="color:#E74C3C">Failed to load matter analysis: ${escapeHtml(err.message)}</p>`;
+  }
+
+  await loadCourtSyncPanel(caseId);
 }
 
 function closeCaseDetailModal() {
@@ -1813,6 +1926,231 @@ function renderCaseDetailActivity(items) {
     </div>
   `).join('');
 }
+
+// Matter Analysis (Phase 3) — chronology / issue matrix / remedy outline.
+// Every AI-generated string here is treated as untrusted content, same as
+// any other case data rendered via escapeHtml elsewhere in this file — it
+// is source material read from the firm's own documents, not something to
+// trust as pre-sanitized just because it came back as structured JSON.
+
+function sourceLabel(source) {
+  return source && source.source_label ? escapeHtml(source.source_label) : 'Unknown source';
+}
+
+function renderChronologyBlock(analysis) {
+  const el = $('caseDetailChronology');
+  if (!analysis) { el.innerHTML = '<p style="color:var(--slate-400)">Not yet generated.</p>'; return; }
+  const events = analysis.content.events || [];
+  if (!events.length) { el.innerHTML = '<p style="color:var(--slate-400)">No dated events could be extracted from this matter\'s documents/hearings.</p>'; return; }
+  el.innerHTML = `
+    <div style="color:var(--slate-400); font-size:11px; margin-bottom:6px;">Generated ${new Date(analysis.created_at).toLocaleString()}${analysis.generated_by_name ? ' by ' + escapeHtml(analysis.generated_by_name) : ''}</div>
+    ${events.map(e => `
+      <div style="display:flex; gap:10px; padding:6px 0; border-bottom:1px solid rgba(255,255,255,0.06);">
+        <span class="activity-time" style="min-width:90px;">${escapeHtml(e.date || 'Undated')}</span>
+        <span style="flex:1;">${escapeHtml(e.description)} <span style="color:var(--slate-400); font-size:11px;">— ${sourceLabel(e.source)}</span></span>
+      </div>
+    `).join('')}
+  `;
+}
+
+function renderIssueMatrixBlock(analysis) {
+  const el = $('caseDetailIssueMatrix');
+  if (!analysis) { el.innerHTML = '<p style="color:var(--slate-400)">Not yet generated.</p>'; return; }
+  const issues = analysis.content.issues || [];
+  if (!issues.length) { el.innerHTML = '<p style="color:var(--slate-400)">No issues could be identified from this matter\'s documents/hearings.</p>'; return; }
+  el.innerHTML = `
+    <div style="color:var(--slate-400); font-size:11px; margin-bottom:6px;">Generated ${new Date(analysis.created_at).toLocaleString()}${analysis.generated_by_name ? ' by ' + escapeHtml(analysis.generated_by_name) : ''}</div>
+    ${issues.map(i => `
+      <div style="padding:6px 0; border-bottom:1px solid rgba(255,255,255,0.06);">
+        <strong>${escapeHtml(i.issue)}</strong>
+        <div>${escapeHtml(i.description)}</div>
+        <div style="color:var(--slate-400); font-size:11px;">Sources: ${(i.sources || []).map(sourceLabel).join(', ')}</div>
+      </div>
+    `).join('')}
+  `;
+}
+
+function renderRemedyOutlineBlock(analysis) {
+  const el = $('caseDetailRemedyOutline');
+  if (!analysis) { el.innerHTML = '<p style="color:var(--slate-400)">Not yet generated.</p>'; return; }
+  const sections = analysis.content.sections || [];
+  if (!sections.length) { el.innerHTML = '<p style="color:var(--slate-400)">No remedy outline could be drafted from the chronology/issue matrix.</p>'; return; }
+  el.innerHTML = `
+    <div style="color:var(--slate-400); font-size:11px; margin-bottom:6px;">
+      Generated ${new Date(analysis.created_at).toLocaleString()}${analysis.generated_by_name ? ' by ' + escapeHtml(analysis.generated_by_name) : ''} —
+      this is a DRAFT for an attorney to review, not a filed document.
+    </div>
+    ${sections.map(s => `
+      <div style="padding:6px 0; border-bottom:1px solid rgba(255,255,255,0.06);">
+        <strong>${escapeHtml(s.heading)}</strong>
+        <div>${escapeHtml(s.content)}</div>
+        <div style="color:var(--slate-400); font-size:11px;">Sources: ${(s.sources || []).map(sourceLabel).join(', ')}</div>
+      </div>
+    `).join('')}
+  `;
+}
+
+const MATTER_ANALYSIS_RENDERERS = {
+  chronology: renderChronologyBlock,
+  issue_matrix: renderIssueMatrixBlock,
+  remedy_outline: renderRemedyOutlineBlock
+};
+
+async function handleGenerateMatterAnalysis(analysisType, buttonEl) {
+  if (!caseDetailCurrentId) return;
+  const renderer = MATTER_ANALYSIS_RENDERERS[analysisType];
+  if (!renderer) return;
+
+  const originalLabel = buttonEl.textContent;
+  buttonEl.disabled = true;
+  buttonEl.textContent = 'Generating…';
+
+  try {
+    const { json } = await ApiClient.post(`/api/v1/cases/${caseDetailCurrentId}/analysis/${analysisType}/generate`, {});
+    if (!json.success) throw new Error(json.error || 'Generation failed.');
+    renderer(json.data);
+    // remedy_outline auto-generates chronology/issue_matrix if either was
+    // missing — refresh those two blocks too so the UI reflects what the
+    // server actually built, not just the block the user clicked.
+    if (analysisType === 'remedy_outline') {
+      const overview = await ApiClient.get(`/api/v1/cases/${caseDetailCurrentId}/analysis`);
+      renderChronologyBlock(overview.chronology);
+      renderIssueMatrixBlock(overview.issue_matrix);
+    }
+    showToast('Analysis generated.', 'success');
+  } catch (err) {
+    showToast(err.message || 'Failed to generate analysis.', 'error');
+  } finally {
+    buttonEl.disabled = false;
+    buttonEl.textContent = originalLabel;
+  }
+}
+
+// ─── Court Sync (Phase 5) ───────────────────────────────────────────────
+// Backs GET/PATCH/POST /api/v1/cases/:id/court-sync[...] — see
+// server/services/courtSyncService.js. Only the 'manual' provider ships
+// today (no vendor contract signed yet — see courtSync/providers/
+// manualProvider.js), so Sync Now will 503 until a real one is configured;
+// Manual Override is how staff record a case's state by hand until then.
+
+const COURT_SYNC_STATUS_LABEL = {
+  unlinked: 'Not linked', synced: 'Synced', error: 'Sync error', manual_override: 'Manual override'
+};
+const COURT_SYNC_STATUS_COLOR = {
+  unlinked: 'var(--slate-400)', synced: '#2ECC71', error: '#E74C3C', manual_override: 'var(--gold-500)'
+};
+
+async function loadCourtSyncPanel(caseId) {
+  try {
+    const [state, logs] = await Promise.all([
+      ApiClient.get(`/api/v1/cases/${caseId}/court-sync`),
+      ApiClient.get(`/api/v1/cases/${caseId}/court-sync/logs`)
+    ]);
+    renderCourtSyncPanel(state, logs);
+  } catch (err) {
+    $('courtSyncState').innerHTML = `<p style="color:#E74C3C">Failed to load court sync: ${escapeHtml(err.message)}</p>`;
+  }
+}
+
+function renderCourtSyncPanel(state, logs) {
+  $('courtSyncCnrInput').value = state.cnr_number || '';
+  $('courtSyncCourtInput').value = state.court_name || '';
+  $('courtSyncWatchToggle').checked = !!state.cause_list_watch;
+  $('courtSyncClearOverrideBtn').classList.toggle('hidden', state.court_sync_status !== 'manual_override');
+
+  const s = state.court_synced_state;
+  $('courtSyncState').innerHTML = `
+    <div style="display:flex; align-items:center; gap:8px; margin-bottom:4px;">
+      <span style="color:${COURT_SYNC_STATUS_COLOR[state.court_sync_status] || 'var(--slate-400)'}; font-weight:600;">${escapeHtml(COURT_SYNC_STATUS_LABEL[state.court_sync_status] || state.court_sync_status)}</span>
+      ${state.on_upcoming_cause_list ? '<span style="color:var(--gold-500); font-size:12px;">On upcoming cause list</span>' : ''}
+    </div>
+    ${s ? `
+      <div style="color:var(--slate-400); font-size:12px;">
+        ${s.stage ? `Stage: ${escapeHtml(s.stage)} · ` : ''}
+        ${s.next_hearing_date ? `Next hearing: ${escapeHtml(s.next_hearing_date)} · ` : ''}
+        ${s.cause_list_date ? `Cause list: ${escapeHtml(s.cause_list_date)}` : ''}
+      </div>
+      ${s.last_order ? `<div style="font-size:12px; margin-top:2px;">Last order: ${escapeHtml(s.last_order)}</div>` : ''}
+    ` : '<div style="color:var(--slate-400); font-size:12px;">No synced state yet.</div>'}
+    ${state.court_sync_override_note ? `<div style="color:var(--gold-500); font-size:12px; margin-top:4px;">Override note: ${escapeHtml(state.court_sync_override_note)}</div>` : ''}
+  `;
+
+  $('courtSyncLogs').innerHTML = logs.length
+    ? `History: ${logs.slice(0, 5).map(l => `${escapeHtml(l.status)} (${escapeHtml(l.provider)}, ${new Date(l.created_at).toLocaleDateString()})`).join(', ')}`
+    : '';
+}
+
+async function handleCourtSyncLink() {
+  if (!caseDetailCurrentId) return;
+  const cnr = $('courtSyncCnrInput').value.trim();
+  if (!cnr) { showToast('Enter a CNR number to link.', 'error'); return; }
+  try {
+    await ApiClient.patch(`/api/v1/cases/${caseDetailCurrentId}/court-sync/link`, {
+      cnr_number: cnr, court_name: $('courtSyncCourtInput').value.trim() || null
+    });
+    showToast('Case linked for court sync.', 'success');
+    await loadCourtSyncPanel(caseDetailCurrentId);
+  } catch (err) {
+    showToast(err.message || 'Failed to link case.', 'error');
+  }
+}
+
+async function handleCourtSyncNow() {
+  if (!caseDetailCurrentId) return;
+  try {
+    await ApiClient.post(`/api/v1/cases/${caseDetailCurrentId}/court-sync/sync`, {});
+    showToast('Court sync complete.', 'success');
+  } catch (err) {
+    showToast(err.message || 'Court sync failed.', 'error');
+  } finally {
+    await loadCourtSyncPanel(caseDetailCurrentId);
+  }
+}
+
+async function handleCourtSyncOverride() {
+  if (!caseDetailCurrentId) return;
+  const note = prompt('Why is this being manually corrected?');
+  if (!note || !note.trim()) return;
+  const stage = prompt('Stage (optional):') || null;
+  try {
+    await ApiClient.post(`/api/v1/cases/${caseDetailCurrentId}/court-sync/override`, {
+      synced_state: { stage }, note: note.trim()
+    });
+    showToast('Manual override recorded.', 'success');
+    await loadCourtSyncPanel(caseDetailCurrentId);
+  } catch (err) {
+    showToast(err.message || 'Failed to record override.', 'error');
+  }
+}
+
+async function handleCourtSyncClearOverride() {
+  if (!caseDetailCurrentId) return;
+  try {
+    await ApiClient.post(`/api/v1/cases/${caseDetailCurrentId}/court-sync/clear-override`, {});
+    showToast('Override cleared.', 'success');
+    await loadCourtSyncPanel(caseDetailCurrentId);
+  } catch (err) {
+    showToast(err.message || 'Failed to clear override.', 'error');
+  }
+}
+
+async function handleCourtSyncToggleWatch(checkboxEl) {
+  if (!caseDetailCurrentId) return;
+  try {
+    await ApiClient.patch(`/api/v1/cases/${caseDetailCurrentId}/court-sync/watch`, { watch: checkboxEl.checked });
+  } catch (err) {
+    checkboxEl.checked = !checkboxEl.checked;
+    showToast(err.message || 'Failed to update cause list watch.', 'error');
+  }
+}
+
+registerActions({
+  'court-sync-link': () => handleCourtSyncLink(),
+  'court-sync-now': () => handleCourtSyncNow(),
+  'court-sync-override': () => handleCourtSyncOverride(),
+  'court-sync-clear-override': () => handleCourtSyncClearOverride(),
+  'court-sync-toggle-watch': (el) => handleCourtSyncToggleWatch(el),
+});
 
 function setupCaseDetailListeners() {
   $('caseDetailModalCloseBtn').addEventListener('click', closeCaseDetailModal);
@@ -2996,11 +3334,103 @@ function canLogHearingUpdate() {
   return role === 'ASSOCIATE' || role === 'PARTNER' || role === 'SENIOR_PARTNER' || role === 'ADMIN';
 }
 
+// Phase 4 drafting automation. Mirrors the server's requireRole('ASSOCIATE')
+// on POST /api/v1/tasks/:id/drafts/generate (generating calls the AI
+// provider, same floor as matter analysis's own generate step) and
+// requireRole('PARTNER') on approve/reject — the human-vetting gate a draft
+// must pass before anyone acts on it, same floor consultation approve/
+// decline already uses.
+function canGenerateDrafts() {
+  return canLogHearingUpdate();
+}
+
+function canApproveDrafts() {
+  const role = Auth.getUser() && Auth.getUser().role;
+  return role === 'PARTNER' || role === 'SENIOR_PARTNER' || role === 'ADMIN';
+}
+
 function initHearingsPage() {
   hearingsLoadedOnce = true;
   setupHearingListeners();
   loadHearingLog();
   loadHearingTasks();
+  loadCauseListWatch();
+  loadLimitationWatch();
+}
+
+const LIMITATION_RISK_COLOR = { none: 'var(--slate-400)', watch: 'var(--gold-500)', urgent: '#E74C3C' };
+
+async function loadLimitationWatch() {
+  const tbody = $('limitationWatchTableBody');
+  const emptyState = $('limitationWatchEmptyState');
+  const table = $('limitationWatchTable');
+  if (!tbody) return;
+  try {
+    const deadlines = await ApiClient.get('/api/v1/limitation-deadlines?status=open');
+    if (!deadlines.length) {
+      emptyState.classList.remove('hidden');
+      table.classList.add('hidden');
+      return;
+    }
+    emptyState.classList.add('hidden');
+    table.classList.remove('hidden');
+    tbody.innerHTML = deadlines.map(d => `
+      <tr${d.risk_flag === 'urgent' ? ' style="background:rgba(231,76,60,0.08);"' : ''}>
+        <td>${escapeHtml(d.case_name || d.case_id)}</td>
+        <td>${escapeHtml(d.description)}</td>
+        <td>${escapeHtml(d.limitation_date)}</td>
+        <td><span style="color:${LIMITATION_RISK_COLOR[d.risk_flag]}; font-weight:600; text-transform:capitalize;">${escapeHtml(d.risk_flag)}</span></td>
+        <td class="actions-cell-wrap">
+          <button class="row-action-btn" data-action="limitation-resolve" data-deadline-id="${escapeAttr(d.id)}" title="Mark resolved">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:16px;height:16px;"><polyline points="20 6 9 17 4 12"/></svg>
+          </button>
+        </td>
+      </tr>
+    `).join('');
+  } catch (err) {
+    console.error('Limitation watch load error', err);
+    tbody.innerHTML = `<tr><td colspan="5" style="text-align:center;color:var(--slate-400)">Error loading limitation watch</td></tr>`;
+  }
+}
+
+async function handleLimitationResolve(deadlineId) {
+  const note = prompt('Resolution note (optional):') || undefined;
+  try {
+    await ApiClient.patch(`/api/v1/limitation-deadlines/${deadlineId}/resolve`, { note });
+    showToast('Deadline marked resolved.', 'success');
+    await loadLimitationWatch();
+  } catch (err) {
+    showToast(err.message || 'Failed to resolve deadline.', 'error');
+  }
+}
+
+async function loadCauseListWatch() {
+  const tbody = $('causeListWatchTableBody');
+  const emptyState = $('causeListWatchEmptyState');
+  const table = $('causeListWatchTable');
+  if (!tbody) return;
+  try {
+    const watchlist = await ApiClient.get('/api/v1/court-sync/watchlist');
+    if (!watchlist.length) {
+      emptyState.classList.remove('hidden');
+      table.classList.add('hidden');
+      return;
+    }
+    emptyState.classList.add('hidden');
+    table.classList.remove('hidden');
+    tbody.innerHTML = watchlist.map(w => `
+      <tr${w.on_upcoming_cause_list ? ' style="background:rgba(212,175,55,0.08);"' : ''}>
+        <td>${escapeHtml(w.case_name)} <span style="color:var(--slate-400); font-size:12px;">(${escapeHtml(w.case_id)})</span></td>
+        <td>${escapeHtml(w.cnr_number || '—')}</td>
+        <td>${escapeHtml(w.court_name || '—')}</td>
+        <td${w.on_upcoming_cause_list ? ' style="color:var(--gold-500);font-weight:600;"' : ''}>${w.cause_list_date ? escapeHtml(w.cause_list_date) : '—'}</td>
+        <td>${escapeHtml(COURT_SYNC_STATUS_LABEL[w.court_sync_status] || w.court_sync_status)}</td>
+      </tr>
+    `).join('');
+  } catch (err) {
+    console.error('Cause list watch load error', err);
+    tbody.innerHTML = `<tr><td colspan="5" style="text-align:center;color:var(--slate-400)">Error loading cause list watch</td></tr>`;
+  }
 }
 
 async function loadHearingLog() {
@@ -3104,12 +3534,27 @@ function renderHearingTaskTable() {
       <td${t.overdue ? ' style="color:#E74C3C;font-weight:600;"' : ''}>${formatInvoiceDate(t.due_date)}</td>
       <td>${t.auto_generated ? '<span style="color:var(--gold-500);font-size:12px;">Auto</span>' : '<span style="color:var(--slate-400);font-size:12px;">Manual</span>'}</td>
       <td class="actions-cell-wrap">
+        ${renderDraftTaskAction(t)}
         <button class="row-action-btn" data-action="task-mark-done" data-task-id="${escapeAttr(t.id)}" title="Mark done">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:16px;height:16px;"><polyline points="20 6 9 17 4 12"/></svg>
         </button>
       </td>
     </tr>
   `).join('');
+}
+
+// Phase 4: a 'draft_needed' task (Phase 1's reminder engine output) gets a
+// Generate button while open, and a Review button once a draft exists for
+// it and is awaiting a PARTNER's approve/reject.
+function renderDraftTaskAction(t) {
+  if (t.task_type !== 'draft_needed') return '';
+  if (t.status === 'open' && canGenerateDrafts()) {
+    return `<button class="btn-ghost" style="padding:2px 10px; font-size:12px;" data-action="generate-draft" data-task-id="${escapeAttr(t.id)}" data-case-id="${escapeAttr(t.case_id || '')}">Generate Draft</button>`;
+  }
+  if (t.status === 'in_progress') {
+    return `<button class="btn-ghost" style="padding:2px 10px; font-size:12px;" data-action="review-draft" data-task-id="${escapeAttr(t.id)}" data-case-id="${escapeAttr(t.case_id || '')}">Review Draft</button>`;
+  }
+  return '';
 }
 
 function setupHearingListeners() {
@@ -3141,6 +3586,14 @@ function setupHearingListeners() {
   $('hearingLogModal').addEventListener('click', (e) => {
     if (e.target === $('hearingLogModal')) closeHearingLogModal();
   });
+
+  $('draftReviewModalCloseBtn').addEventListener('click', closeDraftReviewModal);
+  $('draftReviewModalCloseBtn2').addEventListener('click', closeDraftReviewModal);
+  $('draftReviewModal').addEventListener('click', (e) => {
+    if (e.target === $('draftReviewModal')) closeDraftReviewModal();
+  });
+  $('draftReviewApproveBtn').addEventListener('click', handleApproveDraft);
+  $('draftReviewRejectBtn').addEventListener('click', handleRejectDraft);
 
   hearingListenersInitialized = true;
 }
@@ -3262,11 +3715,103 @@ async function handleTaskMarkDone(taskId) {
   }
 }
 
+// ─── Phase 4: drafting automation review modal ─────────────────────────
+let currentReviewDraft = null;
+
+async function handleGenerateDraft(taskId, buttonEl) {
+  const originalLabel = buttonEl.textContent;
+  buttonEl.disabled = true;
+  buttonEl.textContent = 'Generating…';
+  try {
+    const { json } = await ApiClient.post(`/api/v1/tasks/${taskId}/drafts/generate`, {});
+    if (!json.success) throw new Error(json.error || 'Generation failed.');
+    await loadHearingTasks();
+    openDraftReviewModal(json.data);
+  } catch (err) {
+    showToast(err.message || 'Failed to generate draft.', 'error');
+  } finally {
+    buttonEl.disabled = false;
+    buttonEl.textContent = originalLabel;
+  }
+}
+
+async function handleReviewDraftTask(taskId, caseId) {
+  if (!caseId) { showToast('This task has no case attached.', 'error'); return; }
+  try {
+    const drafts = await ApiClient.get(`/api/v1/cases/${caseId}/drafts`);
+    const pending = drafts.find(d => d.task_id === taskId && d.status === 'pending_review');
+    if (!pending) { showToast('No draft is currently awaiting review for this task.', 'error'); return; }
+    openDraftReviewModal(pending);
+  } catch (err) {
+    showToast(err.message || 'Failed to load draft.', 'error');
+  }
+}
+
+function openDraftReviewModal(draft) {
+  currentReviewDraft = draft;
+  $('draftReviewModalTitle').textContent = `${draft.template_label || draft.template_key} — Review`;
+  $('draftReviewSections').innerHTML = (draft.content.sections || []).map(s => `
+    <div style="padding:10px 0; border-bottom:1px solid rgba(255,255,255,0.06);">
+      <strong>${escapeHtml(s.heading)}</strong>
+      <div style="white-space:pre-wrap; margin:4px 0;">${escapeHtml(s.content)}</div>
+      <div style="color:var(--slate-400); font-size:11px;">Sources: ${(s.sources || []).map(sourceLabel).join(', ') || 'none cited'}</div>
+    </div>
+  `).join('');
+  $('draftReviewRejectReason').value = '';
+
+  const canReview = canApproveDrafts() && draft.status === 'pending_review';
+  $('draftReviewApproveBtn').classList.toggle('hidden', !canReview);
+  $('draftReviewRejectBtn').classList.toggle('hidden', !canReview);
+  $('draftReviewRejectGroup').classList.toggle('hidden', !canReview);
+
+  const modal = $('draftReviewModal');
+  modal.classList.remove('hidden');
+  setTimeout(() => modal.classList.add('active'), 10);
+}
+
+function closeDraftReviewModal() {
+  const modal = $('draftReviewModal');
+  if (modal) {
+    modal.classList.remove('active');
+    setTimeout(() => modal.classList.add('hidden'), 300);
+  }
+  currentReviewDraft = null;
+}
+
+async function handleApproveDraft() {
+  if (!currentReviewDraft) return;
+  try {
+    await ApiClient.patch(`/api/v1/drafts/${currentReviewDraft.id}/approve`, {});
+    showToast('Draft approved.', 'success');
+    closeDraftReviewModal();
+    await loadHearingTasks();
+  } catch (err) {
+    showToast(err.message || 'Failed to approve draft.', 'error');
+  }
+}
+
+async function handleRejectDraft() {
+  if (!currentReviewDraft) return;
+  const reason = $('draftReviewRejectReason').value.trim();
+  if (!reason) { showToast('A reason is required to reject a draft.', 'error'); return; }
+  try {
+    await ApiClient.patch(`/api/v1/drafts/${currentReviewDraft.id}/reject`, { reason });
+    showToast('Draft rejected — task reopened for regeneration.', 'success');
+    closeDraftReviewModal();
+    await loadHearingTasks();
+  } catch (err) {
+    showToast(err.message || 'Failed to reject draft.', 'error');
+  }
+}
+
 registerActions({
   'submit-hearing': (el, event) => handleHearingSubmit(event),
   'submit-hearing-log': (el, event) => handleHearingLogSubmit(event),
   'open-hearing-log-modal': (el) => openHearingLogModal(el.dataset.hearingId),
   'task-mark-done': (el) => handleTaskMarkDone(el.dataset.taskId),
+  'generate-draft': (el) => handleGenerateDraft(el.dataset.taskId, el),
+  'review-draft': (el) => handleReviewDraftTask(el.dataset.taskId, el.dataset.caseId),
+  'limitation-resolve': (el) => handleLimitationResolve(el.dataset.deadlineId),
 });
 
 /* ════════════════════════════════════════════
@@ -4715,6 +5260,7 @@ function setSettingsTab(tab) {
     btn.classList.toggle('active', btn.dataset.settingsTab === tab);
   });
   $('settingsTeamTab').classList.toggle('hidden', tab !== 'team');
+  $('settingsSecurityTab').classList.toggle('hidden', tab !== 'security');
   $('settingsAuditTab').classList.toggle('hidden', tab !== 'audit');
   $('settingsStorageTab').classList.toggle('hidden', tab !== 'storage');
 
@@ -4723,6 +5269,7 @@ function setSettingsTab(tab) {
   }
   if (tab === 'audit') loadAuditLog();
   if (tab === 'storage') loadStorageQuota();
+  if (tab === 'security') initSecurityTab();
 }
 
 async function loadTeam() {
@@ -4823,7 +5370,123 @@ function setupSettingsPageListeners() {
 
   $('storageQuotaForm').addEventListener('submit', handleStorageQuotaSubmit);
 
+  $('mfaStartSetupBtn').addEventListener('click', handleMfaStartSetup);
+  $('mfaConfirmEnableBtn').addEventListener('click', handleMfaConfirmEnable);
+  $('mfaDisableBtn').addEventListener('click', handleMfaDisable);
+  $('mfaRecoveryCodesDoneBtn').addEventListener('click', () => {
+    $('mfaRecoveryCodesView').classList.add('hidden');
+    initSecurityTab();
+  });
+
   settingsListenersInitialized = true;
+}
+
+// ─── Security tab: self-service 2FA (Phase 6) ───────────────────────────
+// Backs POST /api/v1/auth/2fa/setup|enable|disable — see
+// server/services/twoFactorService.js. Every role manages their own 2FA;
+// there is no admin-managed toggle for someone else's account.
+
+async function initSecurityTab() {
+  ['mfaSetupView', 'mfaRecoveryCodesView'].forEach(id => $(id).classList.add('hidden'));
+  $('mfaEnableCode').value = '';
+  try {
+    const me = await ApiClient.get('/api/v1/auth/me');
+    $('mfaDisabledView').classList.toggle('hidden', !!me.totp_enabled);
+    $('mfaEnabledView').classList.toggle('hidden', !me.totp_enabled);
+    $('mfaDisablePassword').value = '';
+  } catch (err) {
+    console.error('Failed to load 2FA status', err);
+  }
+}
+
+async function handleMfaStartSetup() {
+  try {
+    const { json } = await ApiClient.post('/api/v1/auth/2fa/setup', {});
+    if (!json.success) throw new Error(json.error || 'Failed to start 2FA setup.');
+    $('mfaSecretDisplay').textContent = json.data.secret;
+    $('mfaSetupView').classList.remove('hidden');
+    $('mfaEnableCode').focus();
+  } catch (err) {
+    showToast(err.message || 'Failed to start 2FA setup.', 'error');
+  }
+}
+
+async function handleMfaConfirmEnable() {
+  const code = $('mfaEnableCode').value.trim();
+  if (!code) { showToast('Enter the 6-digit code from your authenticator app.', 'error'); return; }
+  try {
+    const { json } = await ApiClient.post('/api/v1/auth/2fa/enable', { code });
+    if (!json.success) throw new Error(json.error || 'Failed to enable 2FA.');
+
+    $('mfaSetupView').classList.add('hidden');
+    $('mfaRecoveryCodesList').innerHTML = json.data.recovery_codes.map(c => escapeHtml(c)).join('<br>');
+    $('mfaRecoveryCodesView').classList.remove('hidden');
+    showToast('Two-factor authentication enabled.', 'success');
+  } catch (err) {
+    showToast(err.message || 'Failed to enable 2FA.', 'error');
+  }
+}
+
+async function handleMfaDisable() {
+  const password = $('mfaDisablePassword').value;
+  if (!password) { showToast('Enter your password to disable 2FA.', 'error'); return; }
+  if (!confirm('Disable two-factor authentication? This will also sign you out of every other session.')) return;
+  try {
+    const { json } = await ApiClient.post('/api/v1/auth/2fa/disable', { password });
+    if (!json.success) throw new Error(json.error || 'Failed to disable 2FA.');
+    showToast('Two-factor authentication disabled.', 'success');
+    await initSecurityTab();
+  } catch (err) {
+    showToast(err.message || 'Failed to disable 2FA.', 'error');
+  }
+}
+
+/* ════════════════════════════════════════════
+   MANAGEMENT ANALYTICS PAGE (Phase 6, PARTNER+)
+   Backs GET /api/v1/analytics/management — see server/services/
+   dashboardService.js's getManagementAnalytics.
+   ════════════════════════════════════════════ */
+
+const CASE_STATUS_DISPLAY_LABEL = { active: 'Active', pending: 'Pending', urgent: 'Urgent', closed: 'Closed' };
+
+async function initAnalyticsPage() {
+  try {
+    const analytics = await ApiClient.get('/api/v1/analytics/management');
+    renderAnalyticsPage(analytics);
+  } catch (err) {
+    showToast(err.message || 'Failed to load management analytics.', 'error');
+  }
+}
+
+function renderAnalyticsPage(analytics) {
+  $('analyticsRevenueYtd').textContent = `₹${Number(analytics.billing.revenue_ytd).toLocaleString('en-IN')}`;
+  $('analyticsOverdueCount').textContent = analytics.billing.overdue_invoices_count;
+  $('analyticsOverdueAmount').textContent = `₹${Number(analytics.billing.overdue_invoices_amount).toLocaleString('en-IN')}`;
+
+  const totalByStatus = analytics.cases_by_status.reduce((sum, r) => sum + r.count, 0) || 1;
+  $('analyticsCasesByStatus').innerHTML = analytics.cases_by_status.map(r => `
+    <div style="display:flex; justify-content:space-between; padding:4px 0;">
+      <span>${escapeHtml(CASE_STATUS_DISPLAY_LABEL[r.status] || r.status)}</span>
+      <span style="color:var(--slate-400);">${r.count} (${Math.round((r.count / totalByStatus) * 100)}%)</span>
+    </div>
+  `).join('') || '<p style="color:var(--slate-400);">No cases yet.</p>';
+
+  $('analyticsCasesByType').innerHTML = analytics.cases_by_type.map(r => `
+    <div style="display:flex; justify-content:space-between; padding:4px 0;">
+      <span>${escapeHtml(r.case_type)}</span>
+      <span style="color:var(--slate-400);">${r.count}</span>
+    </div>
+  `).join('') || '<p style="color:var(--slate-400);">No cases yet.</p>';
+
+  const tbody = $('staffWorkloadTableBody');
+  tbody.innerHTML = analytics.staff_workload.map(w => `
+    <tr>
+      <td>${escapeHtml(w.full_name)}</td>
+      <td>${escapeHtml(w.role)}</td>
+      <td>${w.open_tasks}</td>
+      <td>${w.hours_this_month}</td>
+    </tr>
+  `).join('') || `<tr><td colspan="4" style="text-align:center;color:var(--slate-400)">No staff on this firm yet</td></tr>`;
 }
 
 async function handleInviteUserSubmit(event) {
@@ -5126,13 +5789,15 @@ async function loadVaultTagFilterOptions() {
 }
 
 // API Wrapper
-// Every call attaches the signed-in user's bearer token (see the Auth
-// module above). A 401 means the token is missing/expired/invalid — the
-// user is dropped back to the login screen rather than the app silently
-// operating as no one / the wrong tenant.
+// The session lives in an HttpOnly cookie (see the Auth module above and
+// server/utils/sessionCookie.js) that the browser attaches to every
+// same-origin request automatically — no header for this code to set. A
+// 401 means the cookie is missing/expired/invalid — the user is dropped
+// back to the login screen rather than the app silently operating as no
+// one / the wrong tenant.
 const ApiClient = {
   async get(url) {
-    const res = await fetch(url, { headers: { ...Auth.authHeader() } });
+    const res = await fetch(url);
     if (res.status === 401) { handleUnauthenticated(); throw new Error('Not signed in.'); }
     const json = await res.json();
     if (!json.success) throw new Error(json.error || 'API Error');
@@ -5141,7 +5806,7 @@ const ApiClient = {
   async post(url, data) {
     const res = await fetch(url, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', ...Auth.authHeader() },
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(data)
     });
     if (res.status === 401) { handleUnauthenticated(); throw new Error('Not signed in.'); }
@@ -5156,7 +5821,7 @@ const ApiClient = {
   async patch(url, data) {
     const res = await fetch(url, {
       method: 'PATCH',
-      headers: { 'Content-Type': 'application/json', ...Auth.authHeader() },
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(data)
     });
     if (res.status === 401) { handleUnauthenticated(); throw new Error('Not signed in.'); }
@@ -5165,14 +5830,11 @@ const ApiClient = {
     return json;
   },
   // Multipart upload — deliberately does NOT set a Content-Type header so
-  // the browser can add the multipart boundary itself; only the auth
-  // header is attached.
+  // the browser can add the multipart boundary itself. The session cookie
+  // is attached automatically by the browser (same-origin), same as every
+  // other method here.
   async postForm(url, formData) {
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: { ...Auth.authHeader() },
-      body: formData
-    });
+    const res = await fetch(url, { method: 'POST', body: formData });
     if (res.status === 401) { handleUnauthenticated(); throw new Error('Not signed in.'); }
     const json = await res.json();
     // 413 (storage quota) and 409 (DUPLICATE_CONTENT — see
@@ -5183,7 +5845,7 @@ const ApiClient = {
     return { ok: res.ok, status: res.status, json };
   },
   async del(url) {
-    const res = await fetch(url, { method: 'DELETE', headers: { ...Auth.authHeader() } });
+    const res = await fetch(url, { method: 'DELETE' });
     if (res.status === 401) { handleUnauthenticated(); throw new Error('Not signed in.'); }
     const json = await res.json();
     if (!json.success) throw new Error(json.error || 'API Error');
@@ -5293,7 +5955,7 @@ async function loadVaultFiles() {
     if (VaultState.typeFilter) params.append('extension', VaultState.typeFilter);
     if (VaultState.tagFilter) params.append('tag', VaultState.tagFilter);
     
-    const res = await fetch(`/api/v1/vault/files?${params}`, { headers: { ...Auth.authHeader() } });
+    const res = await fetch(`/api/v1/vault/files?${params}`);
     if (res.status === 401) { handleUnauthenticated(); return; }
     const json = await res.json();
     if (json.success) {
@@ -5547,12 +6209,15 @@ function openContextMenu(e, docId) {
   $('ctxFlagLabel').textContent = doc.is_flagged ? 'Unflag File' : 'Flag for Review';
 }
 
-// Downloads require the Authorization header, which a plain navigation or
-// window.open() cannot attach — the file is fetched as a blob (with auth)
-// and then handed to the browser's normal save flow via a temporary link.
+// The session cookie is attached automatically, so a plain navigation or
+// window.open() would authenticate fine too — fetched as a blob anyway so
+// the response's 401/error handling and the exact server-provided filename
+// (from Content-Disposition) both work the same way ApiClient's other
+// calls do, and control returns here for a toast rather than the browser
+// just doing whatever it does with a navigated-to non-2xx response.
 async function downloadDocument(docId) {
   try {
-    const res = await fetch(`/api/v1/files/${docId}/download`, { headers: { ...Auth.authHeader() } });
+    const res = await fetch(`/api/v1/files/${docId}/download`);
     if (res.status === 401) { handleUnauthenticated(); return; }
     if (!res.ok) {
       const json = await res.json().catch(() => ({}));
@@ -5755,13 +6420,12 @@ function renderVersionComparison(data) {
     </div>`;
 }
 
-// Fetches one version's bytes the same auth-aware way downloadDocumentVersion
-// does (a plain <img>/<iframe> src can't carry the Authorization header),
+// Fetches one version's bytes the same way downloadDocumentVersion does,
 // then renders it inline as a blob URL instead of triggering a save-as.
 async function loadSideBySideVersion(version, targetId) {
   const target = $(targetId);
   try {
-    const res = await fetch(`/api/v1/files/${docDetailCurrentDocId}/versions/${version.id}/download`, { headers: { ...Auth.authHeader() } });
+    const res = await fetch(`/api/v1/files/${docDetailCurrentDocId}/versions/${version.id}/download`);
     if (res.status === 401) { handleUnauthenticated(); return; }
     if (!res.ok) throw new Error('Failed to load version content.');
 
@@ -5780,11 +6444,10 @@ async function loadSideBySideVersion(version, targetId) {
   }
 }
 
-// Same auth-aware blob-download approach as downloadDocument above (a
-// plain link/navigation can't attach the Authorization header).
+// Same blob-download approach as downloadDocument above.
 async function downloadDocumentVersion(versionId) {
   try {
-    const res = await fetch(`/api/v1/files/${docDetailCurrentDocId}/versions/${versionId}/download`, { headers: { ...Auth.authHeader() } });
+    const res = await fetch(`/api/v1/files/${docDetailCurrentDocId}/versions/${versionId}/download`);
     if (res.status === 401) { handleUnauthenticated(); return; }
     if (!res.ok) {
       const json = await res.json().catch(() => ({}));
@@ -5951,7 +6614,7 @@ $('generateShareBtn').addEventListener('click', async () => {
   try {
     const res = await fetch(`/api/v1/files/${shareDocId}/share`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', ...Auth.authHeader() },
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ recipient_email: email, permission: document.querySelector('.perm-btn.active').dataset.perm })
     });
     if (res.status === 401) { handleUnauthenticated(); return; }
@@ -5973,7 +6636,7 @@ $('copyLinkBtn').addEventListener('click', () => {
 // Preview Modal
 async function handlePreview(docId) {
   try {
-    const res = await fetch(`/api/v1/files/${docId}/preview`, { headers: { ...Auth.authHeader() } });
+    const res = await fetch(`/api/v1/files/${docId}/preview`);
     if (res.status === 401) { handleUnauthenticated(); return; }
     const json = await res.json();
     if (json.success) {

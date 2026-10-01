@@ -103,9 +103,13 @@ test('GET /api/v1/invoices/:id/line-items is staff-only over real HTTP', { skip:
   const clientAToken = authService.issueToken(clientA);
   const clientBToken = authService.issueToken(clientB);
 
+  // Auth now travels via the HttpOnly session cookie (T16, see
+  // server/utils/sessionCookie.js), not an Authorization header — set the
+  // same cookie a browser would have received from Set-Cookie on login.
+  const { COOKIE_NAME } = require('../utils/sessionCookie');
   async function getLineItems(token) {
     const res = await fetch(`${BASE}/api/v1/invoices/${invoice.id}/line-items`, {
-      headers: { Authorization: `Bearer ${token}` }
+      headers: { Cookie: `${COOKIE_NAME}=${token}` }
     });
     return { status: res.status, body: await res.json() };
   }

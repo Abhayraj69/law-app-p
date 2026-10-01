@@ -137,12 +137,15 @@
         const json = await res.json();
         if (!res.ok || !json.success) throw new Error(json.error || 'Failed to activate account.');
 
-        // Same localStorage keys the main app's Auth module reads (see
-        // app.js) — this logs the invitee straight in on redirect.
+        // The server already set the HttpOnly session cookie on this same
+        // response (see server/controllers/inviteController.js), so the
+        // invitee is already logged in — nothing to store here except the
+        // same non-sensitive display-user cache the main app's Auth module
+        // keeps (see app.js), so the sidebar renders their name right away
+        // instead of waiting on the first /auth/me round trip.
         try {
-          localStorage.setItem('slf_auth_token', json.data.token);
           localStorage.setItem('slf_auth_user', JSON.stringify(json.data.user));
-        } catch { /* localStorage unavailable — they'll just need to log in manually */ }
+        } catch { /* localStorage unavailable — the app will just re-fetch /auth/me */ }
 
         window.location.href = '/';
       } catch (err) {

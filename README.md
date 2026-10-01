@@ -101,8 +101,10 @@ section before assuming a feature is wired up.
   status/attorney change made via `createOrUpdateCase` shows up in search
   immediately, not from a stale derived snapshot.
 - **Authentication** — `/api/v1/auth/login` issues a signed JWT after
-  verifying a password against the `users` table in Postgres; every other
-  API route requires that token via `Authorization: Bearer <token>`
+  verifying a password against the `users` table in Postgres, delivered as
+  an HttpOnly, SameSite=Strict session cookie (`server/utils/sessionCookie.js`)
+  rather than in the response body — page JavaScript never has the token
+  itself. Every other API route requires that cookie
   (`server/middleware/auth.js`, `server/services/authService.js`). There are
   six demo accounts (one admin, three other staff, two client-portal),
   documented below.
@@ -382,13 +384,15 @@ own password, and are logged straight in — you never see or choose their
 password, only they do. The same flow works via `curl`:
 
 ```bash
-TOKEN=$(curl -s -X POST http://localhost:3000/api/v1/auth/login \
+# -c/-b make curl behave like a browser's cookie jar: -c saves the
+# Set-Cookie the login response returns, -b sends it back on the next
+# request — there's no token in the JSON response to extract anymore.
+curl -s -c cookies.txt -X POST http://localhost:3000/api/v1/auth/login \
   -H 'Content-Type: application/json' \
-  -d '{"email":"a.morgan@slf.law","password":"<their password>"}' \
-  | node -e "process.stdin.once('data', d => console.log(JSON.parse(d).data.token))")
+  -d '{"email":"a.morgan@slf.law","password":"<their password>"}' > /dev/null
 
-curl -s -X POST http://localhost:3000/api/v1/admin/invites \
-  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+curl -s -b cookies.txt -X POST http://localhost:3000/api/v1/admin/invites \
+  -H 'Content-Type: application/json' \
   -d '{"email":"new.hire@slf.law","fullName":"New Hire","role":"ASSOCIATE"}'
 # -> { "data": { "invite_path": "/accept-invite.html?token=..." , ... } }
 ```

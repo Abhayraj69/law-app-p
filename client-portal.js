@@ -58,21 +58,18 @@ function formatDateTime(value) {
 }
 
 // ── Auth ─────────────────────────────────────────────────────────────────
-// Same localStorage keys the staff app's Auth module uses (app.js), so a
-// session started at login (which redirects a CLIENT here — see app.js's
-// login handler and initAuth()) carries straight over with no re-login.
+// The session token lives in an HttpOnly cookie the server sets on login
+// (see server/utils/sessionCookie.js) — the same cookie the staff app
+// (app.js) already has, since a CLIENT-role login redirects here — so a
+// session started at the login form carries straight over with no
+// re-login and no token this client needs to read or forward itself. Only
+// a non-sensitive display copy of the user is cached in localStorage.
 const Auth = {
-  TOKEN_KEY: 'slf_auth_token',
   USER_KEY: 'slf_auth_user',
-  getToken() { try { return localStorage.getItem(this.TOKEN_KEY); } catch { return null; } },
   getUser() { try { return JSON.parse(localStorage.getItem(this.USER_KEY) || 'null'); } catch { return null; } },
   setUser(user) { try { localStorage.setItem(this.USER_KEY, JSON.stringify(user)); } catch { /* ignore */ } },
   clearSession() {
-    try { localStorage.removeItem(this.TOKEN_KEY); localStorage.removeItem(this.USER_KEY); } catch { /* ignore */ }
-  },
-  authHeader() {
-    const token = this.getToken();
-    return token ? { Authorization: `Bearer ${token}` } : {};
+    try { localStorage.removeItem(this.USER_KEY); } catch { /* ignore */ }
   }
 };
 
@@ -94,10 +91,9 @@ const Api = {
     return this._request(path, { method: 'POST', body: formData });
   },
   async _request(path, opts) {
-    const res = await fetch(`/api/v1${path}`, {
-      ...opts,
-      headers: { ...(opts.headers || {}), ...Auth.authHeader() }
-    });
+    // The session cookie is attached automatically for this same-origin
+    // request — nothing to add to headers here.
+    const res = await fetch(`/api/v1${path}`, opts);
     if (res.status === 401) {
       Auth.clearSession();
       window.location.href = '/';
@@ -184,7 +180,7 @@ function renderShell(user) {
     // as the staff app's sign-out (see app.js). Best-effort: the local
     // session is cleared even if the call fails.
     try {
-      await fetch('/api/v1/auth/logout', { method: 'POST', headers: Auth.authHeader() });
+      await fetch('/api/v1/auth/logout', { method: 'POST' });
     } catch (err) {
       console.warn('Server-side logout failed; clearing local session anyway.', err);
     }
@@ -491,15 +487,13 @@ function docRow(d) {
     </div>`;
 }
 
-// The API is Bearer-token authenticated with no cookie/session fallback
-// (see server/middleware/auth.js), so a plain `<a href>` or `<iframe src>`
-// navigation — which can't carry a custom Authorization header — gets a
-// bare 401 instead of the file. Every place that needs real file bytes
-// (download, preview) must go through an authenticated `fetch()` and turn
-// the response into a blob URL instead.
+// Fetched as a blob (rather than a plain `<a href>`/`<iframe src>`
+// navigation) so a non-2xx response — e.g. an expired session — is caught
+// here and turned into a proper redirect-to-login instead of the browser
+// just rendering a raw 401 JSON error in place of the document.
 async function fetchFileBlob(docId, intent) {
   const qs = intent ? `?intent=${encodeURIComponent(intent)}` : '';
-  const res = await fetch(`/api/v1/files/${encodeURIComponent(docId)}/download${qs}`, { headers: Auth.authHeader() });
+  const res = await fetch(`/api/v1/files/${encodeURIComponent(docId)}/download${qs}`);
   if (res.status === 401) {
     Auth.clearSession();
     window.location.href = '/';
@@ -730,13 +724,12 @@ function viewHeader(title, subtitle) {
 // Staff-role users (or anyone with no session at all) don't belong here —
 // bounced to the staff sign-in page, which itself redirects a CLIENT back
 // to /portal on successful login (see app.js). Real enforcement is
-// server-side on every API call above; this is a UX redirect only.
+// server-side on every API call above; this is a UX redirect only. There is
+// no token this client can inspect directly (it's an HttpOnly cookie), so
+// this always asks the server rather than gating on local state first.
 async function boot() {
-  const token = Auth.getToken();
-  if (!token) { window.location.href = '/'; return; }
-
   try {
-    const res = await fetch('/api/v1/auth/me', { headers: Auth.authHeader() });
+    const res = await fetch('/api/v1/auth/me');
     const json = await res.json();
     if (!res.ok || !json.success) throw new Error('Session expired.');
     if (json.data.role !== 'CLIENT') { window.location.href = '/'; return; }

@@ -1,4 +1,5 @@
 const InviteService = require('../services/inviteService');
+const { setSessionCookie } = require('../utils/sessionCookie');
 
 /**
  * Invite Controller
@@ -38,8 +39,13 @@ async function getInvitePreview(req, res, next) {
 async function acceptInvite(req, res, next) {
   try {
     const { password } = req.body || {};
-    const result = await InviteService.acceptInvite(req.params.token, password);
-    res.json({ success: true, data: result });
+    const { token, expires_in, user } = await InviteService.acceptInvite(req.params.token, password);
+    // Same treatment as login (see authController.login) — the session
+    // token is delivered via the HttpOnly cookie only, never in the body,
+    // so accepting an invite logs the user straight in without ever
+    // exposing the token to page JavaScript.
+    setSessionCookie(res, token);
+    res.json({ success: true, data: { expires_in, user } });
   } catch (err) {
     next(err);
   }
