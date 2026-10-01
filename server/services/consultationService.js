@@ -1,10 +1,9 @@
-const fs = require('fs/promises');
 const db = require('../db');
 const VaultService = require('./vaultService');
 const CaseService = require('./caseService');
 const ConflictCheckService = require('./conflictCheckService');
 const pdfTools = require('./pdfTools');
-const { resolveStoragePath } = require('./fileService');
+const { readStoredFile } = require('./fileService');
 const { MATTER_CATEGORIES } = require('../constants/matterCategories');
 
 /**
@@ -245,8 +244,11 @@ class ConsultationService {
     }
 
     const buffers = await Promise.all(pdfDocs.map(async (d) => {
-      const absolutePath = resolveStoragePath(d.storage_path_url);
-      return fs.readFile(absolutePath);
+      const buffer = await readStoredFile(d.storage_path_url);
+      if (!buffer) {
+        throw badRequest(`'${d.original_name}' has no real file content in storage — it may be missing or never actually uploaded.`, 'NO_FILE_CONTENT');
+      }
+      return buffer;
     }));
 
     const mergedBuffer = await pdfTools.mergePdfs(buffers);

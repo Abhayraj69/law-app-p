@@ -1,5 +1,4 @@
-const fs = require('fs/promises');
-const { resolveStoragePath } = require('./fileService');
+const { readStoredFile } = require('./fileService');
 const baseLogger = require('../utils/logger');
 const ocrService = require('./ocrService');
 
@@ -24,8 +23,9 @@ const ocrService = require('./ocrService');
  *   2. Never hang the event loop. Extraction is capped by file size, and
  *      the returned text is capped in characters before it ever reaches a
  *      model's context window.
- *   3. Never read outside the storage root. Paths go through
- *      fileService.resolveStoragePath, which already refuses to escape it.
+ *   3. Never read outside the storage root. Reads go through
+ *      fileService.readStoredFile, which resolves via the active storage
+ *      provider (local disk or S3) and never trusts a raw path.
  */
 
 // Formats whose bytes are text as-is. Deliberately the same set
@@ -224,36 +224,26 @@ async function extractText(doc, log = baseLogger) {
     return unreadable(`No text extractor is available for .${ext || 'unknown'} files.`);
   }
 
-  let absolutePath;
+  let buffer;
   try {
-    absolutePath = resolveStoragePath(doc.storage_path_url);
+    buffer = await readStoredFile(doc.storage_path_url);
   } catch {
-    return unreadable('This document\'s stored path could not be resolved.');
+    return unreadable('The stored file for this document could not be read.');
   }
 
-  let stat;
-  try {
-    stat = await fs.stat(absolutePath);
-  } catch {
-    return unreadable('The stored file for this document is missing from disk.');
+  if (!buffer) {
+    return unreadable('The stored file for this document is missing.');
   }
 
-  if (stat.size > MAX_EXTRACTABLE_BYTES) {
+  if (buffer.length > MAX_EXTRACTABLE_BYTES) {
     return unreadable(
-      `This document is ${(stat.size / (1024 * 1024)).toFixed(1)}MB, over the ` +
+      `This document is ${(buffer.length / (1024 * 1024)).toFixed(1)}MB, over the ` +
       `${MAX_EXTRACTABLE_BYTES / (1024 * 1024)}MB text-extraction limit.`
     );
   }
 
-  if (stat.size === 0) {
+  if (buffer.length === 0) {
     return unreadable('This document is empty (0 bytes).');
-  }
-
-  let buffer;
-  try {
-    buffer = await fs.readFile(absolutePath);
-  } catch (err) {
-    return unreadable('The stored file for this document could not be read.');
   }
 
   try {

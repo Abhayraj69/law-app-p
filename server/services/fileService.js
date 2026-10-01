@@ -1,21 +1,29 @@
 const crypto = require('crypto');
-const fs = require('fs');
 const path = require('path');
+const { Readable } = require('stream');
 const { diffLines } = require('diff');
 const db = require('../db');
+const { getStorageProvider } = require('./storage/providerSelector');
+const localProvider = require('./storage/providers/localProvider');
 
 /**
  * File Operations Service (Row Actions)
  * Handles previews, downloads, share links, metadata patch, and soft-delete/archive.
  *
- * Real files uploaded through the vault are written under STORAGE_ROOT,
- * one subdirectory per tenant, keyed by document id. The seed/demo
- * documents in server/db.js have no backing file on disk (they only ever
- * existed as metadata for the mock UI) — downloading one of those returns
- * a clear "not available" error rather than a broken stream.
+ * Real files uploaded through the vault are written through the active
+ * storage provider (see ./storage/providerSelector — 'local' disk by
+ * default, 'S3' once running more than one instance, T2 in
+ * docs/DEPLOYMENT_TASKS.md), one subdirectory/prefix per tenant, keyed by
+ * document id. The seed/demo documents in server/db.js have no backing
+ * file (they only ever existed as metadata for the mock UI) —
+ * downloading one of those returns a clear "not available" error rather
+ * than a broken stream.
  */
 
-const STORAGE_ROOT = path.join(__dirname, '..', '..', 'storage', 'uploads');
+// Kept for STORAGE_ROOT-relative path construction below and for callers
+// (tests, mostly) that need the local, on-disk absolute path directly —
+// only meaningful when STORAGE_PROVIDER is 'local' (the default).
+const STORAGE_ROOT = localProvider.STORAGE_ROOT;
 
 function safeFileName(originalName) {
   // Strip path separators and anything else that isn't a normal filename
@@ -25,10 +33,6 @@ function safeFileName(originalName) {
     .replace(/[/\\]/g, '_')
     .replace(/[^A-Za-z0-9._-]/g, '_')
     .slice(-180); // keep it reasonable; the doc id prefix guarantees uniqueness
-}
-
-function tenantDir(tenantId) {
-  return path.join(STORAGE_ROOT, tenantId);
 }
 
 /**
@@ -43,22 +47,33 @@ function tenantDir(tenantId) {
  * silently regress back to the old docId-only scheme.
  */
 async function saveUploadedFile(tenantId, docId, versionNumber, originalName, buffer) {
-  const dir = tenantDir(tenantId);
-  await fs.promises.mkdir(dir, { recursive: true });
-
   const storedName = `${docId}_v${versionNumber}_${safeFileName(originalName)}`;
-  const absolutePath = path.join(dir, storedName);
-  await fs.promises.writeFile(absolutePath, buffer);
+  // Relative + tenant-scoped so it can't be used to reach outside
+  // STORAGE_ROOT (local provider) and is exactly the object key an S3
+  // provider wants — the same key works unchanged with either provider.
+  const relativePath = path.posix.join(tenantId, storedName);
+
+  await getStorageProvider().write(relativePath, buffer);
 
   const sha256 = crypto.createHash('sha256').update(buffer).digest('hex');
 
-  return {
-    // Stored on the document record; resolved back to an absolute path by
-    // resolveStoragePath() below. Relative + tenant-scoped so it can't be
-    // used to reach outside STORAGE_ROOT.
-    storage_path_url: path.posix.join(tenantId, storedName),
-    sha256
-  };
+  return { storage_path_url: relativePath, sha256 };
+}
+
+// Reads a stored file's bytes back through the active storage provider.
+// Returns null (never throws) when the file doesn't exist, matching the
+// "seed/demo record with no real file" convention the callers below rely
+// on — checked via a real exists()/read() round trip rather than trusting
+// a flag on the document record, since the record's metadata alone can't
+// prove the bytes exist.
+async function readStoredFile(relativeStoragePath) {
+  const provider = getStorageProvider();
+  if (!(await provider.exists(relativeStoragePath))) return null;
+  try {
+    return await provider.read(relativeStoragePath);
+  } catch {
+    return null;
+  }
 }
 
 // Extensions treated as line-diffable text. Everything else (PDF, images,
@@ -178,17 +193,9 @@ class FileService {
     }
 
     // Seed/demo records (and any document whose file was never actually
-    // written to disk) don't have a real file to stream. We detect that by
-    // checking disk directly rather than trusting a flag on the record,
-    // since the record's metadata alone can't prove the bytes exist.
-    let absolutePath;
-    try {
-      absolutePath = resolveStoragePath(doc.storage_path_url);
-    } catch {
-      absolutePath = null;
-    }
-
-    if (!absolutePath || !fs.existsSync(absolutePath)) {
+    // written) don't have a real file to stream.
+    const buffer = await readStoredFile(doc.storage_path_url);
+    if (!buffer) {
       const err = new Error(
         `'${doc.file_name}' has no real file content on disk — it may be a seed/demo ` +
         `record that was never actually uploaded, or its stored file is missing.`
@@ -205,7 +212,7 @@ class FileService {
         'Content-Length': doc.file_size_bytes,
         'Content-Disposition': `attachment; filename="${encodeURIComponent(doc.original_name)}"`
       },
-      stream: fs.createReadStream(absolutePath)
+      stream: Readable.from(buffer)
     };
   }
 
@@ -260,14 +267,8 @@ class FileService {
       throw err;
     }
 
-    let absolutePath;
-    try {
-      absolutePath = resolveStoragePath(version.storage_path_url);
-    } catch {
-      absolutePath = null;
-    }
-
-    if (!absolutePath || !fs.existsSync(absolutePath)) {
+    const buffer = await readStoredFile(version.storage_path_url);
+    if (!buffer) {
       const err = new Error(
         `'${version.original_name}' (version ${version.version_number}) has no real file content on disk — ` +
         `it may be a seed/demo record that was never actually uploaded, or its stored file is missing.`
@@ -284,7 +285,7 @@ class FileService {
         'Content-Length': version.file_size_bytes,
         'Content-Disposition': `attachment; filename="${encodeURIComponent(version.original_name)}"`
       },
-      stream: fs.createReadStream(absolutePath)
+      stream: Readable.from(buffer)
     };
   }
 
@@ -377,17 +378,7 @@ class FileService {
   }
 
   static async _readVersionBuffer(version) {
-    let absolutePath;
-    try {
-      absolutePath = resolveStoragePath(version.storage_path_url);
-    } catch {
-      return null;
-    }
-    try {
-      return await fs.promises.readFile(absolutePath);
-    } catch {
-      return null;
-    }
+    return readStoredFile(version.storage_path_url);
   }
 
   /**
@@ -510,4 +501,12 @@ class FileService {
 
 module.exports = FileService;
 module.exports.saveUploadedFile = saveUploadedFile;
+// Provider-aware: works with whichever STORAGE_PROVIDER is active (local
+// disk or S3). Prefer this over resolveStoragePath for any caller that
+// actually wants the file's bytes.
+module.exports.readStoredFile = readStoredFile;
+// Local-disk-only: resolves to an absolute filesystem path, so it only
+// makes sense when STORAGE_PROVIDER is 'local' (the default). Kept for
+// tests and any local-only tooling that legitimately needs the on-disk
+// path rather than the bytes.
 module.exports.resolveStoragePath = resolveStoragePath;
