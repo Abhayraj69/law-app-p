@@ -1,7 +1,11 @@
 node_modules/
 .env.local
 .env
-storage/
+# Anchored to the repo root — an unanchored "storage/" also matched (and
+# silently excluded from git) server/services/storage/, the T2 storage-
+# provider adapter directory, since gitignore patterns with no leading
+# slash match a directory of that name at any depth.
+/storage/
 npm-debug.log*
 .DS_Store
 Thumbs.db
