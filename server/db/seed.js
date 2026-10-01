@@ -331,6 +331,16 @@ async function seedConversations(client) {
 }
 
 async function seed() {
+  if (process.env.NODE_ENV === 'production' && process.env.ALLOW_PROD_SEED !== 'true') {
+    logger.error(
+      'Refusing to seed: NODE_ENV=production. This script inserts demo data and can ' +
+      'overwrite real users\' passwords. Set ALLOW_PROD_SEED=true only if you are ' +
+      'certain this is a brand-new, empty production database.',
+      { context: 'SEED' }
+    );
+    process.exit(1);
+  }
+
   await runMigrations();
 
   const client = await pool.connect();

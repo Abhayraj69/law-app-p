@@ -1,3 +1,4 @@
+const fs = require('node:fs');
 const { Pool, types } = require('pg');
 const logger = require('../utils/logger');
 
@@ -29,11 +30,39 @@ const logger = require('../utils/logger');
  */
 types.setTypeParser(1082, (val) => val);
 
+// When PGSSL is enabled, verify the server's certificate by default —
+// rejectUnauthorized:false encrypts the connection but never authenticates
+// the server, so anything able to intercept the route to the database can
+// present its own certificate and read or alter every query (privileged
+// client documents, messages, trust-account movements). PGSSL_INSECURE
+// exists only as a deliberate, visible escape hatch for a self-signed dev
+// database — it must never be set in production.
+function buildSsl() {
+  if (process.env.PGSSL !== 'true') return false;
+  const ssl = {
+    rejectUnauthorized: process.env.PGSSL_INSECURE !== 'true'
+  };
+  if (process.env.PGSSLROOTCERT) {
+    ssl.ca = fs.readFileSync(process.env.PGSSLROOTCERT, 'utf8');
+  }
+  return ssl;
+}
+
+// Pool sizing — previously left at node-pg's default (max: 10) with no
+// idle/connection timeouts. Keep `max` × instance count below the
+// database's own connection limit.
+const POOL_SIZING = {
+  max: process.env.PG_POOL_MAX ? parseInt(process.env.PG_POOL_MAX, 10) : 10,
+  idleTimeoutMillis: process.env.PG_IDLE_TIMEOUT_MS ? parseInt(process.env.PG_IDLE_TIMEOUT_MS, 10) : 30000,
+  connectionTimeoutMillis: process.env.PG_CONNECTION_TIMEOUT_MS ? parseInt(process.env.PG_CONNECTION_TIMEOUT_MS, 10) : 5000
+};
+
 function buildPoolConfig() {
   if (process.env.DATABASE_URL) {
     return {
       connectionString: process.env.DATABASE_URL,
-      ssl: process.env.PGSSL === 'true' ? { rejectUnauthorized: false } : false
+      ssl: buildSsl(),
+      ...POOL_SIZING
     };
   }
 
@@ -51,7 +80,8 @@ function buildPoolConfig() {
     password: process.env.PGPASSWORD,
     database: process.env.PGDATABASE,
     port: process.env.PGPORT ? parseInt(process.env.PGPORT, 10) : 5432,
-    ssl: process.env.PGSSL === 'true' ? { rejectUnauthorized: false } : false
+    ssl: buildSsl(),
+    ...POOL_SIZING
   };
 }
 
@@ -100,4 +130,4 @@ async function checkConnection() {
   }
 }
 
-module.exports = { pool, checkConnection };
+module.exports = { pool, checkConnection, buildPoolConfig };
