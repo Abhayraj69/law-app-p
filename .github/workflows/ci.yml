@@ -1,10 +1,12 @@
 name: CI
 
-# No existing CI config was found in this repo (no .github/ directory) — this
-# is a new, minimal workflow: install and run the test suite on every PR
-# targeting main. server/test/*.test.js's integration suites (Postgres-backed)
-# skip themselves when TEST_DATABASE_URL isn't set, so this runs only the
-# real unit tests until a DB service is added here as a follow-up.
+# Runs the full test suite, including the Postgres-backed integration
+# suites (access control, trust accounting, etc.) that previously skipped
+# themselves whenever TEST_DATABASE_URL was unset — which it always was in
+# CI, so a green tick here used to certify almost nothing. A Postgres
+# service container now provides that database, and the final step fails
+# the build outright if the run reports any skipped suite, so this can
+# never silently regress back to a vacuous pass.
 on:
   pull_request:
     branches: [main]
@@ -14,6 +16,18 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: slf_vault_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd pg_isready --health-interval 10s
+          --health-timeout 5s --health-retries 5
+
     steps:
       - uses: actions/checkout@v4
 
@@ -23,4 +37,19 @@ jobs:
           cache: 'npm'
 
       - run: npm ci
-      - run: npm test
+
+      - name: Run tests
+        run: npm test | tee test-output.txt
+        env:
+          TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/slf_vault_test
+          JWT_SECRET: ci-only-secret-not-for-production-min-32-chars
+
+      - name: Fail the build if any suite was skipped
+        run: |
+          skipped_line=$(grep -i 'skipped' test-output.txt | tail -1 || true)
+          echo "$skipped_line"
+          skipped_count=$(echo "$skipped_line" | grep -oE '[0-9]+' | tail -1)
+          if [ -n "$skipped_count" ] && [ "$skipped_count" != "0" ]; then
+            echo "::error::$skipped_count test(s) were skipped — TEST_DATABASE_URL or another required env var may be missing, so this run does not actually gate a release."
+            exit 1
+          fi
