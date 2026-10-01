@@ -1,0 +1,22 @@
+-- ═════════════════════════════════════════════════════════════════════
+-- 0027: INTAKE_STAFF role (Phase 6)
+--
+-- The RFP calls out a distinct intake-staff role, separate from the
+-- existing PARALEGAL/ASSOCIATE roles that have handled Phase 2's
+-- consultation intake so far. Added as a new value on the existing
+-- user_role ENUM (db/schema.sql:19), same ADD VALUE IF NOT EXISTS pattern
+-- every audit_action addition already uses in this codebase.
+--
+-- Ranked in server/middleware/auth.js's ROLE_HIERARCHY between CLIENT and
+-- PARALEGAL. requireRole(minRole) is a >= check (see auth.js), so ranking
+-- it there gives exactly the roadmap's "separate from PARALEGAL/ASSOCIATE"
+-- for free: routes still gated at requireRole('PARALEGAL') (tasks,
+-- hearings, time tracking) correctly EXCLUDE INTAKE_STAFF, while the one
+-- set of routes re-gated down to requireRole('INTAKE_STAFF') — Phase 2's
+-- consultation intake create/edit/upload/bundle/submit, see
+-- server/routes/api.js — admit INTAKE_STAFF *and* still admit PARALEGAL+
+-- (who rank above it), so nobody who could already do intake work loses
+-- access.
+-- ═════════════════════════════════════════════════════════════════════
+
+ALTER TYPE user_role ADD VALUE IF NOT EXISTS 'INTAKE_STAFF';

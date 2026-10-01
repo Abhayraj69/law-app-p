@@ -65,6 +65,46 @@ async function listUsersByFirm(firmId) {
   return rows;
 }
 
+// Two-factor auth (Phase 6) — see 0030_two_factor_auth.sql / totpService.js.
+async function setUserTotpSecret(userId, secret) {
+  const { rows } = await pool.query(
+    'UPDATE users SET totp_secret = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2 RETURNING *',
+    [secret, userId]
+  );
+  return rows[0];
+}
+
+async function enableUserTotp(userId, recoveryCodeHashes) {
+  const { rows } = await pool.query(
+    `UPDATE users SET totp_enabled = TRUE, totp_confirmed_at = CURRENT_TIMESTAMP,
+       totp_recovery_codes = $1, updated_at = CURRENT_TIMESTAMP
+     WHERE id = $2 RETURNING *`,
+    [recoveryCodeHashes, userId]
+  );
+  return rows[0];
+}
+
+async function disableUserTotp(userId) {
+  const { rows } = await pool.query(
+    `UPDATE users SET totp_enabled = FALSE, totp_secret = NULL, totp_confirmed_at = NULL,
+       totp_recovery_codes = '{}', updated_at = CURRENT_TIMESTAMP
+     WHERE id = $1 RETURNING *`,
+    [userId]
+  );
+  return rows[0];
+}
+
+// Removes exactly one consumed recovery code hash from the array — see
+// 0030's comment on why a used code is deleted rather than flagged.
+async function consumeUserRecoveryCode(userId, codeHash) {
+  const { rows } = await pool.query(
+    `UPDATE users SET totp_recovery_codes = array_remove(totp_recovery_codes, $1), updated_at = CURRENT_TIMESTAMP
+     WHERE id = $2 RETURNING *`,
+    [codeHash, userId]
+  );
+  return rows[0];
+}
+
 // ═════════════════════════════════════════════════════════════════════
 // SESSION REVOCATION (db/migrations/0020_session_revocation.sql)
 //
@@ -485,6 +525,102 @@ async function listActiveDocuments(firmId, user) {
   query = scopeDocumentsToUser(query, values, user);
   query += ' GROUP BY d.id, u.full_name, u.initials, c.case_name, fo.category';
   const { rows } = await pool.query(query, values);
+  return rows.map(normalizeDocumentRow);
+}
+
+// Real Postgres full-text search (Phase 6), replacing the global omnibox's
+// old in-memory JS scorer — see 0028_fulltext_search.sql's header for why
+// documents don't get a matching expression index the way cases do.
+//
+// A live search box's whole point is matching while the user is still
+// typing a word — plainto_tsquery alone only matches whole lexemes, which
+// would regress the old substring scorer's "prefix match" behavior. Each
+// space-separated token is turned into a `token:*` prefix lexeme and
+// AND-ed together; tsquery's own special characters are stripped from each
+// token first so user input can never be interpreted as query syntax
+// (e.g. "Doe & Co" doesn't get treated as an operator). Returns null for
+// an empty/all-punctuation query — callers skip the DB round trip entirely
+// in that case, same as the old scorer short-circuited on an empty needle.
+function buildPrefixTsQuery(text) {
+  const tokens = String(text || '')
+    .split(/\s+/)
+    .map(t => t.replace(/[&|!():*']/g, '').trim())
+    .filter(Boolean);
+  if (!tokens.length) return null;
+  return tokens.map(t => `${t}:*`).join(' & ');
+}
+
+const CASE_FULLTEXT_EXPR = `to_tsvector('english',
+  coalesce(case_name, '') || ' ' || coalesce(client_name, '') || ' ' ||
+  coalesce(opposing_party, '') || ' ' || coalesce(opposing_counsel, '') || ' ' ||
+  coalesce(case_type, '') || ' ' || id
+)`;
+
+async function searchCasesFullText(firmId, user, query, limit) {
+  const tsQuery = buildPrefixTsQuery(query);
+  if (!tsQuery) return [];
+
+  const values = [firmId, tsQuery];
+  let sql = `
+    SELECT cases.*, ts_rank(${CASE_FULLTEXT_EXPR}, to_tsquery('english', $2)) AS rank
+    FROM cases
+    WHERE cases.firm_id = $1 AND ${CASE_FULLTEXT_EXPR} @@ to_tsquery('english', $2)
+  `;
+  sql = scopeCasesToUser(sql, values, user, 'cases');
+  values.push(limit);
+  sql += ` ORDER BY rank DESC LIMIT $${values.length}`;
+  const { rows } = await pool.query(sql, values);
+  return rows;
+}
+
+// Client names are synthetic (derived from cases.client_name, not their
+// own table), so this stays a lighter ILIKE query with a prefix bonus
+// rather than full tsvector ranking — same reasoning the old JS scorer
+// gave this case a *2 boost rather than genuine ranking.
+async function searchClientsByName(firmId, user, query, limit) {
+  const values = [firmId, `%${query}%`, `${query}%`];
+  let sql = `
+    SELECT client_name, COUNT(*)::int AS case_count
+    FROM cases
+    WHERE firm_id = $1 AND client_name ILIKE $2
+  `;
+  sql = scopeCasesToUser(sql, values, user, 'cases');
+  sql += ` GROUP BY client_name ORDER BY (client_name ILIKE $3) DESC, client_name ASC LIMIT $${values.length + 1}`;
+  values.push(limit);
+  const { rows } = await pool.query(sql, values);
+  return rows;
+}
+
+async function searchDocumentsFullText(firmId, user, query, limit) {
+  const tsQuery = buildPrefixTsQuery(query);
+  if (!tsQuery) return [];
+
+  const values = [firmId];
+  let innerQuery = `${DOCUMENT_SELECT} WHERE d.firm_id = $1 AND d.is_deleted = FALSE`;
+  innerQuery = scopeDocumentsToUser(innerQuery, values, user);
+  innerQuery += ' GROUP BY d.id, u.full_name, u.initials, c.case_name, fo.category';
+
+  values.push(tsQuery);
+  const qParam = values.length;
+  values.push(limit);
+  const limitParam = values.length;
+
+  const { rows } = await pool.query(
+    `SELECT ranked.* FROM (
+       SELECT sub.*, ts_rank(
+         to_tsvector('english',
+           coalesce(sub.file_name, '') || ' ' || coalesce(sub.original_name, '') || ' ' ||
+           coalesce(sub.case_name, '') || ' ' || array_to_string(sub.tags, ' ')
+         ),
+         to_tsquery('english', $${qParam})
+       ) AS rank
+       FROM (${innerQuery}) sub
+     ) ranked
+     WHERE ranked.rank > 0
+     ORDER BY ranked.rank DESC
+     LIMIT $${limitParam}`,
+    values
+  );
   return rows.map(normalizeDocumentRow);
 }
 
@@ -966,7 +1102,16 @@ async function updateCaseFields(firmId, caseId, updates = {}) {
     opposingParty: 'opposing_party',
     opposingCounsel: 'opposing_counsel',
     caseType: 'case_type',
-    description: 'description'
+    description: 'description',
+    // Court sync (Phase 5) — see courtSyncService.js / 0026_court_sync.sql.
+    cnrNumber: 'cnr_number',
+    courtName: 'court_name',
+    courtSyncedState: 'court_synced_state',
+    courtSyncStatus: 'court_sync_status',
+    courtSyncOverriddenByUserId: 'court_sync_overridden_by_user_id',
+    courtSyncOverriddenAt: 'court_sync_overridden_at',
+    courtSyncOverrideNote: 'court_sync_override_note',
+    causeListWatch: 'cause_list_watch'
   };
 
   const setClauses = [];
@@ -975,7 +1120,9 @@ async function updateCaseFields(firmId, caseId, updates = {}) {
   for (const [key, column] of Object.entries(fieldMap)) {
     if (updates[key] !== undefined) {
       setClauses.push(`${column} = $${i}`);
-      values.push(updates[key]);
+      // JSONB column — node-pg does not auto-serialize plain objects,
+      // same reasoning insertMatterAnalysis/insertDraft stringify `content`.
+      values.push(column === 'court_synced_state' ? JSON.stringify(updates[key]) : updates[key]);
       i += 1;
     }
   }
@@ -1586,6 +1733,270 @@ async function updateHearingFields(firmId, hearingId, updates = {}) {
 async function deleteHearingRow(firmId, hearingId) {
   const { rowCount } = await pool.query('DELETE FROM hearings WHERE firm_id = $1 AND id = $2', [firmId, hearingId]);
   return rowCount;
+}
+
+// Matter-wide analysis (Phase 3): chronology / issue_matrix / remedy_outline.
+// One row per generation — see db/migrations/0024_matter_analysis.sql for
+// why this isn't an upsert-in-place row.
+async function insertMatterAnalysis({ firmId, caseId, analysisType, content, sourceCount, generatedByUserId }) {
+  const { rows } = await pool.query(
+    `INSERT INTO matter_analyses (firm_id, case_id, analysis_type, content, source_count, generated_by_user_id)
+     VALUES ($1, $2, $3, $4, $5, $6)
+     RETURNING *`,
+    [firmId, caseId, analysisType, JSON.stringify(content), sourceCount || 0, generatedByUserId || null]
+  );
+  return rows[0];
+}
+
+// Latest generation of a given type for a case, with the generating user's
+// name joined in for display — null if none has ever been generated.
+async function getLatestMatterAnalysis(firmId, caseId, analysisType) {
+  const { rows } = await pool.query(
+    `SELECT ma.*, u.full_name AS generated_by_name
+       FROM matter_analyses ma
+       LEFT JOIN users u ON u.id = ma.generated_by_user_id
+      WHERE ma.firm_id = $1 AND ma.case_id = $2 AND ma.analysis_type = $3
+      ORDER BY ma.created_at DESC
+      LIMIT 1`,
+    [firmId, caseId, analysisType]
+  );
+  return rows[0] || null;
+}
+
+const DRAFT_SELECT = `SELECT drafts.*, gu.full_name AS generated_by_name, ru.full_name AS reviewed_by_name
+     FROM drafts
+     LEFT JOIN users gu ON gu.id = drafts.generated_by_user_id
+     LEFT JOIN users ru ON ru.id = drafts.reviewed_by_user_id`;
+
+// Drafting automation (Phase 4): one row per generation, same reasoning as
+// matter_analyses above — see 0025_drafts.sql.
+async function insertDraft({ firmId, caseId, hearingId, taskId, templateKey, content, sourceCount, generatedByUserId }) {
+  const { rows } = await pool.query(
+    `INSERT INTO drafts (firm_id, case_id, hearing_id, task_id, template_key, content, source_count, generated_by_user_id)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+     RETURNING id`,
+    [firmId, caseId, hearingId || null, taskId || null, templateKey, JSON.stringify(content), sourceCount || 0, generatedByUserId || null]
+  );
+  return getDraftById(firmId, rows[0].id);
+}
+
+async function getDraftById(firmId, draftId) {
+  const { rows } = await pool.query(`${DRAFT_SELECT} WHERE drafts.firm_id = $1 AND drafts.id = $2`, [firmId, draftId]);
+  return rows[0] || null;
+}
+
+async function listDraftsForCase(firmId, caseId) {
+  const { rows } = await pool.query(
+    `${DRAFT_SELECT} WHERE drafts.firm_id = $1 AND drafts.case_id = $2 ORDER BY drafts.created_at DESC`,
+    [firmId, caseId]
+  );
+  return rows;
+}
+
+async function updateDraftFields(firmId, draftId, updates = {}) {
+  const fieldMap = {
+    status: 'status', reviewedByUserId: 'reviewed_by_user_id', reviewedAt: 'reviewed_at', rejectionReason: 'rejection_reason'
+  };
+  const setClauses = [];
+  const values = [];
+  let i = 1;
+  for (const [key, column] of Object.entries(fieldMap)) {
+    if (updates[key] !== undefined) {
+      setClauses.push(`${column} = $${i}`);
+      values.push(updates[key]);
+      i++;
+    }
+  }
+  if (!setClauses.length) return getDraftById(firmId, draftId);
+  setClauses.push('updated_at = CURRENT_TIMESTAMP');
+  values.push(firmId, draftId);
+  await pool.query(`UPDATE drafts SET ${setClauses.join(', ')} WHERE firm_id = $${i} AND id = $${i + 1}`, values);
+  return getDraftById(firmId, draftId);
+}
+
+// Court data sync (Phase 5): append-only attempt history, same posture as
+// signature_request_events — see 0026_court_sync.sql.
+async function insertCourtSyncLog({ firmId, caseId, provider, status, syncedState, errorMessage, triggeredByUserId }) {
+  const { rows } = await pool.query(
+    `INSERT INTO court_sync_logs (firm_id, case_id, provider, status, synced_state, error_message, triggered_by_user_id)
+     VALUES ($1, $2, $3, $4, $5, $6, $7)
+     RETURNING *`,
+    [firmId, caseId, provider, status, syncedState ? JSON.stringify(syncedState) : null, errorMessage || null, triggeredByUserId || null]
+  );
+  return rows[0];
+}
+
+async function listCourtSyncLogsForCase(firmId, caseId) {
+  const { rows } = await pool.query(
+    `SELECT csl.*, u.full_name AS triggered_by_name
+       FROM court_sync_logs csl
+       LEFT JOIN users u ON u.id = csl.triggered_by_user_id
+      WHERE csl.firm_id = $1 AND csl.case_id = $2
+      ORDER BY csl.created_at DESC`,
+    [firmId, caseId]
+  );
+  return rows;
+}
+
+// Firm-wide, for the Cause List Watch dashboard panel — same "visible
+// firm-wide, not per-user" convention hearings/tasks already use.
+async function listCasesOnCauseListWatch(firmId) {
+  const { rows } = await pool.query(
+    `SELECT id, case_name, cnr_number, court_name, court_synced_state, court_sync_status
+       FROM cases WHERE firm_id = $1 AND cause_list_watch = TRUE
+       ORDER BY case_name ASC`,
+    [firmId]
+  );
+  return rows;
+}
+
+const LIMITATION_SELECT = `SELECT ld.*, cases.case_name,
+       cu.full_name AS created_by_name, ru.full_name AS resolved_by_name
+     FROM limitation_deadlines ld
+     LEFT JOIN cases ON cases.id = ld.case_id
+     LEFT JOIN users cu ON cu.id = ld.created_by_user_id
+     LEFT JOIN users ru ON ru.id = ld.resolved_by_user_id`;
+
+// Limitation watch engine (Phase 6) — see 0029_limitation_watch.sql /
+// limitationWatchEngine.js. risk_flag is computed by the caller, not
+// stored — these are plain CRUD reads/writes on the row itself.
+async function insertLimitationDeadline({ firmId, caseId, description, limitationDate, createdByUserId }) {
+  const { rows } = await pool.query(
+    `INSERT INTO limitation_deadlines (firm_id, case_id, description, limitation_date, created_by_user_id)
+     VALUES ($1, $2, $3, $4, $5)
+     RETURNING id`,
+    [firmId, caseId, description, limitationDate, createdByUserId || null]
+  );
+  return getLimitationDeadlineById(firmId, rows[0].id);
+}
+
+async function getLimitationDeadlineById(firmId, deadlineId) {
+  const { rows } = await pool.query(`${LIMITATION_SELECT} WHERE ld.firm_id = $1 AND ld.id = $2`, [firmId, deadlineId]);
+  return rows[0] || null;
+}
+
+async function listLimitationDeadlinesForFirm(firmId, { caseId, status } = {}) {
+  const values = [firmId];
+  let query = `${LIMITATION_SELECT} WHERE ld.firm_id = $1`;
+  if (caseId) { values.push(caseId); query += ` AND ld.case_id = $${values.length}`; }
+  if (status) { values.push(status); query += ` AND ld.status = $${values.length}`; }
+  query += ' ORDER BY ld.limitation_date ASC';
+  const { rows } = await pool.query(query, values);
+  return rows;
+}
+
+async function updateLimitationDeadlineFields(firmId, deadlineId, updates = {}) {
+  const fieldMap = {
+    description: 'description',
+    limitationDate: 'limitation_date',
+    status: 'status',
+    resolvedByUserId: 'resolved_by_user_id',
+    resolvedAt: 'resolved_at',
+    resolutionNote: 'resolution_note'
+  };
+  const setClauses = [];
+  const values = [];
+  let i = 1;
+  for (const [key, column] of Object.entries(fieldMap)) {
+    if (updates[key] !== undefined) {
+      setClauses.push(`${column} = $${i}`);
+      values.push(updates[key]);
+      i += 1;
+    }
+  }
+  if (!setClauses.length) return getLimitationDeadlineById(firmId, deadlineId);
+  setClauses.push('updated_at = CURRENT_TIMESTAMP');
+  values.push(firmId, deadlineId);
+  await pool.query(`UPDATE limitation_deadlines SET ${setClauses.join(', ')} WHERE firm_id = $${i} AND id = $${i + 1}`, values);
+  return getLimitationDeadlineById(firmId, deadlineId);
+}
+
+async function deleteLimitationDeadlineRow(firmId, deadlineId) {
+  const { rowCount } = await pool.query(
+    'DELETE FROM limitation_deadlines WHERE firm_id = $1 AND id = $2',
+    [firmId, deadlineId]
+  );
+  return rowCount;
+}
+
+// Management analytics (Phase 6) — firm-level reporting across cases,
+// billing, and staff workload. Kept as three focused queries rather than
+// one giant join: cases-by-status/type is a plain GROUP BY, and staff
+// workload aggregates tasks and time_entries in their OWN subqueries
+// before joining to users — joining both tables to `users` directly would
+// fan out (N tasks × M time entries per user) and silently inflate the
+// summed minutes.
+async function getCaseStatusBreakdown(firmId) {
+  const { rows } = await pool.query(
+    `SELECT status, COUNT(*)::int AS count FROM cases WHERE firm_id = $1 GROUP BY status ORDER BY status`,
+    [firmId]
+  );
+  return rows;
+}
+
+async function getCaseTypeBreakdown(firmId) {
+  const { rows } = await pool.query(
+    `SELECT COALESCE(case_type, 'Unspecified') AS case_type, COUNT(*)::int AS count
+       FROM cases WHERE firm_id = $1 GROUP BY case_type ORDER BY count DESC`,
+    [firmId]
+  );
+  return rows;
+}
+
+async function getStaffWorkload(firmId) {
+  const { rows } = await pool.query(
+    `SELECT u.id, u.full_name, u.role,
+            COALESCE(ot.open_tasks, 0) AS open_tasks,
+            COALESCE(te.minutes_this_month, 0) AS minutes_this_month
+       FROM users u
+       LEFT JOIN (
+         SELECT assigned_to_user_id, COUNT(*)::int AS open_tasks
+           FROM tasks
+          WHERE firm_id = $1 AND status IN ('open', 'in_progress') AND assigned_to_user_id IS NOT NULL
+          GROUP BY assigned_to_user_id
+       ) ot ON ot.assigned_to_user_id = u.id
+       LEFT JOIN (
+         SELECT user_id, SUM(minutes)::int AS minutes_this_month
+           FROM time_entries
+          WHERE firm_id = $1 AND entry_date >= date_trunc('month', CURRENT_DATE)::date
+          GROUP BY user_id
+       ) te ON te.user_id = u.id
+      WHERE u.firm_id = $1 AND u.role != 'CLIENT'
+      ORDER BY u.full_name ASC`,
+    [firmId]
+  );
+  return rows;
+}
+
+const NOTIFICATION_SELECT = `SELECT nl.*, ru.full_name AS recipient_name, su.full_name AS sent_by_name, cases.case_name
+     FROM notification_log nl
+     LEFT JOIN users ru ON ru.id = nl.recipient_user_id
+     LEFT JOIN users su ON su.id = nl.sent_by_user_id
+     LEFT JOIN cases ON cases.id = nl.case_id`;
+
+// Notification channels (Phase 6) — see 0031_notifications.sql / notificationService.js.
+async function insertNotificationLog({ firmId, recipientUserId, channel, subject, body, provider, status, errorMessage, caseId, taskId, hearingId, sentByUserId }) {
+  const { rows } = await pool.query(
+    `INSERT INTO notification_log
+       (firm_id, recipient_user_id, channel, subject, body, provider, status, error_message, case_id, task_id, hearing_id, sent_by_user_id)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+     RETURNING id`,
+    [firmId, recipientUserId || null, channel, subject || null, body, provider, status, errorMessage || null,
+      caseId || null, taskId || null, hearingId || null, sentByUserId || null]
+  );
+  const { rows: full } = await pool.query(`${NOTIFICATION_SELECT} WHERE nl.id = $1`, [rows[0].id]);
+  return full[0];
+}
+
+async function listNotificationsForFirm(firmId, { caseId, taskId, recipientUserId } = {}) {
+  const values = [firmId];
+  let query = `${NOTIFICATION_SELECT} WHERE nl.firm_id = $1`;
+  if (caseId) { values.push(caseId); query += ` AND nl.case_id = $${values.length}`; }
+  if (taskId) { values.push(taskId); query += ` AND nl.task_id = $${values.length}`; }
+  if (recipientUserId) { values.push(recipientUserId); query += ` AND nl.recipient_user_id = $${values.length}`; }
+  query += ' ORDER BY nl.created_at DESC';
+  const { rows } = await pool.query(query, values);
+  return rows;
 }
 
 const TASK_SELECT = `SELECT tasks.*, cases.case_name,
@@ -2550,6 +2961,32 @@ module.exports = {
   insertHearing,
   updateHearingFields,
   deleteHearingRow,
+  insertMatterAnalysis,
+  getLatestMatterAnalysis,
+  insertDraft,
+  getDraftById,
+  listDraftsForCase,
+  updateDraftFields,
+  insertCourtSyncLog,
+  listCourtSyncLogsForCase,
+  listCasesOnCauseListWatch,
+  searchCasesFullText,
+  searchClientsByName,
+  searchDocumentsFullText,
+  insertLimitationDeadline,
+  getLimitationDeadlineById,
+  listLimitationDeadlinesForFirm,
+  updateLimitationDeadlineFields,
+  deleteLimitationDeadlineRow,
+  setUserTotpSecret,
+  enableUserTotp,
+  disableUserTotp,
+  consumeUserRecoveryCode,
+  insertNotificationLog,
+  listNotificationsForFirm,
+  getCaseStatusBreakdown,
+  getCaseTypeBreakdown,
+  getStaffWorkload,
   getTaskById,
   listTasksForFirm,
   findOpenAutoTaskForHearing,

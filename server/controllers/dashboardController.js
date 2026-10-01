@@ -15,4 +15,17 @@ async function getSummary(req, res, next) {
   }
 }
 
-module.exports = { getSummary };
+/**
+ * GET /api/v1/analytics/management (Phase 6) — firm-level reporting across
+ * cases, billing, and staff workload. PARTNER+ only (see routes/api.js).
+ */
+async function getManagementAnalytics(req, res, next) {
+  try {
+    const analytics = await DashboardService.getManagementAnalytics(req.tenantId);
+    res.json({ success: true, data: analytics });
+  } catch (err) {
+    next(err);
+  }
+}
+
+module.exports = { getSummary, getManagementAnalytics };

@@ -34,6 +34,11 @@ const timeEntryController = require('../controllers/timeEntryController');
 const hearingController = require('../controllers/hearingController');
 const taskController = require('../controllers/taskController');
 const consultationController = require('../controllers/consultationController');
+const matterAnalysisController = require('../controllers/matterAnalysisController');
+const draftController = require('../controllers/draftController');
+const courtSyncController = require('../controllers/courtSyncController');
+const limitationController = require('../controllers/limitationController');
+const notificationController = require('../controllers/notificationController');
 
 // Apply Global Tenant Authentication & User Context
 router.use(authMiddleware);
@@ -151,6 +156,12 @@ router.get('/vault/sidebar-widgets', vaultController.getSidebarWidgets);
 // E. DASHBOARD OVERVIEW
 // ═════════════════════════════════════════════════════════════════════
 router.get('/dashboard/summary', dashboardController.getSummary);
+
+// Management analytics (Phase 6) — firm-level reporting across cases,
+// billing, and staff workload, for firm leadership, not every staff
+// member's own landing page. requireRole('PARTNER') — same floor
+// consultation approve/decline and other leadership-only actions already use.
+router.get('/analytics/management', requireRole('PARTNER'), dashboardController.getManagementAnalytics);
 
 // ═════════════════════════════════════════════════════════════════════
 // F. ACTIVE CASES
@@ -314,31 +325,129 @@ router.delete('/tasks/:id', requireRole('PARALEGAL'), taskController.deleteTask)
 // G2e. CONSULTATION INTAKE (Phase 2)
 // Staff-assisted only — no client-facing intake surface exists yet (a
 // deliberate scope decision; see server/services/consultationService.js).
-// requireRole('PARALEGAL') for the routine intake work (create/edit/
-// upload/bundle/submit), requireRole('PARTNER') for approve/decline — the
-// "lawyer approval screen" the roadmap calls for, same floor case_intake's
-// own activate/decline already uses for the analogous decision — and
-// requireRole('ASSOCIATE') for converting an approved consultation into a
-// real case, matching this app's general case-creation floor.
+// requireRole('INTAKE_STAFF') for the routine intake work (create/edit/
+// upload/bundle/submit) — lowered from PARALEGAL in Phase 6 so the RFP's
+// distinct intake-staff role can do this work without being granted
+// PARALEGAL's other routine-firm-work access (tasks, hearings, time
+// tracking); PARALEGAL+ still passes this check too, since requireRole is
+// a >= check and PARALEGAL ranks above INTAKE_STAFF (see auth.js). Approve/
+// decline stays requireRole('PARTNER') — the "lawyer approval screen" the
+// roadmap calls for, same floor case_intake's own activate/decline already
+// uses — and convert stays requireRole('ASSOCIATE'), matching this app's
+// general case-creation floor; an intake-staff-only booking desk doesn't
+// also get to decide whose matter proceeds.
 // ═════════════════════════════════════════════════════════════════════
-router.get('/consultations/matter-categories', requireRole('PARALEGAL'), consultationController.getMatterCategories);
-router.get('/consultations', requireRole('PARALEGAL'), consultationController.listConsultations);
-router.get('/consultations/:id', requireRole('PARALEGAL'), consultationController.getConsultation);
-router.post('/consultations', requireRole('PARALEGAL'), consultationController.createConsultation);
-router.patch('/consultations/:id', requireRole('PARALEGAL'), consultationController.updateConsultation);
+router.get('/consultations/matter-categories', requireRole('INTAKE_STAFF'), consultationController.getMatterCategories);
+router.get('/consultations', requireRole('INTAKE_STAFF'), consultationController.listConsultations);
+router.get('/consultations/:id', requireRole('INTAKE_STAFF'), consultationController.getConsultation);
+router.post('/consultations', requireRole('INTAKE_STAFF'), consultationController.createConsultation);
+router.patch('/consultations/:id', requireRole('INTAKE_STAFF'), consultationController.updateConsultation);
 router.post(
   '/consultations/:id/documents',
-  requireRole('PARALEGAL'),
+  requireRole('INTAKE_STAFF'),
   upload.single('file'),
   enforceStorageQuota,
   validateAndScanUpload,
   consultationController.addDocument
 );
-router.post('/consultations/:id/bundle', requireRole('PARALEGAL'), consultationController.bundleDocuments);
-router.post('/consultations/:id/submit', requireRole('PARALEGAL'), consultationController.submitConsultation);
+router.post('/consultations/:id/bundle', requireRole('INTAKE_STAFF'), consultationController.bundleDocuments);
+router.post('/consultations/:id/submit', requireRole('INTAKE_STAFF'), consultationController.submitConsultation);
 router.patch('/consultations/:id/approve', requireRole('PARTNER'), consultationController.approveConsultation);
 router.patch('/consultations/:id/decline', requireRole('PARTNER'), consultationController.declineConsultation);
 router.post('/consultations/:id/convert', requireRole('ASSOCIATE'), consultationController.convertConsultation);
+
+// ═════════════════════════════════════════════════════════════════════
+// G2f. MATTER ANALYSIS (Phase 3 — chronology, issue matrix, remedy outline)
+// Extends the Copilot's existing document summarization across an entire
+// matter. Reads use the same PARALEGAL floor as hearings/tasks (routine
+// work); generating a fresh analysis calls out to the AI provider and
+// writes a new row (see matterAnalysisService.js), so it's gated one step
+// higher, at ASSOCIATE, matching the hearing log's own read-vs-structured-
+// update split.
+// :type is constrained inline to the three real analysis types so an
+// unrelated string 404s at the route layer rather than reaching the
+// service's own validation.
+// ═════════════════════════════════════════════════════════════════════
+router.get('/cases/:id/analysis', requireRole('PARALEGAL'), matterAnalysisController.getOverview);
+router.get(
+  '/cases/:id/analysis/:type(chronology|issue_matrix|remedy_outline)',
+  requireRole('PARALEGAL'),
+  matterAnalysisController.getLatest
+);
+router.post(
+  '/cases/:id/analysis/:type(chronology|issue_matrix|remedy_outline)/generate',
+  requireRole('ASSOCIATE'),
+  matterAnalysisController.generate
+);
+
+// ═════════════════════════════════════════════════════════════════════
+// G2g. DRAFTING AUTOMATION (Phase 4 — template-driven drafts, triggered by
+// real dates, never auto-filed)
+// Turns a 'draft_needed' task (Phase 1's reminder engine) into an actual
+// generated draft, built from Phase 3's chronology/issue matrix. Reads and
+// the static template list sit at the same PARALEGAL floor as tasks;
+// generating a draft calls out to the AI provider and writes a new row, so
+// it's gated at ASSOCIATE, matching matter analysis's own read-vs-generate
+// split above. Approve/reject is the human-vetting gate a draft must pass
+// before anyone acts on it — requireRole('PARTNER'), the same "lawyer
+// approval" floor consultation approve/decline already uses, since a
+// generated draft is exactly the kind of AI output the roadmap says must
+// never be auto-filed or sent.
+// ═════════════════════════════════════════════════════════════════════
+router.get('/drafts/templates', requireRole('PARALEGAL'), draftController.listTemplates);
+router.get('/drafts/:id', requireRole('PARALEGAL'), draftController.getDraft);
+router.get('/cases/:id/drafts', requireRole('PARALEGAL'), draftController.listDraftsForCase);
+router.post('/tasks/:id/drafts/generate', requireRole('ASSOCIATE'), draftController.generateFromTask);
+router.patch('/drafts/:id/approve', requireRole('PARTNER'), draftController.approveDraft);
+router.patch('/drafts/:id/reject', requireRole('PARTNER'), draftController.rejectDraft);
+
+// ═════════════════════════════════════════════════════════════════════
+// G2h. COURT DATA SYNC (Phase 5 — Karnataka HC + eCourts)
+// Integrates through a licensed third-party legal-data API via a pluggable
+// adapter (server/services/courtSync/) — never scrapes public HC/eCourts
+// pages directly. Reads and linking/watch-flagging sit at the same
+// PARALEGAL floor as hearings/tasks (routine work); a real sync attempt or
+// a manual-override correction both mutate the case's synced state, so
+// they're gated at ASSOCIATE, matching matter analysis/drafts' own
+// read-vs-write split. There is no PARTNER-only step here: unlike a
+// drafted filing, a synced court status is a factual correction, not
+// something that needs a lawyer's sign-off before anyone can rely on it.
+// ═════════════════════════════════════════════════════════════════════
+router.get('/court-sync/watchlist', requireRole('PARALEGAL'), courtSyncController.listCauseListWatch);
+router.get('/cases/:id/court-sync', requireRole('PARALEGAL'), courtSyncController.getCourtSyncState);
+router.get('/cases/:id/court-sync/logs', requireRole('PARALEGAL'), courtSyncController.listSyncLogs);
+router.patch('/cases/:id/court-sync/link', requireRole('PARALEGAL'), courtSyncController.linkCase);
+router.patch('/cases/:id/court-sync/watch', requireRole('PARALEGAL'), courtSyncController.setCauseListWatch);
+router.post('/cases/:id/court-sync/sync', requireRole('ASSOCIATE'), courtSyncController.syncCase);
+router.post('/cases/:id/court-sync/override', requireRole('ASSOCIATE'), courtSyncController.overrideSync);
+router.post('/cases/:id/court-sync/clear-override', requireRole('ASSOCIATE'), courtSyncController.clearOverride);
+
+// ═════════════════════════════════════════════════════════════════════
+// G2i. LIMITATION WATCH ENGINE (Phase 6)
+// Tracks statute-of-limitations deadlines with a proactive risk flag,
+// computed fresh on every read (see limitationWatchEngine.js) rather than
+// stored. requireRole('PARALEGAL') throughout — same "routine own work,
+// visible firm-wide" floor as tasks/hearings; there is nothing here that
+// needs a lawyer's sign-off the way a drafted filing or a consultation
+// does, only accurate tracking.
+// ═════════════════════════════════════════════════════════════════════
+router.get('/limitation-deadlines', requireRole('PARALEGAL'), limitationController.listDeadlines);
+router.get('/cases/:id/limitation-deadlines', requireRole('PARALEGAL'), limitationController.listDeadlinesForCase);
+router.post('/limitation-deadlines', requireRole('PARALEGAL'), limitationController.createDeadline);
+router.patch('/limitation-deadlines/:id', requireRole('PARALEGAL'), limitationController.updateDeadline);
+router.patch('/limitation-deadlines/:id/resolve', requireRole('PARALEGAL'), limitationController.resolveDeadline);
+router.delete('/limitation-deadlines/:id', requireRole('PARALEGAL'), limitationController.deleteDeadline);
+
+// ═════════════════════════════════════════════════════════════════════
+// G2j. NOTIFICATION CHANNELS (Phase 6)
+// Explicit, staff-triggered sends through a pluggable adapter — see
+// server/services/notifications/. Only a 'log' provider ships (no vendor
+// wired yet), so a send is always recorded but never actually delivered
+// until a real provider is configured. requireRole('PARALEGAL') — same
+// "routine own work" floor as tasks/hearings.
+// ═════════════════════════════════════════════════════════════════════
+router.get('/notifications', requireRole('PARALEGAL'), notificationController.list);
+router.post('/notifications/send', requireRole('PARALEGAL'), notificationController.send);
 
 // ═════════════════════════════════════════════════════════════════════
 // G3. TRUST ACCOUNTING

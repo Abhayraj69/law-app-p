@@ -52,6 +52,36 @@
       <button type="submit" class="btn-primary vault-submit-btn" id="loginSubmitBtn" style="width:100%">Sign In</button>
       <p class="auth-hint">Demo accounts: s.jennings@slf.law · m.ross@slf.law · p.nair@slf.law</p>
     </form>
+
+    <form class="auth-card hidden" id="mfaForm" autocomplete="off">
+      <div class="auth-logo">
+        <div class="logo-icon">
+          <svg viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <rect width="32" height="32" rx="8" fill="url(#authLogoGrad)" />
+            <path d="M16 6L8 12v4l8-4 8 4v-4L16 6z" fill="white" opacity="0.9" />
+            <path d="M10 18v6h4v-4h4v4h4v-6L16 15l-6 3z" fill="white" />
+          </svg>
+        </div>
+        <span class="logo-name">SLF</span>
+      </div>
+      <h2 class="auth-title">Two-Factor Verification</h2>
+      <p class="auth-subtitle">Enter the 6-digit code from your authenticator app.</p>
+
+      <div class="form-group-modal">
+        <label for="mfaCode">Authenticator code</label>
+        <input type="text" id="mfaCode" placeholder="123456" inputmode="numeric" maxlength="6" autocomplete="one-time-code" />
+      </div>
+      <p style="font-size:12px; color:var(--slate-400); margin:-4px 0 10px;">
+        Lost your device? <a href="#" id="mfaUseRecoveryLink">Use a recovery code instead</a>.
+      </p>
+      <div class="form-group-modal hidden" id="mfaRecoveryGroup">
+        <label for="mfaRecoveryCode">Recovery code</label>
+        <input type="text" id="mfaRecoveryCode" placeholder="XXXX-XXXX" autocomplete="off" />
+      </div>
+      <div class="auth-error hidden" id="mfaError"></div>
+      <button type="submit" class="btn-primary vault-submit-btn" id="mfaSubmitBtn" style="width:100%">Verify</button>
+      <p class="auth-hint"><a href="#" id="mfaBackToLoginLink">Back to sign in</a></p>
+    </form>
   </div>
 
   <!-- ══════════════════════════════════════════
@@ -180,6 +210,17 @@
                 </svg>
               </span>
               <span class="nav-text">Trust Accounting</span>
+            </a>
+          </li>
+          <li class="nav-item hidden" data-page="analytics" id="navAnalyticsItem">
+            <a href="#" class="nav-link" id="nav-analytics">
+              <span class="nav-icon">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+                  <path d="M3 3v18h18" />
+                  <path d="M7 15l4-4 3 3 5-6" />
+                </svg>
+              </span>
+              <span class="nav-text">Management Analytics</span>
             </a>
           </li>
         </ul>
@@ -1247,6 +1288,7 @@
 
       <div class="billing-tabs" style="margin-bottom:16px;">
         <button class="tab-btn active" data-settings-tab="team">Team Members</button>
+        <button class="tab-btn" data-settings-tab="security">Security</button>
         <button class="tab-btn hidden" id="settingsAuditTabBtn" data-settings-tab="audit">Audit Log</button>
         <button class="tab-btn hidden" id="settingsStorageTabBtn" data-settings-tab="storage">Storage</button>
       </div>
@@ -1269,6 +1311,49 @@
                 <!-- Rendered dynamically -->
               </tbody>
             </table>
+          </div>
+        </div>
+      </div>
+
+      <!-- SECURITY TAB (self-service — every role can manage their own 2FA) -->
+      <div id="settingsSecurityTab" class="hidden">
+        <div class="panel" style="max-width:520px; padding:20px;">
+          <h3 style="margin:0 0 4px; font-size:15px;">Two-Factor Authentication</h3>
+          <p style="color:var(--slate-400); font-size:13px; margin:0 0 16px;">
+            Require a code from an authenticator app (Google Authenticator, Authy, 1Password, etc.) in addition to your password.
+          </p>
+
+          <div id="mfaStatusView">
+            <div id="mfaDisabledView">
+              <span style="color:var(--slate-400); font-size:13px;">Two-factor authentication is currently <strong>off</strong>.</span>
+              <div style="margin-top:12px;">
+                <button class="btn-primary" id="mfaStartSetupBtn" style="background: var(--gold-500); color: var(--navy-950); font-weight: 600; border: none;">Enable 2FA</button>
+              </div>
+            </div>
+            <div id="mfaEnabledView" class="hidden">
+              <span style="color:#2ECC71; font-size:13px; font-weight:600;">Two-factor authentication is currently ON.</span>
+              <div class="form-group-modal" style="margin-top:12px;">
+                <label for="mfaDisablePassword">Password (required to disable)</label>
+                <input type="password" id="mfaDisablePassword" autocomplete="current-password" />
+              </div>
+              <button class="btn-ghost" id="mfaDisableBtn" style="color:#E74C3C;">Disable 2FA</button>
+            </div>
+          </div>
+
+          <div id="mfaSetupView" class="hidden" style="margin-top:16px; border-top:1px solid rgba(255,255,255,0.08); padding-top:16px;">
+            <p style="font-size:13px;">Scan this into your authenticator app, or enter the secret manually:</p>
+            <div style="font-family:monospace; font-size:13px; word-break:break-all; background:rgba(255,255,255,0.05); padding:8px; border-radius:4px; margin-bottom:12px;" id="mfaSecretDisplay"></div>
+            <div class="form-group-modal">
+              <label for="mfaEnableCode">Enter the 6-digit code to confirm</label>
+              <input type="text" id="mfaEnableCode" inputmode="numeric" maxlength="6" placeholder="123456" />
+            </div>
+            <button class="btn-primary" id="mfaConfirmEnableBtn" style="background: var(--gold-500); color: var(--navy-950); font-weight: 600; border: none;">Confirm & Enable</button>
+          </div>
+
+          <div id="mfaRecoveryCodesView" class="hidden" style="margin-top:16px; border-top:1px solid rgba(255,255,255,0.08); padding-top:16px;">
+            <p style="font-size:13px; color:var(--gold-500);">Save these recovery codes now — each works once, and this is the only time they're shown.</p>
+            <div id="mfaRecoveryCodesList" style="font-family:monospace; font-size:13px; line-height:1.8;"></div>
+            <button class="btn-ghost" id="mfaRecoveryCodesDoneBtn" style="margin-top:12px;">Done</button>
           </div>
         </div>
       </div>
@@ -1674,6 +1759,60 @@
             from a hearing update.</p>
         </div>
       </div>
+
+      <div class="page-header-row" style="margin-top:28px;">
+        <h2 class="cases-page-title" style="font-size:16px;">Cause List Watch</h2>
+      </div>
+      <div class="panel table-panel edge-to-edge">
+        <div class="table-container">
+          <table class="cases-large-table" id="causeListWatchTable">
+            <thead>
+              <tr>
+                <th>Case</th>
+                <th>CNR</th>
+                <th>Court</th>
+                <th>Cause List Date</th>
+                <th>Sync Status</th>
+              </tr>
+            </thead>
+            <tbody id="causeListWatchTableBody">
+              <!-- Rendered Dynamically -->
+            </tbody>
+          </table>
+        </div>
+        <div class="empty-state-container hidden" id="causeListWatchEmptyState">
+          <h3 class="empty-state-title">No cases on watch</h3>
+          <p class="empty-state-description">Flag a case's "Cause list watch" from its case detail to have it
+            appear here once it's due on an upcoming cause list.</p>
+        </div>
+      </div>
+
+      <div class="page-header-row" style="margin-top:28px;">
+        <h2 class="cases-page-title" style="font-size:16px;">Limitation Watch</h2>
+      </div>
+      <div class="panel table-panel edge-to-edge">
+        <div class="table-container">
+          <table class="cases-large-table" id="limitationWatchTable">
+            <thead>
+              <tr>
+                <th>Case</th>
+                <th>Description</th>
+                <th>Limitation Date</th>
+                <th>Risk</th>
+                <th style="width: 100px;">Actions</th>
+              </tr>
+            </thead>
+            <tbody id="limitationWatchTableBody">
+              <!-- Rendered Dynamically -->
+            </tbody>
+          </table>
+        </div>
+        <div class="empty-state-container hidden" id="limitationWatchEmptyState">
+          <h3 class="empty-state-title">No open limitation deadlines</h3>
+          <p class="empty-state-description">Statute-of-limitations deadlines tracked against a case appear here,
+            with a risk flag that rises automatically as the date approaches.</p>
+        </div>
+      </div>
     </main>
 
     <!-- CONSULTATIONS PAGE -->
@@ -1848,6 +1987,60 @@
       </div>
     </main>
 
+    <!-- MANAGEMENT ANALYTICS PAGE (Phase 6, PARTNER+) -->
+    <main class="content hidden" id="analyticsPage">
+      <div class="page-header-row">
+        <h2 class="cases-page-title">Management Analytics</h2>
+      </div>
+
+      <div style="display:grid; grid-template-columns:repeat(3, 1fr); gap:16px; margin-bottom:20px;">
+        <div class="panel" style="padding:16px;">
+          <div style="color:var(--slate-400); font-size:12px; margin-bottom:6px;">Revenue YTD</div>
+          <div style="font-size:22px; font-weight:600;" id="analyticsRevenueYtd">—</div>
+        </div>
+        <div class="panel" style="padding:16px;">
+          <div style="color:var(--slate-400); font-size:12px; margin-bottom:6px;">Overdue Invoices</div>
+          <div style="font-size:22px; font-weight:600;" id="analyticsOverdueCount">—</div>
+        </div>
+        <div class="panel" style="padding:16px;">
+          <div style="color:var(--slate-400); font-size:12px; margin-bottom:6px;">Overdue Amount</div>
+          <div style="font-size:22px; font-weight:600;" id="analyticsOverdueAmount">—</div>
+        </div>
+      </div>
+
+      <div style="display:grid; grid-template-columns:1fr 1fr; gap:20px; margin-bottom:20px;">
+        <div class="panel" style="padding:16px;">
+          <h3 style="margin:0 0 10px; font-size:14px;">Cases by Status</h3>
+          <div id="analyticsCasesByStatus" style="font-size:13px;"></div>
+        </div>
+        <div class="panel" style="padding:16px;">
+          <h3 style="margin:0 0 10px; font-size:14px;">Cases by Type</h3>
+          <div id="analyticsCasesByType" style="font-size:13px;"></div>
+        </div>
+      </div>
+
+      <div class="page-header-row">
+        <h2 class="cases-page-title" style="font-size:16px;">Staff Workload</h2>
+      </div>
+      <div class="panel table-panel edge-to-edge">
+        <div class="table-container">
+          <table class="cases-large-table" id="staffWorkloadTable">
+            <thead>
+              <tr>
+                <th>Staff Member</th>
+                <th>Role</th>
+                <th>Open Tasks</th>
+                <th>Hours This Month</th>
+              </tr>
+            </thead>
+            <tbody id="staffWorkloadTableBody">
+              <!-- Rendered Dynamically -->
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </main>
+
     <!-- NOTIFICATION PANEL -->
     <div class="notification-panel" id="notificationPanel">
       <div class="notif-header">
@@ -1881,9 +2074,54 @@
           <div id="caseDetailDeadlines" style="font-size:13px;"></div>
         </div>
 
-        <div>
+        <div style="margin-bottom:20px;">
           <h4 style="margin:0 0 8px;">Activity</h4>
           <div id="caseDetailActivity" style="font-size:13px; max-height:220px; overflow-y:auto;"></div>
+        </div>
+
+        <div>
+          <h4 style="margin:0 0 12px;">Matter Analysis</h4>
+          <div class="analysis-block" style="margin-bottom:16px;">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
+              <strong style="font-size:13px;">Chronology</strong>
+              <button class="btn-ghost" style="padding:2px 10px; font-size:12px;" data-action="generate-matter-analysis" data-analysis-type="chronology">Generate</button>
+            </div>
+            <div id="caseDetailChronology" style="font-size:13px;"></div>
+          </div>
+          <div class="analysis-block" style="margin-bottom:16px;">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
+              <strong style="font-size:13px;">Issue Matrix</strong>
+              <button class="btn-ghost" style="padding:2px 10px; font-size:12px;" data-action="generate-matter-analysis" data-analysis-type="issue_matrix">Generate</button>
+            </div>
+            <div id="caseDetailIssueMatrix" style="font-size:13px;"></div>
+          </div>
+          <div class="analysis-block">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
+              <strong style="font-size:13px;">Remedy Outline</strong>
+              <button class="btn-ghost" style="padding:2px 10px; font-size:12px;" data-action="generate-matter-analysis" data-analysis-type="remedy_outline">Generate</button>
+            </div>
+            <div id="caseDetailRemedyOutline" style="font-size:13px;"></div>
+          </div>
+        </div>
+
+        <div style="margin-top:20px;">
+          <h4 style="margin:0 0 12px;">Court Sync</h4>
+          <div style="display:flex; gap:8px; margin-bottom:10px;">
+            <input type="text" id="courtSyncCnrInput" placeholder="CNR number" style="flex:1;" />
+            <input type="text" id="courtSyncCourtInput" placeholder="Court name (optional)" style="flex:1;" />
+            <button class="btn-ghost" style="padding:2px 10px; font-size:12px;" data-action="court-sync-link">Link</button>
+          </div>
+          <div id="courtSyncState" style="font-size:13px; margin-bottom:8px;"></div>
+          <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+            <button class="btn-ghost" style="padding:2px 10px; font-size:12px;" data-action="court-sync-now">Sync Now</button>
+            <button class="btn-ghost" style="padding:2px 10px; font-size:12px;" data-action="court-sync-override">Manual Override</button>
+            <button class="btn-ghost hidden" id="courtSyncClearOverrideBtn" style="padding:2px 10px; font-size:12px;" data-action="court-sync-clear-override">Clear Override</button>
+            <label style="font-size:12px; color:var(--slate-400); display:flex; align-items:center; gap:6px; margin-left:auto;">
+              <input type="checkbox" id="courtSyncWatchToggle" data-action="court-sync-toggle-watch" />
+              Cause list watch
+            </label>
+          </div>
+          <div id="courtSyncLogs" style="font-size:12px; color:var(--slate-400); margin-top:10px;"></div>
         </div>
       </div>
     </div>
@@ -2361,6 +2599,31 @@
     </div>
   </div>
 
+  <div class="modal-overlay hidden" id="draftReviewModal">
+    <div class="modal-box">
+      <div class="modal-header">
+        <h3 class="modal-title" id="draftReviewModalTitle">Draft Review</h3>
+        <button class="modal-close-btn" id="draftReviewModalCloseBtn">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div style="color:var(--slate-400); font-size:12px; margin-bottom:12px;">
+          This is a DRAFT for an attorney to review — it is never auto-filed or sent.
+        </div>
+        <div id="draftReviewSections"></div>
+        <div class="form-group-modal" id="draftReviewRejectGroup" style="margin-top:16px;">
+          <label for="draftReviewRejectReason">Rejection reason (required to reject)</label>
+          <textarea id="draftReviewRejectReason" rows="2" placeholder="What needs to change before this is usable?"></textarea>
+        </div>
+      </div>
+      <div class="modal-footer" id="draftReviewFooter">
+        <button type="button" class="btn-ghost" id="draftReviewModalCloseBtn2">Close</button>
+        <button type="button" class="btn-ghost" id="draftReviewRejectBtn" style="color:#E74C3C;">Reject</button>
+        <button type="button" class="btn-primary" id="draftReviewApproveBtn"
+          style="background: var(--gold-500); color: var(--navy-950); font-weight: 600; border: none;">Approve</button>
+      </div>
+    </div>
+  </div>
+
   <div class="modal-overlay hidden" id="consultationModal">
     <div class="modal-box">
       <div class="modal-header">
@@ -2658,6 +2921,7 @@
               <select id="inviteRole" required>
                 <option value="ASSOCIATE">Associate</option>
                 <option value="PARALEGAL">Paralegal</option>
+                <option value="INTAKE_STAFF">Intake Staff</option>
                 <option value="PARTNER">Partner</option>
                 <option value="SENIOR_PARTNER">Senior Partner</option>
                 <option value="ADMIN">Administrator</option>

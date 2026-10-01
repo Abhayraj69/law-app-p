@@ -13,11 +13,23 @@ const { authRateLimiter } = require('../middleware/authRateLimit');
 // same per-IP throttle.
 router.use(authRateLimiter);
 
-// Public — issues a JWT
+// Public — issues a JWT, or an mfa_token challenge if 2FA is enabled
 router.post('/login', authController.login);
+
+// Public — an mfa_token from /login proves only "password was correct" and
+// is useless for anything except this exchange (see
+// authService.issuePendingMfaToken's comment) — no authMiddleware needed
+// or wanted here, the mfa_token itself is the credential being checked.
+router.post('/2fa/verify-login', authController.verifyLogin);
 
 // Requires a valid token — confirms who it belongs to
 router.get('/me', authMiddleware, authController.me);
+
+// Requires a valid token — account-settings side of 2FA (enrollment/
+// disable), as opposed to the login-flow gating above.
+router.post('/2fa/setup', authMiddleware, authController.setup2fa);
+router.post('/2fa/enable', authMiddleware, authController.enable2fa);
+router.post('/2fa/disable', authMiddleware, authController.disable2fa);
 
 // Requires a valid token — revokes it server-side, so the session ends
 // everywhere rather than only being forgotten by one browser. You can only

@@ -29,6 +29,12 @@ const db = require('../db');
 
 const TOKEN_TTL = '12h';
 
+// Short-lived on purpose: this token proves only "password was correct,"
+// never "this session is authenticated" — resolveUserFromToken refuses any
+// token carrying `mfa_pending`, so it is useless for anything except being
+// handed straight back to POST /api/v1/auth/2fa/verify-login.
+const MFA_PENDING_TOKEN_TTL = '5m';
+
 // A fixed dummy hash to compare against when no user matches, so that
 // "unknown email" and "wrong password" take the same amount of time and
 // an attacker cannot use response timing to enumerate accounts.
@@ -74,6 +80,34 @@ function issueToken(user) {
     getJwtSecret(),
     { expiresIn: TOKEN_TTL }
   );
+}
+
+/**
+ * Issued after a correct password when the account has 2FA enabled,
+ * instead of a real session token — see MFA_PENDING_TOKEN_TTL's comment.
+ */
+function issuePendingMfaToken(user) {
+  return jwt.sign(
+    { sub: user.id, firm_id: user.firm_id, mfa_pending: true },
+    getJwtSecret(),
+    { expiresIn: MFA_PENDING_TOKEN_TTL }
+  );
+}
+
+/**
+ * Verifies an mfa_pending token and returns its claims.
+ * @throws Error with .status = 401 if missing/invalid/expired/not-pending
+ */
+function resolvePendingMfaToken(token) {
+  if (!token) throw unauthorized('2FA challenge expired or missing. Please log in again.');
+  let payload;
+  try {
+    payload = jwt.verify(token, getJwtSecret());
+  } catch {
+    throw unauthorized('2FA challenge expired or invalid. Please log in again.');
+  }
+  if (!payload.mfa_pending) throw unauthorized('Not a valid 2FA challenge token.');
+  return payload;
 }
 
 function unauthorized(message) {
@@ -148,6 +182,13 @@ async function resolveUserFromToken(token) {
     throw unauthorized('Invalid or expired session. Please log in again.');
   }
 
+  // A 2FA challenge token proves only "password was correct" — see
+  // issuePendingMfaToken's comment. It must never work as a real session
+  // token even if a client tries to pass it as one directly.
+  if (payload.mfa_pending) {
+    throw unauthorized('2FA verification required to complete sign-in.');
+  }
+
   // Checked before the user read: a revoked token should be refused even
   // if the account behind it is perfectly healthy.
   if (await db.isTokenRevoked(payload.jti)) {
@@ -180,6 +221,8 @@ function toPublicUser(user) {
 module.exports = {
   verifyCredentials,
   issueToken,
+  issuePendingMfaToken,
+  resolvePendingMfaToken,
   resolveUserFromToken,
   revokeToken,
   revokeAllSessions,

@@ -146,6 +146,47 @@ class DashboardService {
       } : null
     };
   }
+
+  /**
+   * GET /api/v1/analytics/management (Phase 6) — firm-level reporting
+   * across cases, billing, and staff workload. Deliberately a separate
+   * method/route from getSummary/dashboard-summary rather than folded into
+   * it: this is a leadership view (gated PARTNER+ at the route level, see
+   * server/routes/api.js), while the dashboard summary above is every
+   * staff member's own landing page. Reuses this file's existing
+   * "one aggregating request, several widgets" convention rather than a
+   * parallel analytics service.
+   */
+  static async getManagementAnalytics(tenantId) {
+    const [caseStatus, caseType, billingData, invoiceStats, workload] = await Promise.all([
+      db.getCaseStatusBreakdown(tenantId),
+      db.getCaseTypeBreakdown(tenantId),
+      db.getMonthlyBillingTotals(tenantId),
+      db.getInvoiceStats(tenantId),
+      db.getStaffWorkload(tenantId)
+    ]);
+
+    return {
+      cases_by_status: caseStatus.map(r => ({ status: r.status, count: r.count })),
+      cases_by_type: caseType.map(r => ({ case_type: r.case_type, count: r.count })),
+      billing_chart: billingData.map(b => ({ month: b.month, value: formatCurrencyCents(b.value) })),
+      billing: {
+        revenue_ytd: formatCurrencyCents(invoiceStats.revenue_ytd_cents),
+        overdue_invoices_count: invoiceStats.overdue_count,
+        overdue_invoices_amount: formatCurrencyCents(invoiceStats.overdue_cents)
+      },
+      staff_workload: workload.map(w => ({
+        user_id: w.id,
+        full_name: w.full_name,
+        role: w.role,
+        open_tasks: w.open_tasks,
+        // Stored in minutes (time_entries.minutes); rounded to one decimal
+        // hour for a reporting view, the same formatCurrencyCents-style
+        // "store precisely, present rounded" split this file already uses.
+        hours_this_month: Math.round((w.minutes_this_month / 60) * 10) / 10
+      }))
+    };
+  }
 }
 
 module.exports = DashboardService;
