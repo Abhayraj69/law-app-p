@@ -20,6 +20,7 @@
  * recognize() call, never shared across calls or requests.
  */
 
+const path = require('node:path');
 const baseLogger = require('../../../utils/logger');
 
 function getOcrTimeoutMs() {
@@ -50,7 +51,18 @@ module.exports = {
    */
   async recognizeImage(buffer, { log = baseLogger, timeoutMs = getOcrTimeoutMs() } = {}) {
     const { createWorker } = require('tesseract.js');
-    const worker = await createWorker('eng');
+    // Without an explicit langPath, tesseract.js downloads eng.traineddata
+    // from a public CDN on first use and caches it in the working directory
+    // — which fails outright behind a network that blocks outbound traffic,
+    // and re-downloads on every restart in a container where that directory
+    // is discarded. Vendoring the file into the image (see Dockerfile) and
+    // pointing at it here makes OCR work fully offline.
+    const worker = await createWorker('eng', undefined, {
+      langPath: process.env.TESSERACT_LANG_PATH
+        || path.join(__dirname, '..', '..', '..', '..', 'vendor', 'tessdata'),
+      cachePath: process.env.TESSERACT_CACHE_PATH || '/tmp/tesseract',
+      gzip: false
+    });
     try {
       const { data } = await withTimeout(worker.recognize(buffer), timeoutMs, 'OCR');
       return { text: data.text || '', confidence: typeof data.confidence === 'number' ? data.confidence : null };
