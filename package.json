@@ -3,6 +3,9 @@
   "version": "1.0.0",
   "description": "Enterprise Legal Practice Management Document Vault Systems & API",
   "main": "server/server.js",
+  "engines": {
+    "node": ">=20 <23"
+  },
   "scripts": {
     "start": "node server/server.js",
     "dev": "node server/server.js",
@@ -12,11 +15,14 @@
     "test": "node --test server/test/*.test.js"
   },
   "dependencies": {
+    "@acpr/rate-limit-postgresql": "^1.4.1",
     "@anthropic-ai/sdk": "^0.126.0",
     "@aws-sdk/client-kms": "^3.1130.0",
+    "@aws-sdk/client-s3": "^3.1138.0",
     "@napi-rs/canvas": "^1.0.9",
     "@openrouter/sdk": "^1.2.84",
     "bcryptjs": "^3.0.3",
+    "cookie-parser": "^1.4.7",
     "cors": "^2.8.5",
     "diff": "^9.0.0",
     "express": "^4.19.2",

@@ -6,3 +6,7 @@ npm-debug.log
 .gitignore
 *.md
 .github
+storage
+server/test
+docs
+*.pdf

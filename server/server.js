@@ -5,6 +5,7 @@ require('./env');
 const express = require('express');
 const path = require('path');
 const cors = require('cors');
+const cookieParser = require('cookie-parser');
 const apiRoutes = require('./routes/api');
 const authRoutes = require('./routes/auth');
 const healthController = require('./controllers/healthController');
@@ -12,13 +13,20 @@ const healthController = require('./controllers/healthController');
 const logger = require('./utils/logger');
 const requestContext = require('./middleware/requestContext');
 const { securityHeaders } = require('./middleware/securityHeaders');
-const { checkConnection } = require('./db/pool');
+const { pool, checkConnection } = require('./db/pool');
 const { runMigrations } = require('./db/migrate');
 const { checkClamAvRequirement } = require('./middleware/securityScanner');
 const { checkMessageEncryptionRequirement } = require('./services/encryption/messageEncryptionService');
+const { validateProductionConfig } = require('./config/validateProductionConfig');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+
+// Behind a load balancer or ingress, req.ip is the proxy's address unless
+// Express is told how many proxies to trust. express-rate-limit then buckets
+// every caller together under that one address. Set this to the exact number
+// of proxies in front of the app.
+app.set('trust proxy', Number(process.env.TRUST_PROXY_HOPS || 0));
 
 // ── Request context ────────────────────────────────────────────────────────
 // Mounted before absolutely everything else — including security headers —
@@ -58,8 +66,19 @@ app.use(cors({
   credentials: true
 }));
 
-app.use(express.json({ limit: '50mb' }));
-app.use(express.urlencoded({ extended: true, limit: '50mb' }));
+// Parses the incoming Cookie header into req.cookies — required for
+// authMiddleware to read the HttpOnly session cookie (see
+// server/utils/sessionCookie.js). No secret needed: the cookie's value is
+// itself a signed JWT, so it's self-verifying and doesn't need cookie-
+// parser's own signing layer on top.
+app.use(cookieParser());
+
+// File uploads go through multer as multipart, not JSON, so nothing
+// legitimately posts a JSON body anywhere near the old 50MB limit — that
+// was a free memory-exhaustion surface. The Copilot chat history is the
+// only plausible large-ish JSON payload and is far below 1MB.
+app.use(express.json({ limit: process.env.JSON_BODY_LIMIT || '1mb' }));
+app.use(express.urlencoded({ extended: true, limit: process.env.JSON_BODY_LIMIT || '1mb' }));
 
 // Static frontend file serving
 app.use(express.static(path.join(__dirname, '..')));
@@ -75,7 +94,27 @@ app.use('/api/v1/auth', authRoutes);
 // API v1 Router Mount (requires a valid JWT — see server/middleware/auth.js)
 app.use('/api/v1', apiRoutes);
 
-// Global Error Handler
+// The client portal is a separate static page/app from the staff SPA
+// (see client-portal.html/.js) — routed explicitly here, before the staff
+// catch-all below, so a clean `/portal` URL resolves to it. Access control
+// is still enforced client-side (redirects a non-CLIENT/unauthenticated
+// visitor to `/`) and, more importantly, server-side on every API call
+// this page makes — this route just serves the static shell.
+app.get('/portal', (req, res) => {
+  res.sendFile(path.join(__dirname, '..', 'client-portal.html'));
+});
+
+// Fallback index.html for Single-Page Routing
+app.get('*', (req, res) => {
+  res.sendFile(path.join(__dirname, '..', 'index.html'));
+});
+
+// Global Error Handler — must be mounted after every route, including the
+// /portal and catch-all page routes above. Express only routes an error to
+// handlers registered after the failing handler, so an error thrown while
+// serving either page would otherwise bypass this and fall through to
+// Express's default handler, which returns a bare stack-free 500 with no
+// request id and no log line.
 app.use((err, req, res, next) => {
   // req.log is always present (server/middleware/requestContext.js is the
   // very first thing mounted), so even an error thrown before
@@ -107,26 +146,18 @@ app.use((err, req, res, next) => {
   });
 });
 
-// The client portal is a separate static page/app from the staff SPA
-// (see client-portal.html/.js) — routed explicitly here, before the staff
-// catch-all below, so a clean `/portal` URL resolves to it. Access control
-// is still enforced client-side (redirects a non-CLIENT/unauthenticated
-// visitor to `/`) and, more importantly, server-side on every API call
-// this page makes — this route just serves the static shell.
-app.get('/portal', (req, res) => {
-  res.sendFile(path.join(__dirname, '..', 'client-portal.html'));
-});
-
-// Fallback index.html for Single-Page Routing
-app.get('*', (req, res) => {
-  res.sendFile(path.join(__dirname, '..', 'index.html'));
-});
-
 // ── Database boot check ──────────────────────────────────────────────────
 // Fail fast and loud if Postgres isn't reachable or the schema can't be
 // applied, rather than starting an API that will error on the first
 // request that touches the database.
 async function start() {
+  try {
+    validateProductionConfig();
+  } catch (err) {
+    logger.error('FATAL: invalid production configuration.', { context: 'CONFIG', error: err.message });
+    process.exit(1);
+  }
+
   try {
     await checkConnection();
     logger.info('Connected to PostgreSQL.', { context: 'DB' });
@@ -177,11 +208,35 @@ async function start() {
     process.exit(1);
   }
 
-  app.listen(PORT, () => {
+  const server = app.listen(PORT, () => {
     logger.info('SLF Practice Management Document Vault API Running', {
       context: 'SERVER', port: PORT, url: `http://localhost:${PORT}`
     });
   });
+
+  // Every container orchestrator sends SIGTERM before stopping a container.
+  // Node's default behaviour is to exit immediately, cutting off in-flight
+  // requests and truncating an upload mid-write. Stop accepting new
+  // connections, let in-flight ones drain, then close the DB pool and exit
+  // cleanly — but never hang forever if a connection refuses to drain.
+  function shutdown(signal) {
+    logger.info('Shutting down: refusing new connections, draining in-flight requests.',
+      { context: 'SERVER', signal });
+    server.close(async () => {
+      try { await pool.end(); } catch (err) {
+        logger.error('Error closing the database pool', { context: 'SERVER', error: err.message });
+      }
+      process.exit(0);
+    });
+    setTimeout(() => {
+      logger.error('Forced exit: drain timeout elapsed.', { context: 'SERVER' });
+      process.exit(1);
+    }, Number(process.env.SHUTDOWN_TIMEOUT_MS || 15000)).unref();
+  }
+
+  for (const signal of ['SIGTERM', 'SIGINT']) {
+    process.on(signal, () => shutdown(signal));
+  }
 }
 
 if (require.main === module) {
